@@ -382,6 +382,53 @@ impl Store {
         Ok(count as u32)
     }
 
+    /// UIDs currently cached for a folder, used to compute incremental ranges
+    /// and to detect messages that disappeared from the server.
+    pub fn message_uids(&self, folder: FolderId) -> Result<std::collections::HashSet<u32>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT uid FROM messages WHERE folder_id = ?1")?;
+        let rows = stmt.query_map(params![folder.0], |row| row.get::<_, u32>(0))?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Error::from)
+    }
+
+    /// Remove every cached message of a folder, for example after its
+    /// UIDVALIDITY changed and the old UIDs became meaningless.
+    pub fn clear_folder_messages(&self, folder: FolderId) -> Result<u32> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM messages_fts WHERE rowid IN (
+                 SELECT id FROM messages WHERE folder_id = ?1)",
+            params![folder.0],
+        )?;
+        let removed = tx.execute(
+            "DELETE FROM messages WHERE folder_id = ?1",
+            params![folder.0],
+        )?;
+        tx.commit()?;
+        Ok(removed as u32)
+    }
+
+    /// Apply flag updates for many messages in one transaction. UIDs that are
+    /// no longer cached are ignored.
+    pub fn set_flags_many(&self, folder: FolderId, updates: &[(u32, Vec<String>)]) -> Result<u32> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let mut changed = 0u32;
+        {
+            let mut stmt =
+                tx.prepare("UPDATE messages SET flags = ?3 WHERE folder_id = ?1 AND uid = ?2")?;
+            for (uid, flags) in updates {
+                changed += stmt.execute(params![folder.0, uid, flags.join(" ")])? as u32;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     pub fn set_flags(&self, folder: FolderId, uid: u32, flags: &[String]) -> Result<bool> {
         let conn = self.lock()?;
         let changed = conn.execute(
@@ -623,6 +670,17 @@ impl Store {
     pub fn delete_outbox(&self, id: i64) -> Result<bool> {
         let conn = self.lock()?;
         Ok(conn.execute("DELETE FROM outbox WHERE id = ?1", params![id])? > 0)
+    }
+
+    /// A crash can leave entries in `sending`; treat them as queued again so
+    /// they are retried after a restart.
+    pub fn reset_outbox_sending(&self) -> Result<u32> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE outbox SET state = 'queued', updated_at = ?1 WHERE state = 'sending'",
+            params![crate::now_unix()],
+        )?;
+        Ok(changed as u32)
     }
 
     pub fn outbox_len(&self) -> Result<u32> {

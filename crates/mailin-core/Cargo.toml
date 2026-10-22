@@ -13,13 +13,28 @@ default = ["keyring"]
 keyring = ["dep:keyring"]
 
 [dependencies]
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
 directories.workspace = true
+futures-util = "0.3"
 keyring = { workspace = true, optional = true }
+lettre = { version = "0.11", default-features = false, features = [
+  "builder",
+  "hostname",
+  "smtp-transport",
+  "tokio1",
+  "tokio1-rustls-tls",
+  "ring",
+  "rustls-platform-verifier",
+] }
+mail-parser = { version = "0.11", features = ["full_encoding"] }
 rusqlite.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
+rustls-platform-verifier = "0.7"
 serde.workspace = true
 serde_json = "1"
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["net", "sync"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true

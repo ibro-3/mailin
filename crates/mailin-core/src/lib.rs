@@ -16,18 +16,24 @@ pub mod account;
 pub mod client;
 pub mod config;
 pub mod credentials;
+pub mod engine;
 pub mod error;
+mod imap;
 pub mod model;
+mod smtp;
 pub mod store;
+mod sync;
+mod tls;
 
 pub use account::{Account, AccountId, AccountSyncSettings, Security, ServerSettings};
 pub use client::{Event, Mailin};
 pub use config::{Config, Paths, SyncPreferences, Theme, UiPreferences};
 pub use credentials::{CredentialsStore, MemoryCredentials};
+pub use engine::Engine;
 pub use error::{Error, Result};
 pub use model::{
     AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader, MessageId,
-    NewMessage, OutboxEntry, OutboxState, UpsertedMessage,
+    NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, UpsertedMessage,
 };
 pub use store::{FolderUpsert, Store};
 

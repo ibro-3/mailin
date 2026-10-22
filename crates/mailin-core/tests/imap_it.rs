@@ -1,15 +1,62 @@
 //! Integration harness against GreenMail (see `docker-compose.it.yml`).
 //!
-//! These tests are ignored by default because they need the container. The
-//! IMAP/SMTP client lands in milestone 2; for now the harness proves that CI
-//! can reach a real server and that credentials are configured as expected.
+//! These tests are ignored by default because they need the container:
+//!
+//! ```text
+//! cargo xtask it-up
+//! cargo test -p mailin-core --test imap_it -- --ignored
+//! cargo xtask it-down
+//! ```
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use mailin_core::{
+    Account, AccountId, Engine, Mailin, MemoryCredentials, MessageHeader, OutgoingEnvelope,
+    Security, ServerSettings, Store,
+};
+
+const USER: &str = "ada@example.com";
+const PASSWORD: &str = "correct-horse";
+const SUBJECT: &str = "Mailin integration test";
 
 fn addr(variable: &str, default: &str) -> String {
     std::env::var(variable).unwrap_or_else(|_| default.to_owned())
+}
+
+fn host_and_port(value: &str) -> (String, u16) {
+    let (host, port) = value.rsplit_once(':').expect("host:port");
+    (host.to_owned(), port.parse().expect("port number"))
+}
+
+fn client() -> (Arc<Store>, Arc<Mailin>) {
+    let store = Arc::new(Store::open_in_memory().expect("in-memory store"));
+    let mailin = Arc::new(Mailin::with_parts(
+        store.clone(),
+        Arc::new(MemoryCredentials::new()),
+    ));
+    (store, mailin)
+}
+
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+fn find_inbox(mailin: &Mailin, account: &AccountId) -> Option<Vec<MessageHeader>> {
+    let folders = mailin.list_folders(account).ok()?;
+    let inbox = folders
+        .into_iter()
+        .find(|folder| folder.role == mailin_core::FolderRole::Inbox)?;
+    mailin.list_messages(inbox.id, 0, 100).ok()
 }
 
 #[test]
@@ -30,7 +77,7 @@ fn greenmail_speaks_imap() {
     );
 
     stream
-        .write_all(b"a1 LOGIN ada correct-horse\r\n")
+        .write_all(format!("a1 LOGIN {USER} {PASSWORD}\r\n").as_bytes())
         .expect("login");
     let mut response = String::new();
     loop {
@@ -68,4 +115,115 @@ fn greenmail_speaks_smtp() {
         }
     }
     stream.write_all(b"QUIT\r\n").expect("quit");
+}
+
+#[test]
+#[ignore = "requires GreenMail: cargo xtask it-up"]
+fn sync_send_and_fetch_body_round_trip() {
+    let (imap_host, imap_port) = host_and_port(&addr("MAILIN_IT_IMAP_ADDR", "127.0.0.1:3143"));
+    let (smtp_host, smtp_port) = host_and_port(&addr("MAILIN_IT_SMTP_ADDR", "127.0.0.1:3025"));
+
+    let (store, mailin) = client();
+    let account = Account::new(
+        "Ada",
+        USER,
+        ServerSettings {
+            host: imap_host,
+            port: imap_port,
+            security: Security::None,
+            username: USER.to_owned(),
+        },
+        ServerSettings {
+            host: smtp_host,
+            port: smtp_port,
+            security: Security::None,
+            username: USER.to_owned(),
+        },
+    );
+    mailin
+        .save_account(&account, Some(PASSWORD))
+        .expect("save account");
+
+    let engine = Engine::start(mailin.clone()).expect("start engine");
+
+    let raw = format!(
+        "From: Ada <{USER}>\r\n\
+         To: Ada <{USER}>\r\n\
+         Subject: {SUBJECT}\r\n\
+         Date: Tue, 1 Jul 2025 10:30:00 +0000\r\n\
+         Message-ID: <integration-{}@mailin.test>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         hello from the integration test\r\n",
+        std::process::id()
+    );
+    engine
+        .queue_and_send(
+            account.id,
+            raw.into_bytes(),
+            OutgoingEnvelope {
+                from: USER.to_owned(),
+                to: vec![USER.to_owned()],
+                ..OutgoingEnvelope::default()
+            },
+        )
+        .expect("queue outgoing message");
+
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            store.outbox_len().unwrap_or(1) == 0
+        }),
+        "the outgoing message was not accepted by SMTP"
+    );
+
+    engine.sync_account(account.id);
+
+    let message = {
+        let mut found = None;
+        let appeared = wait_until(Duration::from_secs(60), || {
+            found = find_inbox(&mailin, &account.id)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|message| message.subject == SUBJECT);
+            found.is_some()
+        });
+        assert!(appeared, "the message did not show up in the inbox");
+        found.expect("message")
+    };
+
+    engine.fetch_body(message.id);
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            mailin
+                .message(message.id)
+                .ok()
+                .flatten()
+                .is_some_and(|message| message.body_fetched)
+        }),
+        "the body was not fetched"
+    );
+    let (text, _) = mailin
+        .message_body(message.id)
+        .expect("read body")
+        .expect("stored body");
+    assert!(
+        text.unwrap_or_default()
+            .contains("hello from the integration test"),
+        "unexpected body"
+    );
+
+    engine.set_flags(message.id, vec!["\\Seen".to_owned()], Vec::new());
+    assert!(
+        wait_until(Duration::from_secs(60), || {
+            mailin
+                .message(message.id)
+                .ok()
+                .flatten()
+                .is_some_and(|message| message.is_seen())
+        }),
+        "the \\Seen flag was not applied"
+    );
+
+    engine.stop();
 }

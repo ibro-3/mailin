@@ -8,9 +8,10 @@ A native desktop email client with one shared Rust core and two native front-end
 Mailin speaks IMAP and SMTP, keeps a local SQLite cache for offline reading, and
 never stores passwords outside the OS keyring.
 
-> **Status:** early. Milestones 0–1 are done: workspace, CI, configuration,
-> credential storage, SQLite schema, full text search and the outbox. IMAP/SMTP
-> synchronization and both user interfaces are next (see the roadmap below).
+> **Status:** early. Milestones 0–2 are done: workspace, CI, configuration,
+> credential storage, SQLite schema, full text search, outbox and the IMAP/SMTP
+> engine (folder discovery, incremental sync, IDLE, sending). Both user
+> interfaces are next (see the roadmap below).
 
 ## Layout
 
@@ -81,7 +82,7 @@ and config file are created with `0600` permissions on Unix.
 |---|---|
 | 0 | Workspace, CI, docs ✅ |
 | 1 | Config, credentials, SQLite schema, search, outbox ✅ |
-| 2 | IMAP/SMTP engine: folder discovery, incremental sync, IDLE, send |
+| 2 | IMAP/SMTP engine: folder discovery, incremental sync, IDLE, send ✅ |
 | 3 | GTK shell: three-pane window, account wizard, reader |
 | 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak |
 | 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 |

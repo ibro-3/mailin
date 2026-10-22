@@ -539,3 +539,64 @@ fn paths_derive_database_location() {
     paths.ensure().expect("ensure");
     assert!(paths.database_file().parent().expect("parent").is_dir());
 }
+
+#[test]
+fn sync_helpers_track_uids_flags_and_clear_a_folder() {
+    use std::collections::HashSet;
+
+    let (store, account) = store_with_account();
+    let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);
+    for uid in 1..=3 {
+        store
+            .upsert_message(&message(inbox, uid, "sync helpers"))
+            .expect("insert");
+    }
+    assert_eq!(
+        store.message_uids(inbox).expect("uids"),
+        HashSet::from([1, 2, 3])
+    );
+
+    let changed = store
+        .set_flags_many(
+            inbox,
+            &[
+                (1, vec!["\\Seen".to_owned()]),
+                (99, vec!["\\Flagged".to_owned()]),
+            ],
+        )
+        .expect("flags");
+    assert_eq!(changed, 1, "unknown UIDs must be ignored");
+    assert!(
+        store
+            .message_by_uid(inbox, 1)
+            .expect("message")
+            .expect("present")
+            .is_seen()
+    );
+
+    assert_eq!(store.clear_folder_messages(inbox).expect("clear"), 3);
+    assert_eq!(store.count_messages(inbox).expect("count"), 0);
+    assert!(
+        store
+            .search(&account.id, "sync helpers", 10)
+            .expect("search")
+            .is_empty(),
+        "clearing a folder must clear its index entries"
+    );
+}
+
+#[test]
+fn interrupted_outbox_sends_are_queued_again() {
+    let (store, account) = store_with_account();
+    let id = store
+        .enqueue_outbox(&account.id, b"raw", "{}")
+        .expect("enqueue");
+    store
+        .set_outbox_state(id, OutboxState::Sending, None)
+        .expect("sending");
+
+    assert_eq!(store.reset_outbox_sending().expect("reset"), 1);
+    let entry = store.next_queued_outbox().expect("next").expect("present");
+    assert_eq!(entry.state, OutboxState::Queued);
+    assert_eq!(entry.attempts, 0);
+}

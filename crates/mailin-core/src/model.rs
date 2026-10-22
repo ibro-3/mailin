@@ -266,7 +266,8 @@ pub struct UpsertedMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentMeta {
-    /// MIME part path such as `1.2`.
+    /// Identifier of the MIME part inside its message, unique per message.
+    /// Attachment downloads will map this back to a part in a later milestone.
     pub part_id: String,
     pub filename: Option<String>,
     pub mime_type: String,
@@ -317,4 +318,49 @@ pub struct OutboxEntry {
     pub last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// SMTP envelope stored alongside a queued message.
+///
+/// The composer stores it explicitly instead of letting the SMTP layer read the
+/// headers: Bcc recipients must receive the message without a `Bcc` header
+/// leaking to everybody else.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OutgoingEnvelope {
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+}
+
+impl OutgoingEnvelope {
+    pub fn recipients(&self) -> Vec<&str> {
+        self.to
+            .iter()
+            .chain(self.cc.iter())
+            .chain(self.bcc.iter())
+            .map(String::as_str)
+            .collect()
+    }
+
+    pub fn validate(&self) -> crate::error::Result<()> {
+        if self.from.trim().is_empty() {
+            return Err(crate::error::Error::Protocol(
+                "outgoing message has no sender".into(),
+            ));
+        }
+        let recipients = self.recipients();
+        if recipients.is_empty() {
+            return Err(crate::error::Error::Protocol(
+                "outgoing message has no recipients".into(),
+            ));
+        }
+        if recipients.iter().any(|address| address.trim().is_empty()) {
+            return Err(crate::error::Error::Protocol(
+                "outgoing message has an empty recipient address".into(),
+            ));
+        }
+        Ok(())
+    }
 }

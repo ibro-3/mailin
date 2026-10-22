@@ -29,6 +29,18 @@ pub enum Error {
     #[error("credentials error: {0}")]
     Credentials(String),
 
+    #[error("IMAP error: {0}")]
+    Imap(String),
+
+    #[error("SMTP error: {0}")]
+    Smtp(String),
+
+    #[error("TLS error: {0}")]
+    Tls(String),
+
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
     #[error("internal store lock is poisoned")]
     LockPoisoned,
 }

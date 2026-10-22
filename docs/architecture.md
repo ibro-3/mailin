@@ -83,37 +83,65 @@ operator injection.
 
 ## Synchronization design (milestone 2)
 
-Per account there is one supervised worker; folder work is bounded (≤4 in
-flight). For each folder:
+Each account has one supervised worker with one IMAP connection. Commands,
+`IDLE` wake-ups and periodic polls are serialized through that connection, so
+the selected mailbox and UIDVALIDITY cannot be changed under another operation.
+Commands for an account that is reconnecting are queued and replayed.
+
+On connect the worker runs `LIST`, upserts the folders (roles come from
+`SPECIAL-USE` with a name fallback) and prunes folders the server no longer
+reports.
+
+A **full sync** of a folder:
 
 1. `SELECT` the mailbox and read `UIDVALIDITY`, `UIDNEXT`, `HIGHESTMODSEQ`.
-2. If `UIDVALIDITY` changed, discard the folder's cached messages and start over
-   — UIDs are meaningless under a new validity.
-3. Otherwise fetch `UID > last_uid` with `ENVELOPE`, `FLAGS`, `INTERNALDATE`,
-   `RFC822.SIZE` and `BODYSTRUCTURE`, and persist the page in one transaction.
-4. If the server advertises CONDSTORE, fetch flag changes with
-   `CHANGEDSINCE <highest_modseq>` instead of refetching flags for every UID.
-5. Watch the inbox and the open folder with `IDLE`; fall back to polling every
-   `poll_interval_secs` when IDLE is unavailable or the connection drops.
+2. If `UIDVALIDITY` changed, discard the folder's cached messages and start
+   over — UIDs are meaningless under a new validity.
+3. `UID SEARCH ALL`; fetch headers for UIDs missing locally in chunks of 50 with
+   `BODY.PEEK[HEADER]`, `FLAGS`, `INTERNALDATE` and `RFC822.SIZE`, and persist
+   each chunk in one transaction. Headers are decoded with `mail-parser`, so
+   RFC 2047 subjects and address lists are stored in readable form.
+4. Delete cached messages whose UID disappeared on the server.
+5. Refresh flags for every message (skipped above 50 000 messages to bound the
+   response; new messages still carry their flags).
+6. Persist the new cursor and publish `MessagesChanged`/`FoldersChanged`.
 
-Bodies are fetched with `BODY.PEEK[]` when a message is opened (or eagerly when
-`sync.body_sync = "eager"`) and cached; a body is never fetched twice.
+An **incremental sync** is the cheap path: `UID SEARCH UID <max_cached + 1>:*`,
+filter off the range quirk, and fetch headers only for the new UIDs. It runs on
+every IDLE wake-up and every poll tick.
 
-Reconnects use exponential backoff with jitter. Every network operation is
-cancellable, so disabling an account or quitting the app does not wait for a
-timeout.
+`IDLE` watches the INBOX when the server advertises it; otherwise the worker
+polls every `poll_interval_secs`. A full sync of the INBOX runs every ten
+minutes to notice deletions and flag edits made by other clients.
+
+`SELECT` uses the CONDSTORE variant when available, which makes
+`HIGHESTMODSEQ` visible; `CHANGEDSINCE`-based flag deltas are a follow-up to the
+wholesale refresh above. `account.sync.folder_allowlist` limits which folders are
+synchronized.
+
+Bodies are fetched with `BODY.PEEK[]` when a message is opened and cached; a body
+is never fetched twice. Attachments are recorded as metadata (name, MIME type,
+size); their bytes stay on the server until a later milestone adds downloads.
+
+Reconnects use exponential backoff (5 s to 5 min) and keep at most one
+connection per account. `Engine::stop` interrupts IDLE and shuts the runtime
+down with a short grace period.
 
 ### Sending
 
 Compose builds an RFC 5322 message, stores it in `outbox`, and the sender worker:
 
-1. claims the oldest queued entry,
+1. claims the oldest queued entry and marks it `sending`,
 2. submits it over SMTP (implicit TLS or STARTTLS, `lettre` with rustls),
-3. appends a copy to the Sent folder,
-4. marks the entry sent, or records the error and retries up to five times.
+3. marks the entry `sent` as soon as the server accepted it,
+4. appends a copy to the Sent folder as a best-effort follow-up, so a server
+   without a usable Sent folder cannot cause a second submission.
 
-The outbox survives restarts, so a crash or network outage cannot lose a draft
-that the user already "sent".
+`Bcc` recipients come from the stored envelope JSON, not from the headers, so a
+`Bcc` header never leaks to the other recipients.
+
+The outbox survives restarts, so a crash or network outage cannot lose a message
+that the user already "sent". Failed entries retry up to five times.
 
 ## Threading and UI integration
 
