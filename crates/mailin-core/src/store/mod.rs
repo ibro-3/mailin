@@ -651,6 +651,20 @@ impl Store {
         .map_err(Error::from)
     }
 
+    /// One outbox entry by id, for send-status displays and diagnostics.
+    pub fn outbox_entry(&self, id: i64) -> Result<Option<OutboxEntry>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, account_id, raw, envelope_json, state, attempts, last_error, created_at, updated_at
+             FROM outbox
+             WHERE id = ?1",
+            params![id],
+            map_outbox,
+        )
+        .optional()
+        .map_err(Error::from)
+    }
+
     pub fn set_outbox_state(
         &self,
         id: i64,

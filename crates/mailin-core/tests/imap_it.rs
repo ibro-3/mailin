@@ -18,7 +18,8 @@ use mailin_core::{
     Security, ServerSettings, Store,
 };
 
-const USER: &str = "ada@example.com";
+const ADDRESS: &str = "ada@example.com";
+const LOGIN: &str = "ada";
 const PASSWORD: &str = "correct-horse";
 const SUBJECT: &str = "Mailin integration test";
 
@@ -77,7 +78,7 @@ fn greenmail_speaks_imap() {
     );
 
     stream
-        .write_all(format!("a1 LOGIN {USER} {PASSWORD}\r\n").as_bytes())
+        .write_all(format!("a1 LOGIN {LOGIN} {PASSWORD}\r\n").as_bytes())
         .expect("login");
     let mut response = String::new();
     loop {
@@ -126,18 +127,18 @@ fn sync_send_and_fetch_body_round_trip() {
     let (store, mailin) = client();
     let account = Account::new(
         "Ada",
-        USER,
+        ADDRESS,
         ServerSettings {
             host: imap_host,
             port: imap_port,
             security: Security::None,
-            username: USER.to_owned(),
+            username: LOGIN.to_owned(),
         },
         ServerSettings {
             host: smtp_host,
             port: smtp_port,
             security: Security::None,
-            username: USER.to_owned(),
+            username: LOGIN.to_owned(),
         },
     );
     mailin
@@ -147,8 +148,8 @@ fn sync_send_and_fetch_body_round_trip() {
     let engine = Engine::start(mailin.clone()).expect("start engine");
 
     let raw = format!(
-        "From: Ada <{USER}>\r\n\
-         To: Ada <{USER}>\r\n\
+        "From: Ada <{ADDRESS}>\r\n\
+         To: Ada <{ADDRESS}>\r\n\
          Subject: {SUBJECT}\r\n\
          Date: Tue, 1 Jul 2025 10:30:00 +0000\r\n\
          Message-ID: <integration-{}@mailin.test>\r\n\
@@ -158,24 +159,24 @@ fn sync_send_and_fetch_body_round_trip() {
          hello from the integration test\r\n",
         std::process::id()
     );
-    engine
+    let outbox_id = engine
         .queue_and_send(
             account.id,
             raw.into_bytes(),
             OutgoingEnvelope {
-                from: USER.to_owned(),
-                to: vec![USER.to_owned()],
+                from: ADDRESS.to_owned(),
+                to: vec![ADDRESS.to_owned()],
                 ..OutgoingEnvelope::default()
             },
         )
         .expect("queue outgoing message");
 
-    assert!(
-        wait_until(Duration::from_secs(60), || {
-            store.outbox_len().unwrap_or(1) == 0
-        }),
-        "the outgoing message was not accepted by SMTP"
-    );
+    if !wait_until(Duration::from_secs(60), || {
+        store.outbox_len().unwrap_or(1) == 0
+    }) {
+        let entry = store.outbox_entry(outbox_id).expect("read outbox entry");
+        panic!("the outgoing message was not accepted by SMTP: {entry:?}");
+    }
 
     engine.sync_account(account.id);
 

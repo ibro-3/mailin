@@ -57,6 +57,7 @@ fn schema_is_created_and_migrations_are_idempotent() {
     assert_eq!(reopened.list_accounts().expect("accounts"), vec![account]);
 }
 
+#[cfg(unix)]
 #[test]
 fn database_file_is_private() {
     use std::os::unix::fs::PermissionsExt;
@@ -474,6 +475,10 @@ fn outbox_lifecycle() {
     assert_eq!(entry.id, id);
     assert_eq!(entry.state, OutboxState::Queued);
     assert_eq!(entry.raw, b"Subject: hi\r\n\r\nbody");
+    assert_eq!(
+        store.outbox_entry(id).expect("by id").expect("present").id,
+        id
+    );
 
     store
         .set_outbox_state(id, OutboxState::Failed, Some("550 rejected"))
