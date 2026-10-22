@@ -8,17 +8,18 @@ A native desktop email client with one shared Rust core and two native front-end
 Mailin speaks IMAP and SMTP, keeps a local SQLite cache for offline reading, and
 never stores passwords outside the OS keyring.
 
-> **Status:** early. Milestones 0–2 are done: workspace, CI, configuration,
-> credential storage, SQLite schema, full text search, outbox and the IMAP/SMTP
-> engine (folder discovery, incremental sync, IDLE, sending). Both user
-> interfaces are next (see the roadmap below).
+> **Status:** early, but usable on Linux. Milestones 0–3 are done: workspace,
+> CI, configuration, credential storage, SQLite schema, full text search,
+> outbox, the IMAP/SMTP engine (folder discovery, incremental sync, IDLE,
+> sending) and the GTK shell (three-pane window, account wizard, reader). GTK
+> polish and the WinUI front-end are next (see the roadmap below).
 
 ## Layout
 
 ```
-crates/mailin-core   UI-agnostic core: accounts, store, credentials, sync (M2)
-crates/mailin-gtk    GTK 4 front-end                     (M3–M4)
-crates/mailin-winui  WinUI 3 front-end                   (M5–M6)
+crates/mailin-core   UI-agnostic core: accounts, store, credentials, sync
+crates/mailin-gtk    GTK 4 front-end: shell, wizard, reader (M3–M4)
+crates/mailin-winui  WinUI 3 front-end                     (M5–M6)
 xtask                repository automation
 docs/                architecture notes
 packaging/           Flatpak and Windows packaging
@@ -33,8 +34,16 @@ sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev libweb
 cargo build
 ```
 
-The core alone needs only a Rust toolchain (SQLite is compiled in through
-`rusqlite`'s `bundled` feature).
+Then start the client:
+
+```sh
+cargo run -p mailin-gtk
+```
+
+The binary is called `mailin`. The first start shows a welcome page; add an
+account with the wizard and folders, message headers and bodies are fetched in
+the background. The core alone needs only a Rust toolchain (SQLite is compiled
+in through `rusqlite`'s `bundled` feature).
 
 ### Windows
 
@@ -51,6 +60,7 @@ cargo build -p mailin-core
 ```sh
 cargo xtask check                 # fmt + clippy + unit/integration tests
 cargo test -p mailin-core         # just the core
+cargo test -p mailin-gtk          # GTK helper logic, no display needed
 ```
 
 The IMAP/SMTP harness talks to [GreenMail](https://greenmail-mail-test.github.io/greenmail/):
@@ -83,7 +93,7 @@ and config file are created with `0600` permissions on Unix.
 | 0 | Workspace, CI, docs ✅ |
 | 1 | Config, credentials, SQLite schema, search, outbox ✅ |
 | 2 | IMAP/SMTP engine: folder discovery, incremental sync, IDLE, send ✅ |
-| 3 | GTK shell: three-pane window, account wizard, reader |
+| 3 | GTK shell: three-pane window, account wizard, reader ✅ |
 | 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak |
 | 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 |
 | 6 | WinUI front-end parity |

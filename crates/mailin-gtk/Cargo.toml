@@ -1,0 +1,25 @@
+[package]
+name = "mailin-gtk"
+description = "GTK 4 front-end of the Mailin desktop mail client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mailin"
+path = "src/main.rs"
+
+[dependencies]
+mailin-core.workspace = true
+anyhow.workspace = true
+gtk = { package = "gtk4", version = "0.10", features = ["v4_10"] }
+libadwaita = { version = "0.8", features = ["v1_5"] }
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/mailin-core", "xtask"]
+members = ["crates/mailin-core", "crates/mailin-gtk", "xtask"]
 
 [workspace.package]
 version = "0.1.0"

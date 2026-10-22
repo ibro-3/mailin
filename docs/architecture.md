@@ -153,10 +153,52 @@ tokio runtime (core workers)          UI main loop
         └── broadcast::Sender<Event> ──> marshal to main loop ──> widgets
 ```
 
-- **GTK:** a `glib::MainContext` idle source drains the event receiver; tokio
-  runs on its own runtime. UI code never blocks on network work.
+- **GTK:** a `glib::timeout` source drains the event receiver every 200 ms on
+  the main loop; tokio runs on its own runtime. UI code never blocks on network
+  work.
 - **WinUI:** an `async_channel` bridge posts to the `DispatcherQueue`; all
   widget mutation happens on the STA UI thread.
+
+## GTK front-end (milestone 3)
+
+`mailin-gtk` is a thin shell around `mailin-core`:
+
+| Module | Responsibility |
+|---|---|
+| `app` | opens `Paths`/`Config`, applies the theme, starts `Engine`, owns the application |
+| `window` | three-pane layout, event pump, folder/message selection, reader |
+| `account_dialog` | add-account wizard and pure form validation |
+| `autoconfig` | provider table and `imap.<domain>` / `smtp.<domain>` fallback |
+| `format` | relative dates, snippets, sender labels, file sizes |
+
+The window is an `adw::OverlaySplitView` (folders) with a `gtk::Paned` (message
+list and reader). With no accounts the content area is a `StatusPage` with a
+single "Add Account" action; after the first account the mail view replaces it.
+
+State is read straight from `Store` on the main thread: listing a folder is a
+small indexed query. Network work stays in the engine. The event pump drains the
+broadcast receiver and coalesces events: account or folder changes rebuild the
+sidebar, message changes reload the visible page, and `BodyReady` re-renders the
+reader. A lagged receiver triggers all three refreshes, so a missed advisory
+event cannot leave stale widgets behind.
+
+The reader shows the decoded plain-text body. `mail-parser` derives a text
+preview even for HTML-only mail, so every message has something to display.
+Rich HTML, remote-content blocking and attachment downloads land in milestone 4;
+attachment metadata (name, MIME type, size) is already listed without fetching
+the bytes.
+
+The account wizard validates the form before it touches the store, writes the
+IMAP/SMTP settings to `accounts.settings_json`, and stores the password through
+`CredentialsStore`. It prefills server fields from a small provider table and
+falls back to the conventional `imap.<domain>` / `smtp.<domain>` names; a field
+the user edited is never overwritten. Saving an account triggers
+`Engine::sync_account`, so folders appear as soon as the first connection
+succeeds.
+
+Keyboard shortcuts: `Ctrl+F` search, `F5` synchronize, `Ctrl+Shift+A` add an
+account. Search is debounced and runs against the FTS index; clearing it returns
+to the selected folder.
 
 ## Windows / WinUI 3 constraints
 
@@ -190,7 +232,7 @@ GTK client are unaffected either way.
 | Store / search / outbox | In-memory and temp-file SQLite, real SQL, no mocks |
 | Config / credentials | Temp dirs, permission assertions, in-memory store |
 | Protocols | GreenMail container (IMAP + SMTP), ignored by default, run in CI |
-| Front-ends | Pure logic extracted into testable modules; UI smoke tests per platform |
+| Front-ends | Pure logic (formatting, autoconfig, form validation) is unit tested; an ignored GTK test renders the account wizard on a desktop |
 | Windows | `windows-latest` CI: clippy, tests, release build, artifact upload |
 
 ## Decisions
