@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+*.db
+*.db-wal
+*.db-shm
+.env
+.flatpak-builder/
+build-dir/
+repo/
+packaging/flatpak/.flatpak-builder/
+packaging/flatpak/build-dir/
+packaging/flatpak/repo/

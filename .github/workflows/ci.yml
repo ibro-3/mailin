@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux build, lint and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install GTK stack (needed from milestone 3 on)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --all-targets
+
+  integration:
+    name: IMAP/SMTP integration
+    runs-on: ubuntu-24.04
+    services:
+      greenmail:
+        image: greenmail/standalone:latest
+        ports:
+          - 3143:3143
+          - 3025:3025
+        env:
+          GREENMAIL_OPTS: >-
+            -Dgreenmail.setup.test.all
+            -Dgreenmail.hostname=0.0.0.0
+            -Dgreenmail.users=ada:correct-horse@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Wait for IMAP
+        run: |
+          for i in $(seq 1 40); do
+            if (exec 3<>/dev/tcp/127.0.0.1/3143) 2>/dev/null; then
+              echo "IMAP is up"; break
+            fi
+            sleep 2
+          done
+      - name: Integration tests
+        env:
+          MAILIN_IT_IMAP_ADDR: 127.0.0.1:3143
+          MAILIN_IT_SMTP_ADDR: 127.0.0.1:3025
+        run: cargo test -p mailin-core --test imap_it -- --ignored --nocapture
+
+  windows:
+    name: Windows build and tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (core)
+        run: cargo clippy -p mailin-core --all-targets -- -D warnings
+
+      - name: Tests (core)
+        run: cargo test -p mailin-core
+
+      # Milestone 5 adds the WinUI 3 crate here:
+      #   cargo build --release -p mailin-winui --target x86_64-pc-windows-msvc
+      # and uploads the self-contained runtime bundle.

@@ -1,0 +1,27 @@
+# Mail IMAP/SMTP server used by the integration tests.
+#
+#   cargo xtask it-up
+#   cargo test -p mailin-core --test imap_it -- --ignored
+#   cargo xtask it-down
+services:
+  greenmail:
+    image: greenmail/standalone:latest
+    container_name: mailin-greenmail
+    ports:
+      - "3025:3025"   # SMTP
+      - "3143:3143"   # IMAP
+      - "3465:3465"   # IMAPS
+      - "3993:3993"   # SMTPS
+      - "8080:8080"   # management API
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=ada:correct-horse@example.com
+        -Dgreenmail.verbose
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3143' || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s

@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/mailin-core", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mailin-app/mailin"
+authors = ["Mailin contributors"]
+
+[workspace.dependencies]
+mailin-core = { path = "crates/mailin-core" }
+
+anyhow = "1"
+directories = "6"
+keyring = "4.2"
+rusqlite = { version = "0.40", features = ["bundled"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+toml = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+unimplemented = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.dev.package."*"]
+opt-level = 1
