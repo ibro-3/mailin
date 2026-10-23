@@ -9,7 +9,7 @@ use crate::account::AccountId;
 use crate::client::{Event, Mailin};
 use crate::error::Result;
 use crate::imap::{ImapSession, RemoteFolder, RemoteHeader};
-use crate::model::{Folder, FolderSyncState, NewMessage};
+use crate::model::{Folder, FolderRole, FolderSyncState, NewMessage};
 use crate::store::FolderUpsert;
 
 /// Header fetches are batched to keep single IMAP responses modest.
@@ -59,6 +59,7 @@ pub(crate) async fn sync_folder(
 ) -> Result<()> {
     let selected = session.select(&folder.name).await?;
     let uid_validity = selected.uid_validity;
+    let mut notify = folder.last_synced_at.is_some();
     let mut mode = mode;
     let mut state = folder.sync_state();
 
@@ -72,6 +73,9 @@ pub(crate) async fn sync_folder(
         mailbox.store().clear_folder_messages(folder.id)?;
         state = FolderSyncState::default();
         mode = SyncMode::Full;
+        // Re-downloading a mailbox is not a delivery: suppress notifications
+        // for the whole rebuilt page.
+        notify = false;
     }
     if state.uid_validity.is_none() && folder.last_synced_at.is_none() {
         mode = SyncMode::Full;
@@ -142,6 +146,17 @@ pub(crate) async fn sync_folder(
         deleted,
         "folder synchronized"
     );
+
+    // Only announce mail that arrived after a first successful sync; the
+    // initial population of a mailbox must not produce a burst of
+    // notifications.
+    if created > 0 && notify && folder.role == FolderRole::Inbox {
+        mailbox.publish(Event::NewMessages {
+            account_id: folder.account_id,
+            folder_id: folder.id,
+            count: u32::try_from(created).unwrap_or(u32::MAX),
+        });
+    }
 
     mailbox.publish(Event::MessagesChanged {
         folder_id: folder.id,

@@ -53,7 +53,7 @@ credential store; tests use `MemoryCredentials`.
 | `folders` | IMAP path, delimiter, role, UIDVALIDITY/UIDNEXT/HIGHESTMODSEQ cursors |
 | `messages` | headers, flags, size, snippet, body state; unique per `(folder_id, uid)` |
 | `bodies` | parsed plain text and HTML, fetched lazily |
-| `attachments` | MIME part metadata per message |
+| `attachments` | MIME part metadata plus decoded bytes (`data BLOB`, migration 0002) |
 | `outbox` | queued RFC 5322 messages with attempt counters |
 | `messages_fts` | FTS5 index over subject, participants and plain text body |
 
@@ -120,8 +120,12 @@ wholesale refresh above. `account.sync.folder_allowlist` limits which folders ar
 synchronized.
 
 Bodies are fetched with `BODY.PEEK[]` when a message is opened and cached; a body
-is never fetched twice. Attachments are recorded as metadata (name, MIME type,
-size); their bytes stay on the server until a later milestone adds downloads.
+is never fetched twice. The full MIME body includes all parts, so decoded
+attachment bytes are stored alongside the headers in the same transaction.
+Inline `cid:` parts keep their normalized content id for the HTML viewer.
+Attachment metadata is listed immediately after a header sync; if an old row
+predates migration 0002 and has no bytes yet, opening the message or saving the
+attachment triggers one `refresh_body` fetch that fills them in.
 
 Reconnects use exponential backoff (5 s to 5 min) and keep at most one
 connection per account. `Engine::stop` interrupts IDLE and shuts the runtime
@@ -129,7 +133,8 @@ down with a short grace period.
 
 ### Sending
 
-Compose builds an RFC 5322 message, stores it in `outbox`, and the sender worker:
+Compose builds an RFC 5322 message in the core (`compose` module), stores it in
+`outbox`, and the sender worker:
 
 1. claims the oldest queued entry and marks it `sending`,
 2. submits it over SMTP (implicit TLS or STARTTLS, `lettre` with rustls),
@@ -155,20 +160,24 @@ tokio runtime (core workers)          UI main loop
 
 - **GTK:** a `glib::timeout` source drains the event receiver every 200 ms on
   the main loop; tokio runs on its own runtime. UI code never blocks on network
-  work.
+  work. `NewMessages` events from background Inbox syncs become
+  `GNotification`s; the initial population of a mailbox is suppressed, and a
+  click activates `app.present` to raise the window.
 - **WinUI:** an `async_channel` bridge posts to the `DispatcherQueue`; all
   widget mutation happens on the STA UI thread.
 
-## GTK front-end (milestone 3)
+## GTK front-end (milestones 3–4)
 
 `mailin-gtk` is a thin shell around `mailin-core`:
 
 | Module | Responsibility |
 |---|---|
 | `app` | opens `Paths`/`Config`, applies the theme, starts `Engine`, owns the application |
-| `window` | three-pane layout, event pump, folder/message selection, reader |
+| `window` | three-pane layout, event pump, folder/message selection, reader, notifications |
 | `account_dialog` | add-account wizard and pure form validation |
 | `autoconfig` | provider table and `imap.<domain>` / `smtp.<domain>` fallback |
+| `compose` | compose window, attachment picker, reply/reply-all/forward drafts |
+| `html` | CSP document builder, remote-content detection, `cid:`/`data:` rewriting, WebView setup |
 | `format` | relative dates, snippets, sender labels, file sizes |
 
 The window is an `adw::OverlaySplitView` (folders) with a `gtk::Paned` (message
@@ -182,11 +191,44 @@ sidebar, message changes reload the visible page, and `BodyReady` re-renders the
 reader. A lagged receiver triggers all three refreshes, so a missed advisory
 event cannot leave stale widgets behind.
 
-The reader shows the decoded plain-text body. `mail-parser` derives a text
-preview even for HTML-only mail, so every message has something to display.
-Rich HTML, remote-content blocking and attachment downloads land in milestone 4;
-attachment metadata (name, MIME type, size) is already listed without fetching
-the bytes.
+The reader shows the decoded plain-text body by default and keeps a per-message
+HTML toggle. `mail-parser` derives a text preview even for HTML-only mail, so
+every message has something to display.
+
+### HTML rendering and remote content
+
+HTML is never loaded as a remote page. `html::document()` wraps the fragment in
+a complete document with a restrictive `Content-Security-Policy` meta tag,
+styles that respect the system light/dark preference, and no scripts. The
+WebKit view disables JavaScript, plugins, file access and cross-site
+navigation; only explicit user actions may open links in the system browser.
+
+Remote images stay blocked unless the account preference allows them or the user
+clicks "Load remote content" for the open message. `html::has_remote_content()`
+detects `http(s)`/protocol-relative sources to decide whether the banner is
+shown. Inline `cid:` images are rewritten to `data:` URLs from the cached
+attachment bytes, so they render without network access.
+
+### Attachments, compose and notifications
+
+Non-inline attachments appear below the reader with a Save button. Saving uses
+the cached bytes; older messages fetch the body once first, then reopen the save
+dialog. Compose supports new messages, reply, reply-all and forward, file
+attachments up to 50 MB, `Ctrl+Enter` to send, and queues the built message
+through the core outbox. The window prefills recipients and quotes the original
+body without hiding the composer behind a blocking dialog.
+
+New-mail notifications use `GNotification` (`gio::Notification`) and respect the
+`ui.notifications` preference. They are emitted only for a first Inbox sync with
+new rows, so reconnect churn and Sent-folder appends do not spam the desktop.
+
+### Flatpak
+
+`packaging/flatpak/` contains the manifest, desktop entry, AppStream metainfo,
+scalable icon and a generated `cargo-sources.json`. The manifest targets the
+GNOME 50 runtime plus the Rust SDK extension, builds the workspace offline from
+vendored crates, and grants only network, display, GPU, Secret Service and
+notification access. CI builds a bundle on every push and pull request.
 
 The account wizard validates the form before it touches the store, writes the
 IMAP/SMTP settings to `accounts.settings_json`, and stores the password through
@@ -232,7 +274,8 @@ GTK client are unaffected either way.
 | Store / search / outbox | In-memory and temp-file SQLite, real SQL, no mocks |
 | Config / credentials | Temp dirs, permission assertions, in-memory store |
 | Protocols | GreenMail container (IMAP + SMTP), ignored by default, run in CI |
-| Front-ends | Pure logic (formatting, autoconfig, form validation) is unit tested; an ignored GTK test renders the account wizard on a desktop |
+| Front-ends | Pure logic (formatting, autoconfig, form validation, compose prefill, HTML policy) is unit tested; an ignored GTK test renders the account wizard on a desktop |
+| Flatpak | `appstreamcli`/`desktop-file-validate` for metadata, full bundle build in CI |
 | Windows | `windows-latest` CI: clippy, tests, release build, artifact upload |
 
 ## Decisions
@@ -244,4 +287,7 @@ GTK client are unaffected either way.
 | `rustls` + platform verifier | No OpenSSL dependency, OS trust store on both platforms |
 | Accounts in the database | Single source of truth, atomic edits |
 | Tokio broadcast for change events | One mechanism for local edits and network updates |
+| Decoded attachment bytes in SQLite | The body fetch already downloads every MIME part; a second round trip per attachment would be slower and fragile offline |
+| Locked-down WebKit + CSP + opt-in remote content | HTML mail is hostile input; privacy is the default |
+| `GNotification` instead of a notification crate | Uses the platform notification channel and the Flatpak portal without another dependency |
 | No `Content-Transfer-Encoding` shortcuts | Bodies are parsed with `mail-parser` in M2; never store raw MIME as text |

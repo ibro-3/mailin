@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.mailin.Mailin</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <name>Mailin</name>
+  <summary>Native desktop email client</summary>
+  <developer id="dev.mailin">
+    <name>Mailin contributors</name>
+  </developer>
+
+  <description>
+    <p>
+      Mailin is a native desktop email client for IMAP and SMTP. It keeps a
+      local SQLite cache for offline reading and stores passwords in the system
+      keyring.
+    </p>
+    <p>
+      The Linux client is built with GTK 4 and libadwaita, renders HTML mail in
+      a sandboxed WebKit view, blocks remote content until you allow it, and
+      supports attachments, composition, replies, forwarding and desktop
+      notifications.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">dev.mailin.Mailin.desktop</launchable>
+
+  <url type="homepage">https://github.com/mailin-app/mailin</url>
+  <url type="bugtracker">https://github.com/mailin-app/mailin/issues</url>
+
+  <provides>
+    <binary>mailin</binary>
+  </provides>
+
+  <categories>
+    <category>Network</category>
+    <category>Email</category>
+  </categories>
+
+  <keywords>
+    <keyword>email</keyword>
+    <keyword>mail</keyword>
+    <keyword>imap</keyword>
+    <keyword>smtp</keyword>
+  </keywords>
+
+  <content_rating type="oars-1.1" />
+
+  <releases>
+    <release version="0.1.0" date="2026-10-23">
+      <description>
+        <p>First milestone 4 build: HTML mail, attachments, compose, notifications.</p>
+      </description>
+    </release>
+  </releases>
+</component>

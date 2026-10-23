@@ -14,14 +14,18 @@ use adw::prelude::*;
 use gtk::gio::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
-    Account, AccountId, Event, Folder, FolderId, FolderRole, MessageHeader, MessageId,
+    Account, AccountId, AttachmentMeta, Event, Folder, FolderId, FolderRole, MessageHeader,
+    MessageId, OutgoingMessage,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
+use webkit6::prelude::*;
 
 use crate::account_dialog;
 use crate::app::AppState;
+use crate::compose;
 use crate::format;
+use crate::html;
 
 /// How often the core event channel is drained on the GTK main loop.
 const EVENT_POLL: Duration = Duration::from_millis(200);
@@ -49,6 +53,7 @@ struct Widgets {
     banner: adw::Banner,
     account_dropdown: gtk::DropDown,
     add_button: gtk::Button,
+    compose_button: gtk::Button,
     empty_add: gtk::Button,
     folder_list: gtk::ListBox,
     folder_stack: gtk::Stack,
@@ -64,10 +69,22 @@ struct Widgets {
     reader_to: gtk::Label,
     reader_cc: gtk::Label,
     reader_date: gtk::Label,
-    reader_attachments: gtk::Label,
+    remote_banner: adw::Banner,
+    reader_attachments: gtk::Box,
     reader_body: gtk::Box,
     read_button: gtk::Button,
     flag_button: gtk::ToggleButton,
+    html_button: gtk::ToggleButton,
+    reply_button: gtk::Button,
+    reply_all_button: gtk::Button,
+    forward_button: gtk::Button,
+}
+
+/// An attachment whose bytes are needed before the save dialog can open.
+#[derive(Debug, Clone)]
+struct PendingAttachment {
+    message_id: MessageId,
+    attachment: AttachmentMeta,
 }
 
 pub struct MainWindow {
@@ -81,6 +98,12 @@ pub struct MainWindow {
     programmatic: Cell<bool>,
     search_generation: Cell<u64>,
     closed: Rc<Cell<bool>>,
+    html_view: RefCell<Option<webkit6::WebView>>,
+    /// Whether the reader prefers HTML; starts from the user preference.
+    html_mode: Cell<bool>,
+    /// Message for which the user explicitly allowed remote content.
+    remote_allowed: Cell<Option<MessageId>>,
+    pending_attachment: Rc<RefCell<Option<PendingAttachment>>>,
     widgets: Widgets,
 }
 
@@ -104,6 +127,9 @@ impl MainWindow {
             .build();
         sidebar_toggle.add_css_class("flat");
         header.pack_start(&sidebar_toggle);
+
+        let compose_button = icon_button("mail-message-new-symbolic", "New message (Ctrl+N)");
+        header.pack_start(&compose_button);
 
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search mail")
@@ -230,12 +256,12 @@ impl MainWindow {
         reader_date.add_css_class("dim-label");
         reader_date.add_css_class("caption");
 
-        let reader_attachments = gtk::Label::new(None);
-        reader_attachments.set_wrap(true);
-        reader_attachments.set_xalign(0.0);
-        reader_attachments.add_css_class("dim-label");
-        reader_attachments.add_css_class("caption");
+        let reader_attachments = gtk::Box::new(gtk::Orientation::Vertical, 6);
         reader_attachments.set_visible(false);
+
+        let remote_banner = adw::Banner::new("Remote content is blocked to protect your privacy.");
+        remote_banner.set_button_label(Some("Load remote content"));
+        remote_banner.set_revealed(false);
 
         let reader_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         reader_body.set_margin_top(6);
@@ -247,9 +273,25 @@ impl MainWindow {
             .build();
         flag_button.add_css_class("flat");
         let read_button = icon_button("mail-mark-read-symbolic", "Mark as read");
+        let html_button = gtk::ToggleButton::builder()
+            .label("HTML")
+            .tooltip_text("Show the original HTML body")
+            .build();
+        html_button.add_css_class("flat");
+
+        let reply_button = icon_button("mail-reply-sender-symbolic", "Reply (Ctrl+R)");
+        let reply_all_button =
+            icon_button("mail-reply-all-symbolic", "Reply to all (Ctrl+Shift+R)");
+        let forward_button = icon_button("mail-forward-symbolic", "Forward");
 
         let reader_actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        reader_actions.set_halign(gtk::Align::End);
+        reader_actions.append(&html_button);
+        reader_actions.append(&reply_button);
+        reader_actions.append(&reply_all_button);
+        reader_actions.append(&forward_button);
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        reader_actions.append(&spacer);
         reader_actions.append(&flag_button);
         reader_actions.append(&read_button);
 
@@ -265,6 +307,7 @@ impl MainWindow {
         reader_content.append(&reader_cc);
         reader_content.append(&reader_date);
         reader_content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        reader_content.append(&remote_banner);
         reader_content.append(&reader_attachments);
         reader_content.append(&reader_body);
 
@@ -349,6 +392,7 @@ impl MainWindow {
         toolbar.set_content(Some(&toast));
         window.set_content(Some(&toolbar));
 
+        let html_mode = app.config.ui.html_enabled;
         let this = Rc::new(Self {
             app,
             selection: RefCell::new(Selection::default()),
@@ -358,6 +402,10 @@ impl MainWindow {
             programmatic: Cell::new(false),
             search_generation: Cell::new(0),
             closed: Rc::new(Cell::new(false)),
+            html_view: RefCell::new(None),
+            html_mode: Cell::new(html_mode),
+            remote_allowed: Cell::new(None),
+            pending_attachment: Rc::new(RefCell::new(None)),
             widgets: Widgets {
                 window,
                 title,
@@ -366,6 +414,7 @@ impl MainWindow {
                 banner,
                 account_dropdown,
                 add_button,
+                compose_button,
                 empty_add,
                 folder_list,
                 folder_stack,
@@ -381,10 +430,15 @@ impl MainWindow {
                 reader_to,
                 reader_cc,
                 reader_date,
+                remote_banner,
                 reader_attachments,
                 reader_body,
                 read_button,
                 flag_button,
+                html_button,
+                reply_button,
+                reply_all_button,
+                forward_button,
             },
         });
 
@@ -466,6 +520,49 @@ impl MainWindow {
             move |_| this.toggle_seen()
         });
 
+        this.widgets.html_button.connect_toggled({
+            let this = Rc::clone(this);
+            move |button| {
+                if this.programmatic.get() {
+                    return;
+                }
+                this.html_mode.set(button.is_active());
+                if let Some(message_id) = this.selection.borrow().message {
+                    this.render_body(message_id);
+                }
+            }
+        });
+
+        this.widgets.remote_banner.connect_button_clicked({
+            let this = Rc::clone(this);
+            move |banner| {
+                let Some(message_id) = this.selection.borrow().message else {
+                    return;
+                };
+                this.remote_allowed.set(Some(message_id));
+                banner.set_revealed(false);
+                this.render_body(message_id);
+            }
+        });
+
+        this.widgets.compose_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| Self::open_compose(&this, OutgoingMessage::default())
+        });
+
+        this.widgets.reply_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| Self::compose_reply(&this, false)
+        });
+        this.widgets.reply_all_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| Self::compose_reply(&this, true)
+        });
+        this.widgets.forward_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| Self::compose_forward(&this)
+        });
+
         this.widgets.flag_button.connect_toggled({
             let this = Rc::clone(this);
             move |button| {
@@ -518,7 +615,39 @@ impl MainWindow {
             application.set_accels_for_action("win.search", &["<Control>f"]);
             application.set_accels_for_action("win.sync", &["F5"]);
             application.set_accels_for_action("win.add-account", &["<Control><Shift>a"]);
+            application.set_accels_for_action("win.compose", &["<Control>n"]);
+            application.set_accels_for_action("win.reply", &["<Control>r"]);
+            application.set_accels_for_action("win.reply-all", &["<Control><Shift>r"]);
+            application.set_accels_for_action("win.forward", &["<Control><Shift>f"]);
         }
+
+        let compose_action = gio::SimpleAction::new("compose", None);
+        compose_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| Self::open_compose(&this, OutgoingMessage::default())
+        });
+        this.widgets.window.add_action(&compose_action);
+
+        let reply_action = gio::SimpleAction::new("reply", None);
+        reply_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| Self::compose_reply(&this, false)
+        });
+        this.widgets.window.add_action(&reply_action);
+
+        let reply_all_action = gio::SimpleAction::new("reply-all", None);
+        reply_all_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| Self::compose_reply(&this, true)
+        });
+        this.widgets.window.add_action(&reply_all_action);
+
+        let forward_action = gio::SimpleAction::new("forward", None);
+        forward_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| Self::compose_forward(&this)
+        });
+        this.widgets.window.add_action(&forward_action);
 
         let search_action = gio::SimpleAction::new("search", None);
         search_action.connect_activate({
@@ -891,6 +1020,9 @@ impl MainWindow {
 
     fn open_message(&self, message: &MessageHeader) {
         self.selection.borrow_mut().message = Some(message.id);
+        if self.remote_allowed.get() != Some(message.id) {
+            self.remote_allowed.set(None);
+        }
         self.widgets.reader_stack.set_visible_child_name("message");
         self.render_headers(message);
         self.render_attachments(message.id);
@@ -934,20 +1066,54 @@ impl MainWindow {
 
     fn render_body(&self, message_id: MessageId) {
         clear_box(&self.widgets.reader_body);
-        match self.app.mailin.message_body(message_id) {
-            Ok(Some((text, html))) => {
-                let widget = match (text, html) {
-                    (Some(text), _) if !text.trim().is_empty() => text_body(&text),
-                    (Some(_), _) => notice_body("This message has no text body."),
-                    (None, Some(_)) => notice_body(
-                        "This message only provides an HTML body. It will be rendered in the \
-                         HTML viewer.",
-                    ),
-                    (None, None) => notice_body("This message has no readable body."),
-                };
-                self.widgets.reader_body.append(&widget);
+        self.widgets.remote_banner.set_revealed(false);
+        let Ok(body) = self.app.mailin.message_body(message_id) else {
+            self.widgets
+                .reader_body
+                .append(&notice_body("Could not read this message."));
+            return;
+        };
+        match body {
+            Some((text, html)) => {
+                let has_text = text.as_deref().is_some_and(|text| !text.trim().is_empty());
+                let has_html = html.as_deref().is_some_and(|html| !html.trim().is_empty());
+                let want_html = has_html && self.html_mode.get();
+
+                self.programmatic.set(true);
+                self.widgets.html_button.set_sensitive(has_html);
+                self.widgets.html_button.set_active(want_html);
+                self.programmatic.set(false);
+
+                if want_html {
+                    let html_body = html.as_deref().unwrap_or_default();
+                    let allow_remote = self.app.config.ui.remote_content_enabled
+                        || self.remote_allowed.get() == Some(message_id);
+                    let images = self.inline_images(message_id);
+                    let dark = adw::StyleManager::default().is_dark();
+                    let view = self.html_view();
+                    view.load_html(
+                        &html::document(html_body, allow_remote, dark, &images),
+                        None,
+                    );
+                    self.widgets.reader_body.append(&view);
+                    if !allow_remote && html::has_remote_content(html_body) {
+                        self.widgets.remote_banner.set_revealed(true);
+                    }
+                } else if has_text {
+                    self.widgets
+                        .reader_body
+                        .append(&text_body(text.as_deref().unwrap_or_default()));
+                } else if has_html {
+                    self.widgets.reader_body.append(&notice_body(
+                        "This message only provides an HTML body. Use the HTML button to show it.",
+                    ));
+                } else {
+                    self.widgets
+                        .reader_body
+                        .append(&notice_body("This message has no readable body."));
+                }
             }
-            Ok(None) => {
+            None => {
                 let fetched = self
                     .app
                     .mailin
@@ -966,22 +1132,51 @@ impl MainWindow {
                     self.app.engine.fetch_body(message_id);
                 }
             }
-            Err(error) => {
-                self.widgets
-                    .reader_body
-                    .append(&notice_body(&error.to_string()));
-            }
         }
     }
 
-    fn render_attachments(&self, message_id: MessageId) {
+    fn html_view(&self) -> webkit6::WebView {
+        let mut slot = self.html_view.borrow_mut();
+        if let Some(view) = slot.as_ref() {
+            return view.clone();
+        }
+        let view = html::new_view();
+        *slot = Some(view.clone());
+        view
+    }
+
+    /// `cid:` images from inline attachment data, ready for the HTML viewer.
+    fn inline_images(&self, message_id: MessageId) -> Vec<(String, String)> {
         let attachments = self
             .app
             .mailin
-            .store()
             .list_attachments(message_id)
             .unwrap_or_default();
-        let mut visible = attachments
+        attachments
+            .into_iter()
+            .filter(|attachment| attachment.is_inline)
+            .filter_map(|attachment| {
+                let content_id = attachment.content_id?;
+                let data = self
+                    .app
+                    .mailin
+                    .attachment(message_id, &attachment.part_id)
+                    .ok()
+                    .flatten()?
+                    .data?;
+                Some((content_id, html::data_url(&attachment.mime_type, &data)))
+            })
+            .collect()
+    }
+
+    fn render_attachments(&self, message_id: MessageId) {
+        clear_box(&self.widgets.reader_attachments);
+        let attachments = self
+            .app
+            .mailin
+            .list_attachments(message_id)
+            .unwrap_or_default();
+        let visible = attachments
             .into_iter()
             .filter(|attachment| !attachment.is_inline)
             .collect::<Vec<_>>();
@@ -989,30 +1184,81 @@ impl MainWindow {
             self.widgets.reader_attachments.set_visible(false);
             return;
         }
-        visible.truncate(4);
-        let count = visible.len();
-        let names = visible
-            .iter()
-            .map(|attachment| {
-                let name = attachment
-                    .filename
-                    .clone()
-                    .unwrap_or_else(|| attachment.mime_type.clone());
-                match attachment.size {
-                    Some(size) => format!("{name} ({})", format::file_size(size)),
-                    None => name,
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        self.widgets.reader_attachments.set_text(&format!(
-            "{count} attachment{}: {names}",
-            if count == 1 { "" } else { "s" }
-        ));
-        self.widgets
-            .reader_attachments
-            .set_tooltip_text(Some("Downloading attachments arrives in milestone 4"));
+        for attachment in visible {
+            self.widgets
+                .reader_attachments
+                .append(&self.attachment_row(message_id, attachment));
+        }
         self.widgets.reader_attachments.set_visible(true);
+    }
+
+    fn attachment_row(&self, message_id: MessageId, attachment: AttachmentMeta) -> gtk::Widget {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        row.add_css_class("card");
+        row.set_margin_top(2);
+        row.set_margin_bottom(2);
+
+        let icon = gtk::Image::from_icon_name("mail-attachment-symbolic");
+        icon.set_pixel_size(16);
+        icon.set_margin_start(10);
+        row.append(&icon);
+
+        let name = gtk::Label::new(Some(&attachment.display_name()));
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        name.set_ellipsize(pango::EllipsizeMode::Middle);
+        row.append(&name);
+
+        if let Some(size) = attachment.size {
+            let size = gtk::Label::new(Some(&format::file_size(size)));
+            size.add_css_class("caption");
+            size.add_css_class("dim-label");
+            row.append(&size);
+        }
+
+        let save = gtk::Button::with_label("Save");
+        save.add_css_class("flat");
+        save.set_margin_end(4);
+        let app = Rc::clone(&self.app);
+        let window = self.widgets.window.clone().upcast::<gtk::Window>();
+        let toast = self.widgets.toast.clone();
+        let pending = Rc::clone(&self.pending_attachment);
+        save.connect_clicked(move |_| {
+            request_save_attachment(
+                Rc::clone(&app),
+                window.clone(),
+                toast.clone(),
+                Rc::clone(&pending),
+                message_id,
+                attachment.clone(),
+                false,
+            );
+        });
+        row.append(&save);
+        row.upcast()
+    }
+
+    /// Finish a save that was waiting for attachment bytes to be downloaded.
+    fn resolve_pending_attachment(&self, message_id: MessageId) {
+        let pending = self
+            .pending_attachment
+            .borrow()
+            .as_ref()
+            .filter(|pending| pending.message_id == message_id)
+            .cloned();
+        let Some(pending) = pending else {
+            return;
+        };
+        self.pending_attachment.borrow_mut().take();
+        request_save_attachment(
+            Rc::clone(&self.app),
+            self.widgets.window.clone().upcast::<gtk::Window>(),
+            self.widgets.toast.clone(),
+            Rc::clone(&self.pending_attachment),
+            message_id,
+            pending.attachment,
+            true,
+        );
     }
 
     fn update_actions(&self, message: &MessageHeader) {
@@ -1082,6 +1328,77 @@ impl MainWindow {
         }
     }
 
+    // --------------------------------------------------------------- compose
+
+    fn compose_reply(this: &Rc<Self>, all: bool) {
+        let Some(message) = this.selected_message() else {
+            return;
+        };
+        let Some(account_id) = this.selection.borrow().account else {
+            return;
+        };
+        let Some(account) = this.app.mailin.account(&account_id).ok().flatten() else {
+            return;
+        };
+        let body = this
+            .app
+            .mailin
+            .message_body(message.id)
+            .ok()
+            .flatten()
+            .and_then(|(text, _)| text)
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| message.snippet.clone());
+        let draft = if all {
+            compose::reply_all(&account, &message, body.as_deref())
+        } else {
+            compose::reply(&account, &message, body.as_deref())
+        };
+        Self::open_compose(this, draft);
+    }
+
+    fn compose_forward(this: &Rc<Self>) {
+        let Some(message) = this.selected_message() else {
+            return;
+        };
+        let Some(account_id) = this.selection.borrow().account else {
+            return;
+        };
+        let Some(account) = this.app.mailin.account(&account_id).ok().flatten() else {
+            return;
+        };
+        let body = this
+            .app
+            .mailin
+            .message_body(message.id)
+            .ok()
+            .flatten()
+            .and_then(|(text, _)| text)
+            .or_else(|| message.snippet.clone());
+        let draft = compose::forward(&account, &message, body.as_deref());
+        Self::open_compose(this, draft);
+    }
+
+    fn open_compose(this: &Rc<Self>, draft: OutgoingMessage) {
+        let Some(account_id) = this.selection.borrow().account else {
+            this.widgets
+                .toast
+                .add_toast(adw::Toast::new("Add an account before composing mail"));
+            return;
+        };
+        let parent = this.widgets.window.clone().upcast::<gtk::Window>();
+        let toast = this.widgets.toast.clone();
+        compose::present(
+            &parent,
+            Rc::clone(&this.app),
+            account_id,
+            draft,
+            move || {
+                toast.add_toast(adw::Toast::new("Message queued in the outbox"));
+            },
+        );
+    }
+
     // --------------------------------------------------------------- events
 
     fn drain_events(&self, events: &mut broadcast::Receiver<Event>) {
@@ -1090,6 +1407,7 @@ impl MainWindow {
         let mut messages_changed = false;
         let mut body_ready = None;
         let mut account_error = None;
+        let mut new_messages = Vec::new();
 
         loop {
             match events.try_recv() {
@@ -1101,6 +1419,9 @@ impl MainWindow {
                         messages_changed = true;
                     }
                 }
+                Ok(Event::NewMessages {
+                    account_id, count, ..
+                }) => new_messages.push((account_id, count)),
                 Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                 Ok(Event::OutboxChanged) => {}
                 Ok(Event::AccountError { message, .. }) => account_error = Some(message),
@@ -1125,6 +1446,7 @@ impl MainWindow {
             self.refresh_messages();
         }
         if let Some(message_id) = body_ready {
+            self.resolve_pending_attachment(message_id);
             if self.selection.borrow().message == Some(message_id) {
                 self.render_body(message_id);
                 self.render_attachments(message_id);
@@ -1134,9 +1456,51 @@ impl MainWindow {
                 }
             }
         }
+        for (account_id, count) in new_messages {
+            self.notify_new_mail(account_id, count);
+        }
         if let Some(message) = account_error {
             self.show_error(&message);
         }
+    }
+
+    /// Desktop notification for background mail. Clicking it activates the
+    /// application through the default action.
+    fn notify_new_mail(&self, account_id: AccountId, count: u32) {
+        let application_active = self
+            .widgets
+            .window
+            .application()
+            .is_some_and(|application| {
+                application
+                    .windows()
+                    .iter()
+                    .any(|window| window.is_active())
+            });
+        if !self.app.config.ui.notifications || application_active {
+            return;
+        }
+        let Some(application) = self.widgets.window.application() else {
+            return;
+        };
+        let account = self
+            .accounts
+            .borrow()
+            .iter()
+            .find(|account| account.id == account_id)
+            .map(|account| account.email.clone())
+            .unwrap_or_else(|| "Mailin".to_owned());
+        let notification = gio::Notification::new(if count == 1 {
+            "New message"
+        } else {
+            "New messages"
+        });
+        notification.set_body(Some(&format!(
+            "{count} new message{} in {account}",
+            if count == 1 { "" } else { "s" }
+        )));
+        notification.set_default_action("app.present");
+        application.send_notification(Some(&format!("mailin-{account_id}")), &notification);
     }
 
     fn show_error(&self, message: &str) {
@@ -1175,6 +1539,83 @@ impl MainWindow {
 }
 
 // -------------------------------------------------------------------- widgets
+
+/// Start saving an attachment, downloading the body first when only metadata
+/// was cached by an older version.
+fn request_save_attachment(
+    app: Rc<AppState>,
+    window: gtk::Window,
+    toast: adw::ToastOverlay,
+    pending: Rc<RefCell<Option<PendingAttachment>>>,
+    message_id: MessageId,
+    attachment: AttachmentMeta,
+    retry: bool,
+) {
+    let unavailable = |toast: &adw::ToastOverlay| {
+        toast.add_toast(adw::Toast::new(
+            "Could not load the attachment; it may no longer be available.",
+        ));
+    };
+    match app.mailin.attachment(message_id, &attachment.part_id) {
+        Ok(Some(data)) => match data.data {
+            Some(bytes) => save_attachment_dialog(&window, &toast, &attachment, bytes),
+            None if retry => unavailable(&toast),
+            None => {
+                *pending.borrow_mut() = Some(PendingAttachment {
+                    message_id,
+                    attachment: attachment.clone(),
+                });
+                app.engine.refresh_body(message_id);
+                toast.add_toast(adw::Toast::new("Downloading attachment…"));
+            }
+        },
+        Ok(None) if retry => unavailable(&toast),
+        Ok(None) => {
+            *pending.borrow_mut() = Some(PendingAttachment {
+                message_id,
+                attachment,
+            });
+            app.engine.refresh_body(message_id);
+            toast.add_toast(adw::Toast::new("Downloading attachment…"));
+        }
+        Err(error) => {
+            toast.add_toast(adw::Toast::new(&format!(
+                "Could not read the attachment: {error}"
+            )));
+        }
+    }
+}
+
+fn save_attachment_dialog(
+    window: &gtk::Window,
+    toast: &adw::ToastOverlay,
+    attachment: &AttachmentMeta,
+    data: Vec<u8>,
+) {
+    let dialog = gtk::FileDialog::builder()
+        .title("Save attachment")
+        .initial_name(attachment.display_name())
+        .build();
+    let toast = toast.clone();
+    dialog.save(Some(window), None::<&gio::Cancellable>, move |result| {
+        let Ok(file) = result else {
+            return;
+        };
+        let result = file.replace_contents(
+            &data,
+            None::<&str>,
+            false,
+            gio::FileCreateFlags::REPLACE_DESTINATION,
+            None::<&gio::Cancellable>,
+        );
+        match result {
+            Ok(_) => toast.add_toast(adw::Toast::new("Attachment saved")),
+            Err(error) => toast.add_toast(adw::Toast::new(&format!(
+                "Could not save the attachment: {error}"
+            ))),
+        }
+    });
+}
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()

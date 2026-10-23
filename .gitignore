@@ -7,6 +7,8 @@
 .flatpak-builder/
 build-dir/
 repo/
+flatpak_app/
+*.flatpak
 packaging/flatpak/.flatpak-builder/
 packaging/flatpak/build-dir/
 packaging/flatpak/repo/

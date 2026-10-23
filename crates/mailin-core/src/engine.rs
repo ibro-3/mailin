@@ -90,9 +90,16 @@ impl Engine {
         self.send(Command::SyncFolder(folder_id));
     }
 
-    /// Download and parse the complete body of a message.
+    /// Download and parse the complete body of a message. Attachment bytes are
+    /// cached alongside it.
     pub fn fetch_body(&self, message_id: MessageId) {
         self.send(Command::FetchBody(message_id));
+    }
+
+    /// Download a message again even when its body is already cached. Used to
+    /// fill in attachment bytes for messages cached before milestone 4.
+    pub fn refresh_body(&self, message_id: MessageId) {
+        self.send(Command::RefreshBody(message_id));
     }
 
     /// Add and remove IMAP flags both on the server and in the cache.
@@ -155,6 +162,7 @@ enum Command {
     SyncAccount(AccountId),
     SyncFolder(FolderId),
     FetchBody(MessageId),
+    RefreshBody(MessageId),
     SetFlags {
         message_id: MessageId,
         add: Vec<String>,
@@ -168,6 +176,7 @@ enum WorkerCommand {
     SyncAccount,
     SyncFolder(FolderId),
     FetchBody(MessageId),
+    RefreshBody(MessageId),
     SetFlags {
         message_id: MessageId,
         add: Vec<String>,
@@ -207,6 +216,12 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                 if let Some(account_id) = account_for_message(&state, message_id) {
                     let worker = ensure_worker(&mut workers, &state, account_id);
                     let _ = worker.send(WorkerCommand::FetchBody(message_id));
+                }
+            }
+            Command::RefreshBody(message_id) => {
+                if let Some(account_id) = account_for_message(&state, message_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::RefreshBody(message_id));
                 }
             }
             Command::SetFlags {
@@ -533,7 +548,10 @@ async fn handle_command(
             }
         }
         WorkerCommand::FetchBody(message_id) => {
-            fetch_body(session, state, message_id).await?;
+            fetch_body(session, state, message_id, false).await?;
+        }
+        WorkerCommand::RefreshBody(message_id) => {
+            fetch_body(session, state, message_id, true).await?;
         }
         WorkerCommand::SetFlags {
             message_id,
@@ -550,11 +568,12 @@ async fn fetch_body(
     session: &mut ImapSession,
     state: &Arc<EngineState>,
     message_id: MessageId,
+    force: bool,
 ) -> Result<()> {
     let Some(message) = state.mailbox.message(message_id)? else {
         return Ok(());
     };
-    if message.body_fetched {
+    if message.body_fetched && !force {
         return Ok(());
     }
     let Some(folder) = state.mailbox.folder(message.folder_id)? else {

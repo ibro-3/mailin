@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Mailin
+GenericName=Mail Client
+Comment=Native desktop email client
+Exec=mailin
+Icon=dev.mailin.Mailin
+Terminal=false
+Type=Application
+Categories=Network;Email;
+Keywords=email;mail;imap;smtp;
+StartupNotify=true
+X-GNOME-UsesNotifications=true
+X-GNOME-SingleWindow=true

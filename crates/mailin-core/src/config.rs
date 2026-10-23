@@ -82,6 +82,8 @@ pub struct UiPreferences {
     pub page_size: u32,
     /// Mark a message as read when it is opened.
     pub mark_read_on_open: bool,
+    /// Show a desktop notification when mail arrives in the background.
+    pub notifications: bool,
 }
 
 impl Default for UiPreferences {
@@ -92,6 +94,7 @@ impl Default for UiPreferences {
             remote_content_enabled: false,
             page_size: 100,
             mark_read_on_open: true,
+            notifications: true,
         }
     }
 }

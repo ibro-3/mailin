@@ -28,6 +28,13 @@ pub enum Event {
     MessagesChanged {
         folder_id: FolderId,
     },
+    /// New messages arrived in the background. Front-ends use this for desktop
+    /// notifications; the rows are also covered by [`Event::MessagesChanged`].
+    NewMessages {
+        account_id: AccountId,
+        folder_id: FolderId,
+        count: u32,
+    },
     BodyReady {
         message_id: MessageId,
     },
@@ -170,6 +177,20 @@ impl Mailin {
 
     pub fn message_body(&self, id: MessageId) -> Result<Option<(Option<String>, Option<String>)>> {
         self.store.body(id)
+    }
+
+    pub fn list_attachments(&self, id: MessageId) -> Result<Vec<crate::model::AttachmentMeta>> {
+        self.store.list_attachments(id)
+    }
+
+    /// Attachment metadata and bytes. `data` is `None` when only metadata is
+    /// cached; call [`crate::Engine::refresh_body`] to download it again.
+    pub fn attachment(
+        &self,
+        id: MessageId,
+        part_id: &str,
+    ) -> Result<Option<crate::model::AttachmentData>> {
+        self.store.attachment(id, part_id)
     }
 
     pub fn search(

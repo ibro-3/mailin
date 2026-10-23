@@ -8,11 +8,13 @@ A native desktop email client with one shared Rust core and two native front-end
 Mailin speaks IMAP and SMTP, keeps a local SQLite cache for offline reading, and
 never stores passwords outside the OS keyring.
 
-> **Status:** early, but usable on Linux. Milestones 0–3 are done: workspace,
+> **Status:** early, but usable on Linux. Milestones 0–4 are done: workspace,
 > CI, configuration, credential storage, SQLite schema, full text search,
 > outbox, the IMAP/SMTP engine (folder discovery, incremental sync, IDLE,
-> sending) and the GTK shell (three-pane window, account wizard, reader). GTK
-> polish and the WinUI front-end are next (see the roadmap below).
+> sending), the GTK shell (three-pane window, account wizard, reader) and GTK
+> polish (HTML mail, remote-content blocking, attachments, compose, desktop
+> notifications and Flatpak packaging). The WinUI front-end is next (see the
+> roadmap below).
 
 ## Layout
 
@@ -22,7 +24,7 @@ crates/mailin-gtk    GTK 4 front-end: shell, wizard, reader (M3–M4)
 crates/mailin-winui  WinUI 3 front-end                     (M5–M6)
 xtask                repository automation
 docs/                architecture notes
-packaging/           Flatpak and Windows packaging
+packaging/           Flatpak manifest, desktop metadata and icon
 ```
 
 ## Building
@@ -44,6 +46,27 @@ The binary is called `mailin`. The first start shows a welcome page; add an
 account with the wizard and folders, message headers and bodies are fetched in
 the background. The core alone needs only a Rust toolchain (SQLite is compiled
 in through `rusqlite`'s `bundled` feature).
+
+### Flatpak
+
+The manifest lives in `packaging/flatpak/`. Install the builder and the GNOME
+runtime once, then build and run the sandboxed app:
+
+```sh
+sudo apt install flatpak-builder
+flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install flathub org.gnome.Platform//50 org.gnome.Sdk//50 \
+  org.freedesktop.Sdk.Extension.rust-stable//25.08
+flatpak-builder --user --install --force-clean \
+  packaging/flatpak/build-dir packaging/flatpak/dev.mailin.Mailin.json
+flatpak run dev.mailin.Mailin
+```
+
+`packaging/flatpak/cargo-sources.json` vendors every crate from `Cargo.lock` for
+the offline build. Regenerate it with
+[`flatpak-cargo-generator.py`](https://github.com/flatpak/flatpak-builder-tools/tree/master/cargo)
+whenever the lockfile changes, and run `appstreamcli validate --no-net` after
+editing the metainfo file. CI builds the bundle on every push and pull request.
 
 ### Windows
 
@@ -94,7 +117,7 @@ and config file are created with `0600` permissions on Unix.
 | 1 | Config, credentials, SQLite schema, search, outbox ✅ |
 | 2 | IMAP/SMTP engine: folder discovery, incremental sync, IDLE, send ✅ |
 | 3 | GTK shell: three-pane window, account wizard, reader ✅ |
-| 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak |
+| 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak ✅ |
 | 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 |
 | 6 | WinUI front-end parity |
 | 7 | Packaging, hardening, accessibility, performance |
@@ -108,6 +131,10 @@ and config file are created with `0600` permissions on Unix.
   page. Search uses FTS5; the index row id mirrors `messages.id`, so updates and
   deletes stay cheap.
 - UIDVALIDITY, CONDSTORE and IDLE handling are designed in `docs/architecture.md`.
+- HTML bodies render in a locked-down WebKit view with JavaScript, plugins and
+  remote content disabled until the user explicitly loads images for a message.
+- The Flatpak sandbox gets network, Wayland/X11, GPU access, the Secret Service
+  and desktop notifications; nothing else is shared with the host.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full picture and the
 known Windows/WinUI constraints.

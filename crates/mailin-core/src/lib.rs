@@ -14,6 +14,7 @@
 
 pub mod account;
 pub mod client;
+pub mod compose;
 pub mod config;
 pub mod credentials;
 pub mod engine;
@@ -27,13 +28,14 @@ mod tls;
 
 pub use account::{Account, AccountId, AccountSyncSettings, Security, ServerSettings};
 pub use client::{Event, Mailin};
+pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{Config, Paths, SyncPreferences, Theme, UiPreferences};
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use model::{
-    AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader, MessageId,
-    NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, UpsertedMessage,
 };
 pub use store::{FolderUpsert, Store};
 

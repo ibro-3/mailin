@@ -39,6 +39,15 @@ impl AppState {
 pub fn run() -> glib::ExitCode {
     let application = adw::Application::builder().application_id(APP_ID).build();
 
+    // Notifications use `app.present` as their default action. Registering the
+    // action explicitly makes a click bring the window to the foreground.
+    let present = gtk::gio::SimpleAction::new("present", None);
+    present.connect_activate({
+        let application = application.clone();
+        move |_, _| application.activate()
+    });
+    application.add_action(&present);
+
     // Startup runs once; activation runs for every new window request.
     let state: Rc<RefCell<Option<Rc<AppState>>>> = Rc::new(RefCell::new(None));
     let startup_error: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));

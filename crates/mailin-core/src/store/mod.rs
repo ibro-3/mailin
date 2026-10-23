@@ -17,8 +17,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::account::{Account, AccountId};
 use crate::error::{Error, Result};
 use crate::model::{
-    AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader, MessageId,
-    NewMessage, OutboxEntry, OutboxState, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, UpsertedMessage,
 };
 
 pub use migrations::SCHEMA_VERSION;
@@ -518,7 +518,7 @@ impl Store {
     pub fn replace_attachments(
         &self,
         message: MessageId,
-        attachments: &[AttachmentMeta],
+        attachments: &[AttachmentData],
     ) -> Result<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction()?;
@@ -527,18 +527,20 @@ impl Store {
             params![message.0],
         )?;
         for a in attachments {
+            let meta = &a.meta;
             tx.execute(
                 "INSERT INTO attachments
-                     (message_id, part_id, filename, mime_type, size, content_id, is_inline)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     (message_id, part_id, filename, mime_type, size, content_id, is_inline, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     message.0,
-                    a.part_id,
-                    a.filename,
-                    a.mime_type,
-                    a.size,
-                    a.content_id,
-                    i64::from(a.is_inline),
+                    meta.part_id,
+                    meta.filename,
+                    meta.mime_type,
+                    meta.size,
+                    meta.content_id,
+                    i64::from(meta.is_inline),
+                    a.data,
                 ],
             )?;
         }
@@ -568,6 +570,44 @@ impl Store {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Error::from)
+    }
+
+    /// One attachment with its decoded bytes. `data` is `None` for metadata
+    /// cached before attachment bytes were stored.
+    pub fn attachment(&self, message: MessageId, part_id: &str) -> Result<Option<AttachmentData>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT part_id, filename, mime_type, size, content_id, is_inline, data
+             FROM attachments WHERE message_id = ?1 AND part_id = ?2",
+            params![message.0, part_id],
+            |row| {
+                Ok(AttachmentData {
+                    meta: AttachmentMeta {
+                        part_id: row.get(0)?,
+                        filename: row.get(1)?,
+                        mime_type: row.get(2)?,
+                        size: row.get(3)?,
+                        content_id: row.get(4)?,
+                        is_inline: row.get::<_, i64>(5)? != 0,
+                    },
+                    data: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Error::from)
+    }
+
+    pub fn attachment_data(&self, message: MessageId, part_id: &str) -> Result<Option<Vec<u8>>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT data FROM attachments WHERE message_id = ?1 AND part_id = ?2",
+            params![message.0, part_id],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()
+        .map(|value| value.flatten())
+        .map_err(Error::from)
     }
 
     // ------------------------------------------------------------------ search

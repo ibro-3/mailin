@@ -267,13 +267,52 @@ pub struct UpsertedMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentMeta {
     /// Identifier of the MIME part inside its message, unique per message.
-    /// Attachment downloads will map this back to a part in a later milestone.
     pub part_id: String,
     pub filename: Option<String>,
     pub mime_type: String,
     pub size: Option<u32>,
+    /// `Content-ID` without the surrounding angle brackets, used to resolve
+    /// `cid:` references in HTML bodies.
     pub content_id: Option<String>,
     pub is_inline: bool,
+}
+
+impl AttachmentMeta {
+    /// Filename safe to show or use as a default for "Save as".
+    pub fn display_name(&self) -> String {
+        let name = self
+            .filename
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or("attachment");
+        let name = name
+            .chars()
+            .map(|character| {
+                if character.is_control() || matches!(character, '/' | '\\') {
+                    '_'
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        if name.trim().is_empty() {
+            "attachment".to_owned()
+        } else {
+            name
+        }
+    }
+}
+
+/// Attachment metadata together with the decoded bytes.
+///
+/// The bytes are optional because a message cached before attachment storage
+/// existed has metadata only; the UI can ask the engine to refresh the body to
+/// fill them in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentData {
+    pub meta: AttachmentMeta,
+    pub data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -362,5 +401,35 @@ impl OutgoingEnvelope {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attachment(filename: Option<&str>) -> AttachmentMeta {
+        AttachmentMeta {
+            part_id: "1".into(),
+            filename: filename.map(str::to_owned),
+            mime_type: "application/pdf".into(),
+            size: None,
+            content_id: None,
+            is_inline: false,
+        }
+    }
+
+    #[test]
+    fn attachment_names_are_safe_to_use_as_file_names() {
+        assert_eq!(
+            attachment(Some(" report.pdf ")).display_name(),
+            "report.pdf"
+        );
+        assert_eq!(
+            attachment(Some("../../etc/passwd")).display_name(),
+            ".._.._etc_passwd"
+        );
+        assert_eq!(attachment(None).display_name(), "attachment");
+        assert_eq!(attachment(Some("   ")).display_name(), "attachment");
     }
 }

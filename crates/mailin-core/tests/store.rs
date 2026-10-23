@@ -1,8 +1,8 @@
 //! Store, search and outbox behaviour against a real SQLite database.
 
 use mailin_core::{
-    Account, AttachmentMeta, FolderRole, FolderSyncState, FolderUpsert, NewMessage, OutboxState,
-    Paths, Security, ServerSettings, Store,
+    Account, AttachmentData, AttachmentMeta, FolderRole, FolderSyncState, FolderUpsert, NewMessage,
+    OutboxState, Paths, Security, ServerSettings, Store,
 };
 
 fn account() -> Account {
@@ -53,7 +53,10 @@ fn schema_is_created_and_migrations_are_idempotent() {
     drop(store);
 
     let reopened = Store::open(&path).expect("reopen");
-    assert_eq!(reopened.schema_version().expect("version"), 1);
+    assert_eq!(
+        reopened.schema_version().expect("version"),
+        mailin_core::store::SCHEMA_VERSION
+    );
     assert_eq!(reopened.list_accounts().expect("accounts"), vec![account]);
 }
 
@@ -338,21 +341,27 @@ fn attachments_are_replaced_atomically() {
         .expect("insert");
 
     let attachments = vec![
-        AttachmentMeta {
-            part_id: "1.1".into(),
-            filename: Some("report.pdf".into()),
-            mime_type: "application/pdf".into(),
-            size: Some(2048),
-            content_id: None,
-            is_inline: false,
+        AttachmentData {
+            meta: AttachmentMeta {
+                part_id: "1.1".into(),
+                filename: Some("report.pdf".into()),
+                mime_type: "application/pdf".into(),
+                size: Some(2048),
+                content_id: None,
+                is_inline: false,
+            },
+            data: Some(b"%PDF".to_vec()),
         },
-        AttachmentMeta {
-            part_id: "1.2".into(),
-            filename: None,
-            mime_type: "image/png".into(),
-            size: None,
-            content_id: Some("<logo>".into()),
-            is_inline: true,
+        AttachmentData {
+            meta: AttachmentMeta {
+                part_id: "1.2".into(),
+                filename: None,
+                mime_type: "image/png".into(),
+                size: None,
+                content_id: Some("logo".into()),
+                is_inline: true,
+            },
+            data: Some(vec![0x89, b'P', b'N', b'G']),
         },
     ];
     store
@@ -360,7 +369,31 @@ fn attachments_are_replaced_atomically() {
         .expect("replace");
 
     let loaded = store.list_attachments(inserted.id).expect("list");
-    assert_eq!(loaded, attachments);
+    assert_eq!(
+        loaded,
+        attachments
+            .iter()
+            .map(|attachment| attachment.meta.clone())
+            .collect::<Vec<_>>()
+    );
+    let report = store
+        .attachment(inserted.id, "1.1")
+        .expect("attachment")
+        .expect("present");
+    assert_eq!(report.data.as_deref(), Some(b"%PDF".as_slice()));
+    assert_eq!(
+        store
+            .attachment_data(inserted.id, "1.2")
+            .expect("data")
+            .as_deref(),
+        Some(&[0x89, b'P', b'N', b'G'][..])
+    );
+    assert!(
+        store
+            .attachment(inserted.id, "missing")
+            .expect("missing")
+            .is_none()
+    );
     let header = store.message(inserted.id).expect("get").expect("present");
     assert!(header.has_attachments);
 

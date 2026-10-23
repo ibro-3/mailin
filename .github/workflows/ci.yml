@@ -29,7 +29,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev
+            pkg-config libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+            appstream desktop-file-utils
 
       - name: Format
         run: cargo fmt --all -- --check
@@ -39,6 +40,26 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --all-targets
+
+      - name: Packaging metadata
+        run: |
+          appstreamcli validate --no-net packaging/flatpak/dev.mailin.Mailin.metainfo.xml
+          desktop-file-validate packaging/flatpak/dev.mailin.Mailin.desktop
+
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: mailin.flatpak
+          manifest-path: packaging/flatpak/dev.mailin.Mailin.json
+          cache-key: "flatpak-${{ hashFiles('Cargo.lock', 'packaging/flatpak/dev.mailin.Mailin.json') }}"
+          artifact-name: mailin-x86_64.flatpak
 
   integration:
     name: IMAP/SMTP integration

@@ -1,0 +1,52 @@
+{
+  "id": "dev.mailin.Mailin",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "mailin",
+  "finish-args": [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri",
+    "--talk-name=org.freedesktop.secrets",
+    "--talk-name=org.freedesktop.Notifications"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/mailin/cargo"
+    }
+  },
+  "modules": [
+    {
+      "name": "mailin",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo build --release --offline --locked --package mailin-gtk",
+        "install -Dm755 target/release/mailin /app/bin/mailin",
+        "install -Dm644 packaging/flatpak/dev.mailin.Mailin.desktop /app/share/applications/dev.mailin.Mailin.desktop",
+        "install -Dm644 packaging/flatpak/dev.mailin.Mailin.metainfo.xml /app/share/metainfo/dev.mailin.Mailin.metainfo.xml",
+        "install -Dm644 packaging/flatpak/dev.mailin.Mailin.svg /app/share/icons/hicolor/scalable/apps/dev.mailin.Mailin.svg"
+      ],
+      "sources": [
+        "cargo-sources.json",
+        {
+          "type": "dir",
+          "path": "../..",
+          "skip": [
+            ".git",
+            "target",
+            "packaging/flatpak/.flatpak-builder",
+            "packaging/flatpak/build-dir",
+            "packaging/flatpak/repo"
+          ]
+        }
+      ]
+    }
+  ]
+}

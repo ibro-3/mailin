@@ -5,7 +5,7 @@
 
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders};
 
-use crate::model::AttachmentMeta;
+use crate::model::{AttachmentData, AttachmentMeta};
 
 /// Fields extracted from a message (or a header block).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,13 +20,13 @@ pub(crate) struct ParsedHeader {
     pub thread_key: Option<String>,
 }
 
-/// Body and attachment metadata of a complete message.
+/// Body and attachment data of a complete message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParsedBody {
     pub text: Option<String>,
     pub html: Option<String>,
     pub snippet: Option<String>,
-    pub attachments: Vec<AttachmentMeta>,
+    pub attachments: Vec<AttachmentData>,
 }
 
 /// Parse a `BODY[HEADER]` block. Missing or malformed bytes degrade to an
@@ -116,7 +116,7 @@ fn first_message_id(value: &HeaderValue<'_>) -> Option<String> {
     None
 }
 
-fn attachments_from(message: &Message<'_>) -> Vec<AttachmentMeta> {
+fn attachments_from(message: &Message<'_>) -> Vec<AttachmentData> {
     message
         .attachments()
         .enumerate()
@@ -128,18 +128,28 @@ fn attachments_from(message: &Message<'_>) -> Vec<AttachmentMeta> {
                     None => content_type.c_type.to_string(),
                 })
                 .unwrap_or_else(|| "application/octet-stream".to_owned());
-            AttachmentMeta {
+            let meta = AttachmentMeta {
                 part_id: (index + 1).to_string(),
                 filename: part.attachment_name().map(str::to_owned),
                 mime_type,
                 size: u32::try_from(part.len()).ok(),
-                content_id: part.content_id().map(str::to_owned),
+                content_id: part.content_id().map(strip_angle_brackets),
                 is_inline: part
                     .content_disposition()
                     .is_some_and(|disposition| disposition.is_inline()),
-            }
+            };
+            let data = (!part.is_multipart()).then(|| part.contents().to_vec());
+            AttachmentData { meta, data }
         })
         .collect()
+}
+
+fn strip_angle_brackets(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -210,11 +220,39 @@ mod tests {
         assert!(body.html.as_deref().unwrap_or("").contains("HTML body"));
         assert_eq!(body.attachments.len(), 1);
         let attachment = &body.attachments[0];
-        assert_eq!(attachment.filename.as_deref(), Some("report.pdf"));
-        assert_eq!(attachment.mime_type, "application/pdf");
-        assert!(!attachment.is_inline);
-        assert!(attachment.size.is_some());
+        assert_eq!(attachment.meta.filename.as_deref(), Some("report.pdf"));
+        assert_eq!(attachment.meta.mime_type, "application/pdf");
+        assert!(!attachment.meta.is_inline);
+        assert!(attachment.meta.size.is_some());
+        assert_eq!(attachment.data.as_deref(), Some(b"%PDF-1.4\n".as_slice()));
         assert!(body.snippet.as_deref().unwrap_or("").contains("Plain text"));
+    }
+
+    #[test]
+    fn inline_images_keep_their_content_id_and_bytes() {
+        let raw = b"From: a@example.com\r\n\
+            Subject: Inline\r\n\
+            MIME-Version: 1.0\r\n\
+            Content-Type: multipart/related; boundary=\"b\"\r\n\
+            \r\n\
+            --b\r\n\
+            Content-Type: text/html; charset=utf-8\r\n\
+            \r\n\
+            <p><img src=\"cid:logo@example.com\"></p>\r\n\
+            --b\r\n\
+            Content-Type: image/png\r\n\
+            Content-ID: <logo@example.com>\r\n\
+            Content-Disposition: inline\r\n\
+            Content-Transfer-Encoding: base64\r\n\
+            \r\n\
+            iVBORw0KGgo=\r\n\
+            --b--\r\n";
+        let (_, body) = parse_message(raw);
+        assert_eq!(body.attachments.len(), 1);
+        let image = &body.attachments[0];
+        assert_eq!(image.meta.content_id.as_deref(), Some("logo@example.com"));
+        assert!(image.meta.is_inline);
+        assert_eq!(image.data.as_deref(), Some(b"\x89PNG\r\n\x1a\n".as_slice()));
     }
 
     #[test]

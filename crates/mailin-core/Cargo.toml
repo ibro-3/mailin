@@ -14,6 +14,7 @@ keyring = ["dep:keyring"]
 
 [dependencies]
 async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+base64.workspace = true
 directories.workspace = true
 futures-util = "0.3"
 keyring = { workspace = true, optional = true }

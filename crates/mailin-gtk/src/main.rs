@@ -3,7 +3,9 @@
 mod account_dialog;
 mod app;
 mod autoconfig;
+mod compose;
 mod format;
+mod html;
 mod window;
 
 fn main() -> gtk::glib::ExitCode {
