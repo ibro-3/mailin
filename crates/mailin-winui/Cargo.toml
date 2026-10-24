@@ -1,0 +1,42 @@
+[package]
+name = "mailin-winui"
+description = "WinUI 3 front-end of the Mailin desktop mail client"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "mailin-winui"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+mailin-core.workspace = true
+mailin-winui-sys = { path = "../mailin-winui-sys" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+windows-collections = "0.100"
+windows-core = "0.100"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_LibraryLoader",
+] }
+
+[dependencies]
+anyhow.workspace = true
+
+# WinUI interop is unsafe by nature. The crate keeps the unsafe surface in the
+# bootstrap and UI shim modules; the core stays free of it.
+[lints.rust]
+unsafe_code = "allow"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+unimplemented = "deny"

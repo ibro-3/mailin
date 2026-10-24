@@ -13,18 +13,21 @@ never stores passwords outside the OS keyring.
 > outbox, the IMAP/SMTP engine (folder discovery, incremental sync, IDLE,
 > sending), the GTK shell (three-pane window, account wizard, reader) and GTK
 > polish (HTML mail, remote-content blocking, attachments, compose, desktop
-> notifications and Flatpak packaging). The WinUI front-end is next (see the
-> roadmap below).
+> notifications and Flatpak packaging). Milestone 5, the WinUI 3 binding spike,
+> is also done: the generated projection, App SDK bootstrap, XAML window and
+> WebView2 host build and ship as a CI artifact. WinUI product parity is next
+> (see the roadmap below).
 
 ## Layout
 
 ```
-crates/mailin-core   UI-agnostic core: accounts, store, credentials, sync
-crates/mailin-gtk    GTK 4 front-end: shell, wizard, reader (M3–M4)
-crates/mailin-winui  WinUI 3 front-end                     (M5–M6)
-xtask                repository automation
-docs/                architecture notes
-packaging/           Flatpak manifest, desktop metadata and icon
+crates/mailin-core      UI-agnostic core: accounts, store, credentials, sync
+crates/mailin-gtk       GTK 4 front-end: shell, wizard, reader (M3–M4)
+crates/mailin-winui     WinUI 3 front-end                     (M5–M6)
+crates/mailin-winui-sys Generated Windows App SDK projection  (M5)
+xtask                   repository automation
+docs/                   architecture notes
+packaging/              Flatpak manifest, desktop metadata and icon
 ```
 
 ## Building
@@ -72,11 +75,33 @@ editing the metainfo file. CI builds the bundle on every push and pull request.
 
 The WinUI front-end is built in CI on `windows-latest` (see
 `.github/workflows/ci.yml`). A local Windows checkout needs the MSVC build tools
-plus the Windows App SDK runtime; the core itself builds anywhere:
+and the Windows App SDK 1.8 runtime. The core itself builds anywhere.
 
 ```powershell
-cargo build -p mailin-core
+cargo xtask winui-runtime          # download Microsoft.WindowsAppRuntime.Bootstrap.dll
+$env:MAILIN_WINDOWSAPPSDK_BOOTSTRAP = "$PWD\target\winui-runtime\Microsoft.WindowsAppRuntime.Bootstrap.dll"
+cargo build -p mailin-winui
+cargo run -p mailin-winui
 ```
+
+`cargo xtask winui-runtime` downloads the bootstrapper into
+`target/winui-runtime/`; `build.rs` copies it next to `mailin-winui.exe` and
+also finds that default path without the environment variable. Install the
+runtime from
+<https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe> if
+the application reports that it cannot attach the framework package.
+
+The XAML projection is generated, not hand written:
+
+```powershell
+cargo xtask winui-bindgen
+```
+
+This downloads the pinned App SDK, WebView2 and Windows SDK Contracts metadata
+into `target/winui-bindgen/` and rewrites
+`crates/mailin-winui-sys/src/bindings.rs` from
+`crates/mailin-winui-sys/filter.txt`. Commit both the filter and the generated
+file when the projection changes.
 
 ## Testing
 
@@ -118,7 +143,7 @@ and config file are created with `0600` permissions on Unix.
 | 2 | IMAP/SMTP engine: folder discovery, incremental sync, IDLE, send ✅ |
 | 3 | GTK shell: three-pane window, account wizard, reader ✅ |
 | 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak ✅ |
-| 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 |
+| 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 ✅ |
 | 6 | WinUI front-end parity |
 | 7 | Packaging, hardening, accessibility, performance |
 
@@ -135,6 +160,9 @@ and config file are created with `0600` permissions on Unix.
   remote content disabled until the user explicitly loads images for a message.
 - The Flatpak sandbox gets network, Wayland/X11, GPU access, the Secret Service
   and desktop notifications; nothing else is shared with the host.
+- The WinUI front-end is plain Rust over a generated, filtered Windows App SDK
+  projection. There is no C# project and no `.xaml`; the App SDK framework
+  package is attached at startup with `MddBootstrapInitialize2`.
 
 See [`docs/architecture.md`](docs/architecture.md) for the full picture and the
 known Windows/WinUI constraints.

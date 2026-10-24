@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/mailin-core", "crates/mailin-gtk", "xtask"]
+members = [
+  "crates/mailin-core",
+  "crates/mailin-gtk",
+  "crates/mailin-winui",
+  "crates/mailin-winui-sys",
+  "xtask",
+]
 
 [workspace.package]
 version = "0.1.0"

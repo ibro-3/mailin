@@ -1,0 +1,24 @@
+[package]
+name = "mailin-winui-sys"
+description = "Generated WinUI 3 (Windows App SDK) projection used by the Mailin Windows front-end"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows-collections = "0.100"
+windows-core = "0.100"
+windows-future = "0.100"
+
+# Generated code is not ours to lint. `unsafe` is inherent to the COM ABI and
+# every warning in this crate is either an ABI spelling rule or dead code.
+[lints.rust]
+unsafe_code = "allow"
+unused_must_use = "allow"
+missing_debug_implementations = "allow"
