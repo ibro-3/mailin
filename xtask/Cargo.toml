@@ -3,12 +3,14 @@ name = "xtask"
 description = "Repository automation for Mailin"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# windows-bindgen 0.100, used by `winui-bindgen`, requires Rust 1.95.
+rust-version = "1.95"
 license.workspace = true
 publish = false
 
 [dependencies]
 anyhow.workspace = true
+windows-bindgen = "0.100"
 
 [lints]
 workspace = true

@@ -96,6 +96,8 @@ jobs:
   windows:
     name: Windows build and tests
     runs-on: windows-latest
+    env:
+      MAILIN_WINDOWSAPPSDK_BOOTSTRAP: ${{ github.workspace }}\target\winui-runtime\Microsoft.WindowsAppRuntime.Bootstrap.dll
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -110,6 +112,33 @@ jobs:
       - name: Tests (core)
         run: cargo test -p mailin-core
 
-      # Milestone 5 adds the WinUI 3 crate here:
-      #   cargo build --release -p mailin-winui --target x86_64-pc-windows-msvc
-      # and uploads the self-contained runtime bundle.
+      - name: Fetch Windows App SDK bootstrapper
+        run: cargo run -p xtask -- winui-runtime
+
+      - name: Install Windows App SDK 1.8 runtime
+        run: |
+          $installer = "$env:RUNNER_TEMP\WindowsAppRuntimeInstall-x64.exe"
+          curl.exe -L --fail --silent --show-error -o $installer `
+            https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe
+          $process = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "--quiet"
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+
+      - name: Clippy (WinUI)
+        run: >-
+          cargo clippy -p mailin-winui -p mailin-winui-sys --all-targets
+          --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Tests (WinUI)
+        run: cargo test -p mailin-winui --target x86_64-pc-windows-msvc
+
+      - name: Build (WinUI)
+        run: cargo build --release -p mailin-winui --target x86_64-pc-windows-msvc
+
+      - name: Upload WinUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailin-winui-x86_64
+          path: |
+            target/x86_64-pc-windows-msvc/release/mailin-winui.exe
+            target/x86_64-pc-windows-msvc/release/Microsoft.WindowsAppRuntime.Bootstrap.dll
+          if-no-files-found: error
