@@ -99,6 +99,8 @@ struct Widgets {
     forward_button: Button,
     flag_button: Button,
     read_button: Button,
+    /// Keyboard shortcuts help window (created on demand)
+    shortcuts_window: std::cell::RefCell<Option<Window>>,
 }
 
 pub struct MainWindow {
@@ -856,6 +858,37 @@ impl MainWindow {
         }
     }
 
+    /// Show the keyboard shortcuts help window.
+    fn show_shortcuts_help(self: &Rc<Self>) {
+        // Check if window already exists
+        if let Some(existing) = self.widgets.shortcuts_window.borrow().as_ref() {
+            let _ = existing.Activate();
+            return;
+        }
+
+        let parent = self.widgets.window.clone();
+
+        // Build the shortcuts window using XAML
+        let shortcuts_window = match Self::build_shortcuts_window(&parent) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::error!("Failed to create shortcuts window: {e:#}");
+                return;
+            }
+        };
+
+        // Store reference
+        *self.widgets.shortcuts_window.borrow_mut() = Some(shortcuts_window.clone());
+
+        // Clean up reference when closed
+        let this = Rc::clone(self);
+        let _ = shortcuts_window.Closed(move |_, _| {
+            *this.widgets.shortcuts_window.borrow_mut() = None;
+        });
+
+        let _ = shortcuts_window.Activate();
+    }
+
     // ---------------------------------------------------------------- events
 
     fn drain_events(self: &Rc<Self>, events: &Mutex<broadcast::Receiver<Event>>) {
@@ -1184,6 +1217,33 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     // Ctrl+Enter: Send (handled in composer)
     // Note: This will be added in the compose window
 
+    // F1 / Ctrl+/: Show keyboard shortcuts help
+    let help_accel = KeyboardAccelerator::new().context("could not create help accelerator")?;
+    help_accel.SetKey(VirtualKey::F1)?;
+    help_accel.Invoked({
+        let this = Rc::downgrade(&this);
+        move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.show_shortcuts_help();
+            }
+        }
+    })?;
+    accelerators.Append(&help_accel)?;
+
+    // Ctrl+/ (Ctrl+OemQuestion): Alternative shortcut for help
+    let help_accel2 = KeyboardAccelerator::new().context("could not create help accelerator 2")?;
+    help_accel2.SetKey(VirtualKey::OemQuestion)?;
+    help_accel2.SetModifiers(VirtualKeyModifiers::Control)?;
+    help_accel2.Invoked({
+        let this = Rc::downgrade(&this);
+        move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.show_shortcuts_help();
+            }
+        }
+    })?;
+    accelerators.Append(&help_accel2)?;
+
     let this = Rc::new(MainWindow {
         app: Arc::clone(state),
         state: Mutex::new(State {
@@ -1239,6 +1299,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             forward_button,
             flag_button,
             read_button,
+            shortcuts_window: std::cell::RefCell::new(None),
         },
     });
 
@@ -1481,4 +1542,101 @@ fn message_row(message: &MessageHeader, now: i64) -> Result<Button> {
     let button = ui::content_button(&column)?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
     Ok(button)
+}
+
+/// Build the keyboard shortcuts help window using XAML.
+fn build_shortcuts_window(parent: &Window) -> Result<Window> {
+    // Create a dialog-style window for shortcuts
+    let shortcuts_window = Window::new().context("could not create shortcuts window")?;
+    shortcuts_window.SetTitle("Keyboard Shortcuts")?;
+
+    // Build content from XAML
+    let content = ui::load::<StackPanel>(
+        r#"
+        <StackPanel xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" 
+                    Orientation="Vertical" Spacing="8" Margin="24,16,24,24">
+            <TextBlock Text="Mailin Keyboard Shortcuts" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,8"/>
+            <StackPanel Orientation="Vertical" Spacing="4">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+N" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="New message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+F" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Search mail"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="F5" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Synchronize"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+A" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Add account"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Enter" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Send message (in composer)"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="↑ / ↓" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Navigate message list"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Enter" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Open selected message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="F1 / Ctrl+?" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Show this help"/>
+                </Grid>
+            </StackPanel>
+        </StackPanel>
+        "#,
+    )?;
+
+    shortcuts_window.SetContent(&content)?;
+    shortcuts_window.SetWidth(400.0)?;
+    shortcuts_window.SetHeight(400.0)?;
+
+    Ok(shortcuts_window)
 }

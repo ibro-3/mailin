@@ -66,6 +66,34 @@ fn tls_parameters(host: &str) -> Result<TlsParameters> {
         .map_err(|e| Error::Tls(format!("could not prepare TLS for {host}: {e}")))
 }
 
+/// Test SMTP connection by connecting and authenticating.
+pub(crate) async fn test_connection(
+    settings: &ServerSettings,
+    password: &str,
+) -> Result<()> {
+    let tls = match settings.security {
+        Security::Tls => Tls::Wrapper(tls_parameters(&settings.host)?),
+        Security::StartTls => Tls::Required(tls_parameters(&settings.host)?),
+        Security::None => Tls::None,
+    };
+
+    let transport: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
+        .port(settings.port)
+        .credentials(Credentials::new(
+            settings.username.clone(),
+            password.to_owned(),
+        ))
+        .tls(tls)
+        .timeout(Some(SEND_TIMEOUT))
+        .build();
+
+    // Test the connection by sending a NOOP command
+    let _ = transport.test_connection().await
+        .map_err(|e| Error::Smtp(format!("connection test failed: {e}")))?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

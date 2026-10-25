@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::glib;
 use mailin_core::{Account, AccountId, Security, ServerSettings};
 
 use crate::app::AppState;
@@ -137,6 +138,7 @@ pub fn present(
     error_label.add_css_class("error");
 
     let cancel = gtk::Button::with_label("Cancel");
+    let test = gtk::Button::with_label("Test Connection");
     let save = gtk::Button::with_label("Add Account");
     save.add_css_class("suggested-action");
 
@@ -146,6 +148,7 @@ pub fn present(
     actions.set_margin_start(18);
     actions.set_margin_end(18);
     actions.append(&error_label);
+    actions.append(&test);
     actions.append(&cancel);
     actions.append(&save);
 
@@ -213,6 +216,55 @@ pub fn present(
         let dialog = dialog.clone();
         move |_| {
             dialog.close();
+        }
+    });
+
+    test.connect_clicked({
+        let app = Rc::clone(&app);
+        let rows = FormRows {
+            name: name_row.clone(),
+            email: email_row.clone(),
+            password: password_row.clone(),
+            imap_host: imap_host.clone(),
+            imap_port: imap_port.clone(),
+            imap_user: imap_user.clone(),
+            imap_security: imap_security.clone(),
+            smtp_host: smtp_host.clone(),
+            smtp_port: smtp_port.clone(),
+            smtp_user: smtp_user.clone(),
+            smtp_security: smtp_security.clone(),
+        };
+        let error_label = error_label.clone();
+        move |_| {
+            let draft = rows.draft();
+            let password = draft.password.clone();
+            let account = match draft.build() {
+                Ok(account) => account,
+                Err(error) => {
+                    error_label.set_text(&error);
+                    error_label.set_visible(true);
+                    return;
+                }
+            };
+            error_label.set_visible(false);
+            error_label.set_text("Testing connection…");
+            error_label.set_visible(true);
+            let app = Rc::clone(&app);
+            let error_label = error_label.clone();
+            glib::spawn_future_local(async move {
+                match app.mailin.test_connection(&account.imap, &account.smtp, &password).await {
+                    Ok(()) => {
+                        error_label.set_text("Connection successful!");
+                        error_label.add_css_class("success");
+                        error_label.set_visible(true);
+                    }
+                    Err(error) => {
+                        error_label.set_text(&format!("Connection failed: {error}"));
+                        error_label.add_css_class("error");
+                        error_label.set_visible(true);
+                    }
+                }
+            });
         }
     });
 

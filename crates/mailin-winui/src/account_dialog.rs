@@ -181,8 +181,10 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
     let spacer = ui::text("")?;
     ui::stretch_horizontal(&spacer)?;
     ui::append(&footer, &spacer)?;
+    let test = ui::button("Test Connection")?;
     let cancel = ui::button("Cancel")?;
     let save = ui::button("Add Account")?;
+    ui::append(&footer, &test)?;
     ui::append(&footer, &cancel)?;
     ui::append(&footer, &save)?;
     ui::set_row(&footer, 2)?;
@@ -270,6 +272,53 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
         let window = window.clone();
         move || {
             let _ = window.Close();
+        }
+    })?);
+
+    revokers.keep(ui::on_click(&test, {
+        let app = Arc::clone(&app);
+        let rows = FormRows {
+            name: rows.name.clone(),
+            email: rows.email.clone(),
+            password: rows.password.clone(),
+            imap_host: rows.imap_host.clone(),
+            imap_port: rows.imap_port.clone(),
+            imap_user: rows.imap_user.clone(),
+            imap_security: rows.imap_security.clone(),
+            smtp_host: rows.smtp_host.clone(),
+            smtp_port: rows.smtp_port.clone(),
+            smtp_user: rows.smtp_user.clone(),
+            smtp_security: rows.smtp_security.clone(),
+        };
+        let error = error.clone();
+        move || {
+            let draft = rows.draft();
+            let password = draft.password.clone();
+            let account = match draft.build() {
+                Ok(account) => account,
+                Err(message) => {
+                    let _ = error.SetText(&message);
+                    let _ = ui::set_visible(&error, true);
+                    return;
+                }
+            };
+            let _ = error.SetText("Testing connection…");
+            let _ = ui::set_visible(&error, true);
+            let app = Arc::clone(&app);
+            let error = error.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let result = runtime.block_on(app.mailin.test_connection(&account.imap, &account.smtp, &password));
+                match result {
+                    Ok(()) => {
+                        let _ = error.SetText("Connection successful!");
+                    }
+                    Err(e) => {
+                        let _ = error.SetText(&format!("Connection failed: {e}"));
+                    }
+                }
+                let _ = ui::set_visible(&error, true);
+            });
         }
     })?);
 

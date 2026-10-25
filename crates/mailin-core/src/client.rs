@@ -150,6 +150,17 @@ impl Mailin {
             .ok_or_else(|| Error::Credentials("no password is stored for this account".into()))
     }
 
+    /// Test both IMAP and SMTP connections for the given account settings.
+    /// This does not require the account to be saved in the database.
+    pub async fn test_connection(
+        &self,
+        imap: &crate::account::ServerSettings,
+        smtp: &crate::account::ServerSettings,
+        password: &str,
+    ) -> Result<()> {
+        crate::client::test_connection(imap, smtp, password).await
+    }
+
     // ----------------------------------------------------------------- folders
 
     pub fn list_folders(&self, account: &AccountId) -> Result<Vec<Folder>> {
@@ -227,6 +238,28 @@ impl Mailin {
     pub fn outbox_len(&self) -> Result<u32> {
         self.store.outbox_len()
     }
+}
+
+/// Test both IMAP and SMTP connections for an account.
+///
+/// This attempts to connect to both servers and authenticate. Returns a descriptive
+/// error message if either connection fails.
+pub async fn test_connection(
+    imap: &crate::account::ServerSettings,
+    smtp: &crate::account::ServerSettings,
+    password: &str,
+) -> Result<()> {
+    // Test IMAP connection
+    let tls = crate::tls::client_config()?;
+    let imap_session = crate::imap::ImapSession::connect(imap, password, tls.clone()).await
+        .map_err(|e| crate::Error::Imap(format!("IMAP connection failed: {e}")))?;
+    imap_session.logout().await;
+
+    // Test SMTP connection
+    crate::smtp::test_connection(smtp, password).await
+        .map_err(|e| crate::Error::Smtp(format!("SMTP connection failed: {e}")))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
