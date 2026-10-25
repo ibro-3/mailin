@@ -1,16 +1,25 @@
 //! Mailin WinUI 3 front-end.
 //!
-//! Milestone 5 is a binding spike: prove that a generated Windows App SDK
-//! projection, the App SDK bootstrapper, a XAML window and a WebView2 control
-//! work together from plain Rust. The GTK client remains the supported Linux
-//! front-end; this binary only builds and runs on Windows.
+//! The Windows client uses the same UI-agnostic `mailin-core` store and engine
+//! as the GTK client. This crate composes the WinUI shell from Rust over the
+//! generated Windows App SDK projection in `mailin-winui-sys`; there is no C#
+//! project and no XAML compiler in the build. The GTK client remains the
+//! supported Linux front-end; this binary only builds and runs on Windows.
 
+#[cfg(windows)]
+mod account_dialog;
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
 mod bootstrap;
 #[cfg(windows)]
-mod html;
+mod compose;
+#[cfg(windows)]
+mod format;
+#[cfg(windows)]
+mod platform;
+#[cfg(windows)]
+mod ui;
 #[cfg(windows)]
 mod window;
 

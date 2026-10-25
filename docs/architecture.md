@@ -257,14 +257,15 @@ These are verified constraints, not preferences:
   `Microsoft.Windows.SDK.Contracts` NuGet packages and committed to the
   repository.
 - The projection is deliberately narrow. `crates/mailin-winui-sys/filter.txt`
-  lists only the application, window, grid, text block, resource dictionary and
-  WebView2 types the spike needs. Generating the whole `Microsoft.UI.Xaml`
-  namespace produces roughly 43 MB of Rust; the filtered projection is about
-  240 KB. `--minimal` keeps the static helpers but drops instance class methods,
-  so instance members are called through their interfaces and the three
-  classes that use the generic activation factory (`TextBlock`,
-  `RowDefinition`, `XamlControlsResources`) get their constructors from
-  `mailin-winui-sys/src/lib.rs`.
+  lists the application, window, layout, text and input controls, common
+  collections, dispatcher timer and WebView2 types the client needs.
+  Generating the whole `Microsoft.UI.Xaml` namespace produces roughly 43 MB of
+  Rust; the filtered projection is a small fraction of that. `--minimal` keeps
+  the static helpers but drops instance class methods, so instance members are
+  called through their interfaces. Classes without an activation factory
+  (`TextBlock`, `Border`, `ScrollViewer`, `PasswordBox`, `RowDefinition`,
+  `ColumnDefinition`, `XamlControlsResources`) are created from small
+  `XamlReader::Load` fragments instead of C#-style constructors.
 - A pure Cargo build has **no XAML compiler**, so there are no `.xaml` files in
   the build. UI is composed in Rust; small declarative fragments can be parsed
   at runtime with `XamlReader::Load`.
@@ -293,21 +294,55 @@ These are verified constraints, not preferences:
 
 **Go.** The spike proves that the shared core, a generated App SDK projection,
 the App SDK bootstrapper, a composed XAML application and a WebView2 control can
-live in one Cargo workspace without a XAML compiler or a C# project. The
-remaining work for milestone 6 is product UI, not infrastructure:
-
-- the window is intentionally one header plus one WebView2; the real shell,
-  account wizard and reader still have to be built;
-- the projection must grow (or be regenerated with a wider filter) for list,
-  split-view, command-bar and dialog controls;
-- WebView2 navigation, script isolation and the HTML policy have to be wired to
-  the same helpers the GTK client uses;
-- the framework package is a prerequisite. Self-contained deployment and
-  `resources.pri` generation remain packaging work.
+live in one Cargo workspace without a XAML compiler or a C# project. That
+milestone deliberately stopped at infrastructure; the product UI landed in
+milestone 6.
 
 If the projection had proved unusable, the fallback was a WinUI 3 shell in C#
 over the same core through a C ABI, or a native Win32 shell. That fallback is
 not needed.
+
+### Milestone 6: WinUI front-end parity
+
+The WinUI client now has the same shape as the GTK client, still without a C#
+project or a XAML compiler:
+
+- `window.rs` builds the three-pane shell from Rust: toolbar with account
+  picker, search and sync; folder sidebar with unread counts and role markers;
+  message list with sender, subject, snippet, time, star and attachment
+  markers; reader with headers, plain/HTML toggle, remote-content prompt,
+  attachments and reply/reply-all/forward actions.
+- `account_dialog.rs` mirrors the GTK wizard: identity, IMAP and SMTP fields,
+  provider suggestions that never overwrite edited fields, the same validation,
+  and a stable account id across retry attempts.
+- `compose.rs` builds new messages, replies, replies-all and forwards, attaches
+  files up to 50 MB and queues them through `Engine::queue_and_send`.
+- `platform.rs` uses the Win32 common open/save dialogs because the WinRT
+  pickers need an `HWND` interop object; attachment MIME guessing and size
+  limits match the GTK client.
+- `format.rs` produces the same relative times, full local dates, sender and
+  subject fallbacks and file sizes. Win32 `FileTimeToLocalFileTime` and
+  `FileTimeToSystemTime` replace GLib date formatting.
+- `ui.rs` is the control layer: XAML fragments, text/button/panel/grid helpers,
+  visibility and sizing, and event subscriptions. `EventRevoker`s are stored on
+  the window and cleared when lists are rebuilt or a dialog closes, so handlers
+  are not revoked while their controls are still alive.
+- The core event broadcast is drained by a `DispatcherQueueTimer` on the UI
+  thread; account, folder, message and body-change events refresh only the
+  affected panes, and `Lagged` receivers fall back to a full refresh.
+- HTML mail uses the shared `mailin_core::html` document, CSP, `cid:` rewriting
+  and remote-content detector. The GTK-specific WebKit policy and the
+  WinUI-specific WebView2 host stay in their own crates.
+- Pure `autoconfig` and HTML policy helpers moved to `mailin-core`, so both
+  front-ends test the same provider table and security policy.
+
+The projection grew accordingly: layout panels, text/input controls,
+`IItemsControl`/`ISelector`, `ICommand`, dispatcher timers and WebView2. It is
+still generated from the pinned metadata; `filter.txt` is the source of truth.
+
+Windows runtime behaviour (window sizing, WebView2 rendering and the common
+file dialogs) still needs a Windows desktop or the `windows-latest` CI job; the
+Linux development machine cross-checks the crate with the MSVC target.
 
 ## Testing strategy
 
@@ -330,10 +365,10 @@ not needed.
 | Accounts in the database | Single source of truth, atomic edits |
 | Tokio broadcast for change events | One mechanism for local edits and network updates |
 | Decoded attachment bytes in SQLite | The body fetch already downloads every MIME part; a second round trip per attachment would be slower and fragile offline |
-| Locked-down WebKit + CSP + opt-in remote content | HTML mail is hostile input; privacy is the default |
+| Locked-down WebKit/WebView2 + shared CSP + opt-in remote content | HTML mail is hostile input; privacy is the default on both front-ends |
 | `GNotification` instead of a notification crate | Uses the platform notification channel and the Flatpak portal without another dependency |
 | No `Content-Transfer-Encoding` shortcuts | Bodies are parsed with `mail-parser` in M2; never store raw MIME as text |
-| `windows-bindgen --minimal` with a checked-in filter | The full XAML projection is ~43 MB; the spike needs six controls and a few interfaces |
+| `windows-bindgen --minimal` with a checked-in filter | The full XAML projection is ~43 MB; the client needs a small set of controls, collections and WebView2 types |
 | XAML composed in Rust, no `.xaml` files | Cargo has no XAML compiler; a generated projection keeps the build self-contained |
 | Load `MddBootstrapInitialize2` with `LoadLibraryW` | The App SDK bootstrapper is a C export, not WinRT metadata, so bindgen cannot project it |
 | Bootstrap the framework package, not self-contained deployment | Fastest way to prove the runtime path; self-contained packaging belongs to M7 |

@@ -13,12 +13,14 @@
 //!   keyring through [`CredentialsStore`].
 
 pub mod account;
+pub mod autoconfig;
 pub mod client;
 pub mod compose;
 pub mod config;
 pub mod credentials;
 pub mod engine;
 pub mod error;
+pub mod html;
 mod imap;
 pub mod model;
 mod smtp;

@@ -1513,11 +1513,13 @@ dependencies = [
  "anyhow",
  "mailin-core",
  "mailin-winui-sys",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "windows-collections",
  "windows-core",
  "windows-sys 0.61.2",
+ "windows-time",
 ]
 
 [[package]]
@@ -1527,6 +1529,9 @@ dependencies = [
  "windows-collections",
  "windows-core",
  "windows-future",
+ "windows-numerics",
+ "windows-reference",
+ "windows-time",
 ]
 
 [[package]]
@@ -2895,6 +2900,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-numerics"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c5500bf6a9098f27922953422ae7324cdd330c868e945801593455a6832701"
+dependencies = [
+ "windows-core",
+]
+
+[[package]]
+name = "windows-reference"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdfaf342eb9cfa3b519410caa05f8ebd3b20b7e077cdf80d013a5bca4f1b194b"
+dependencies = [
+ "windows-core",
+ "windows-time",
+]
+
+[[package]]
 name = "windows-result"
 version = "0.100.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2953,6 +2977,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cff005f1c94bffb9b073230837d3448d0e0ba3cf11c34b6f1f7d4c3875eded09"
 dependencies = [
  "windows-link 0.100.0",
+]
+
+[[package]]
+name = "windows-time"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de136aac4d76b9ea94b2589774be8bcd91b31b2dd7dae54abdd63335590095e4"
+dependencies = [
+ "windows-core",
 ]
 
 [[package]]

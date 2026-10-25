@@ -5,7 +5,8 @@
 //!
 //! 1. bootstrap the Windows App SDK framework package;
 //! 2. initialise the thread as an STA (WinUI requires one);
-//! 3. open the same `mailin-core` store the GTK client uses;
+//! 3. open the same `mailin-core` store the GTK client uses and start its
+//!    network engine;
 //! 4. enter `Application::Start`, which initialises XAML, invokes our
 //!    `OnLaunched` override and then pumps messages until the last window
 //!    closes.
@@ -13,7 +14,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use mailin_core::{Config, Mailin, Paths};
+use mailin_core::{Config, Engine, Mailin, Paths};
 use mailin_winui_sys::{
     Application, ApplicationInitializationCallback, DispatcherShutdownMode, IApplication3,
     IApplicationOverrides, IApplicationOverrides_Impl, LaunchActivatedEventArgs,
@@ -30,6 +31,7 @@ use crate::window;
 pub struct AppState {
     pub config: Config,
     pub mailin: Arc<Mailin>,
+    pub engine: Engine,
 }
 
 impl AppState {
@@ -39,7 +41,12 @@ impl AppState {
         let config = Config::load(&paths)?;
         config.validate()?;
         let mailin = Arc::new(Mailin::open(&paths)?);
-        Ok(Self { config, mailin })
+        let engine = Engine::start(Arc::clone(&mailin))?;
+        Ok(Self {
+            config,
+            mailin,
+            engine,
+        })
     }
 }
 
@@ -78,7 +85,7 @@ pub fn run() -> Result<()> {
     tracing::info!(
         accounts,
         page_size = state.config.ui.page_size,
-        "starting the WinUI spike"
+        "starting the WinUI client"
     );
 
     let callback = ApplicationInitializationCallback::new({

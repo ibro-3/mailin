@@ -182,6 +182,8 @@ fn winui_bindgen() -> Result<()> {
         filter.to_str().context("filter path is not UTF-8")?,
         "--implement",
         "Microsoft.UI.Xaml.IApplicationOverrides",
+        "--implement",
+        "Microsoft.UI.Xaml.Input.ICommand",
         "--compose",
         "Microsoft.UI.Xaml.Application",
         "--minimal",

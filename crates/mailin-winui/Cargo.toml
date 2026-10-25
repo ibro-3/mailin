@@ -16,15 +16,22 @@ path = "src/main.rs"
 [target.'cfg(windows)'.dependencies]
 mailin-core.workspace = true
 mailin-winui-sys = { path = "../mailin-winui-sys" }
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 windows-collections = "0.100"
 windows-core = "0.100"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_LibraryLoader",
+  "Win32_System_Time",
+  "Win32_UI_Controls",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_WindowsAndMessaging",
 ] }
+windows-time = "0.100"
 
 [dependencies]
 anyhow.workspace = true

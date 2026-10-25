@@ -7,11 +7,11 @@
 //! Microsoft.WindowsAppSDK, Microsoft.Web.WebView2 and
 //! Microsoft.Windows.SDK.Contracts NuGet packages.
 //!
-//! The projection is deliberately narrow: it contains only the types the
-//! milestone 5 spike uses (application, window, a grid, a text block and the
-//! WebView2 control) instead of the ~43 MB full XAML namespace. The filter
-//! lives in `filter.txt` next to this crate and is the input to the generator,
-//! so regenerating the bindings is reproducible.
+//! The projection is deliberately narrow: it contains the application, window,
+//! layout and text controls, the common input controls and WebView2 instead of
+//! the ~43 MB full XAML namespace. The filter lives in `filter.txt` next to this
+//! crate and is the input to the generator, so regenerating the bindings is
+//! reproducible.
 //!
 //! The generated code is not edited by hand.
 
@@ -27,42 +27,3 @@
 mod bindings;
 
 pub use bindings::*;
-
-use windows_core::{Interface, RuntimeName};
-
-/// Activate a XAML class that is created through the generic activation
-/// factory.
-///
-/// `windows-bindgen --minimal` emits a constructor only for classes whose
-/// factory interface is part of the projection. `TextBlock`, `RowDefinition`
-/// and `XamlControlsResources` use the generic `IActivationFactory`, which is
-/// not a metadata type, so their constructors are supplied here instead.
-fn activate<T>() -> windows_core::Result<T>
-where
-    T: RuntimeName + Interface,
-{
-    let factory: windows_core::imp::IGenericFactory =
-        windows_core::factory::<T, windows_core::imp::IGenericFactory>()?;
-    factory.ActivateInstance()
-}
-
-impl TextBlock {
-    /// Create a new text block.
-    pub fn new() -> windows_core::Result<Self> {
-        activate()
-    }
-}
-
-impl RowDefinition {
-    /// Create a new row definition.
-    pub fn new() -> windows_core::Result<Self> {
-        activate()
-    }
-}
-
-impl XamlControlsResources {
-    /// Create the default WinUI control styles.
-    pub fn new() -> windows_core::Result<Self> {
-        activate()
-    }
-}

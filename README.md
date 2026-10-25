@@ -8,22 +8,22 @@ A native desktop email client with one shared Rust core and two native front-end
 Mailin speaks IMAP and SMTP, keeps a local SQLite cache for offline reading, and
 never stores passwords outside the OS keyring.
 
-> **Status:** early, but usable on Linux. Milestones 0–4 are done: workspace,
+> **Status:** early, but usable on Linux. Milestones 0–6 are done: workspace,
 > CI, configuration, credential storage, SQLite schema, full text search,
 > outbox, the IMAP/SMTP engine (folder discovery, incremental sync, IDLE,
-> sending), the GTK shell (three-pane window, account wizard, reader) and GTK
+> sending), the GTK shell (three-pane window, account wizard, reader), GTK
 > polish (HTML mail, remote-content blocking, attachments, compose, desktop
-> notifications and Flatpak packaging). Milestone 5, the WinUI 3 binding spike,
-> is also done: the generated projection, App SDK bootstrap, XAML window and
-> WebView2 host build and ship as a CI artifact. WinUI product parity is next
-> (see the roadmap below).
+> notifications and Flatpak packaging), the WinUI 3 binding spike, and the WinUI
+> product shell (three panes, account wizard, reader, HTML policy, attachments,
+> compose, search and the core event pump). Packaging, hardening and
+> accessibility are next (see the roadmap below).
 
 ## Layout
 
 ```
 crates/mailin-core      UI-agnostic core: accounts, store, credentials, sync
 crates/mailin-gtk       GTK 4 front-end: shell, wizard, reader (M3–M4)
-crates/mailin-winui     WinUI 3 front-end                     (M5–M6)
+crates/mailin-winui     WinUI 3 front-end: shell, wizard, reader (M5–M6)
 crates/mailin-winui-sys Generated Windows App SDK projection  (M5)
 xtask                   repository automation
 docs/                   architecture notes
@@ -144,7 +144,7 @@ and config file are created with `0600` permissions on Unix.
 | 3 | GTK shell: three-pane window, account wizard, reader ✅ |
 | 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak ✅ |
 | 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 ✅ |
-| 6 | WinUI front-end parity |
+| 6 | WinUI front-end parity ✅ |
 | 7 | Packaging, hardening, accessibility, performance |
 
 ## Design notes
@@ -156,8 +156,10 @@ and config file are created with `0600` permissions on Unix.
   page. Search uses FTS5; the index row id mirrors `messages.id`, so updates and
   deletes stay cheap.
 - UIDVALIDITY, CONDSTORE and IDLE handling are designed in `docs/architecture.md`.
-- HTML bodies render in a locked-down WebKit view with JavaScript, plugins and
-  remote content disabled until the user explicitly loads images for a message.
+- HTML bodies render in a locked-down WebKit view on Linux and WebView2 on
+  Windows, using one policy from `mailin-core`: JavaScript, plugins and remote
+  content are disabled until the user explicitly loads images for a message.
+  Inline `cid:` images become `data:` URLs so they work offline.
 - The Flatpak sandbox gets network, Wayland/X11, GPU access, the Secret Service
   and desktop notifications; nothing else is shared with the host.
 - The WinUI front-end is plain Rust over a generated, filtered Windows App SDK
