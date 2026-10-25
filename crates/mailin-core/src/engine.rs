@@ -28,6 +28,7 @@ use crate::model::{
     Folder, FolderId, FolderRole, MessageId, OutboxEntry, OutboxState, OutgoingEnvelope,
 };
 use crate::sync::{self, SyncMode};
+use secrecy::{ExposeSecret, SecretString};
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
@@ -370,12 +371,12 @@ async fn wait_with_backoff(
 async fn run_session(
     state: &Arc<EngineState>,
     account: &Account,
-    password: &str,
+    password: &SecretString,
     commands: &mut mpsc::UnboundedReceiver<WorkerCommand>,
     pending: &mut VecDeque<WorkerCommand>,
 ) -> Result<()> {
     let tls = crate::tls::client_config()?;
-    let mut session = ImapSession::connect(&account.imap, password, tls).await?;
+    let mut session = ImapSession::connect(&account.imap, password.expose_secret(), tls).await?;
     let remote = session.list_folders().await?;
     sync::refresh_folders(&state.mailbox, account.id, &remote)?;
 
@@ -731,7 +732,13 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
         .set_outbox_state(entry.id, OutboxState::Sending, None)?;
     state.mailbox.publish(Event::OutboxChanged);
 
-    crate::smtp::send(&account.smtp, &password, &entry.raw, &envelope).await?;
+    crate::smtp::send(
+        &account.smtp,
+        password.expose_secret(),
+        &entry.raw,
+        &envelope,
+    )
+    .await?;
 
     // Mark the message as sent before the best-effort Sent copy: a server
     // without a usable Sent folder must not cause a second SMTP submission.
@@ -741,7 +748,7 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
         .set_outbox_state(entry.id, OutboxState::Sent, None)?;
     state.mailbox.publish(Event::OutboxChanged);
 
-    append_to_sent(state, &account, &password, &entry.raw).await;
+    append_to_sent(state, &account, password.expose_secret(), &entry.raw).await;
     Ok(())
 }
 

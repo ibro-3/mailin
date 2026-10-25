@@ -17,11 +17,16 @@ use mailin_core::{
     Account, AccountId, Engine, Mailin, MemoryCredentials, MessageHeader, OutgoingEnvelope,
     Security, ServerSettings, Store,
 };
+use secrecy::SecretString;
 
 const ADDRESS: &str = "ada@example.com";
 const LOGIN: &str = "ada";
 const PASSWORD: &str = "correct-horse";
 const SUBJECT: &str = "Mailin integration test";
+
+fn password() -> SecretString {
+    SecretString::new(PASSWORD.into())
+}
 
 fn addr(variable: &str, default: &str) -> String {
     std::env::var(variable).unwrap_or_else(|_| default.to_owned())
@@ -142,7 +147,7 @@ fn sync_send_and_fetch_body_round_trip() {
         },
     );
     mailin
-        .save_account(&account, Some(PASSWORD))
+        .save_account(&account, Some(&password()))
         .expect("save account");
 
     let engine = Engine::start(mailin.clone()).expect("start engine");

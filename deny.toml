@@ -1,0 +1,70 @@
+# cargo-deny configuration for Mailin
+# Run with: cargo deny check
+# See: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Only check for RustSec advisories
+db = "https://github.com/RustSec/advisory-db.git"
+# Ignore specific advisories if needed (with justification)
+ignore = [
+  # Example:
+  # "RUSTSEC-2023-0001", # False positive for our use case
+]
+
+[licenses]
+# Allowlist of acceptable licenses
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+]
+# Deny these licenses (copyleft, etc.)
+deny = [
+  "GPL-2.0",
+  "GPL-3.0",
+  "LGPL-2.0",
+  "LGPL-2.1",
+  "LGPL-3.0",
+  "AGPL-3.0",
+  "SSPL-1.0",
+]
+# Allow licenses per-crate if needed (with justification)
+allow-licenses = {}
+
+[duplicates]
+# Warn about duplicate dependencies (saves space)
+# Multiple versions of the same crate can bloat the binary
+allow = [
+  # Allow some duplicates that are known to be necessary
+  # "smallvec", # Example
+]
+# Deny multiple semver-incompatible versions
+multiple-versions = "warn"
+
+[bans]
+# Ban specific crates (security, maintenance, or policy)
+deny = {
+  # Example:
+  # "openssl" = "Use rustls instead",
+  # "native-tls" = "Use rustls instead",
+}
+# Allow specific versions of banned crates if needed
+allow = {}
+# Deny crates with specific versions (wildcards supported)
+# deny = { "some-crate" = "< 1.0.0" }
+
+[sources]
+# Only allow crates.io and known-good registries
+allow-unknown-registry = false
+# Deny git sources in production (use crates.io instead)
+deny-git = false
+# Known good registries
+registries = [
+  "crates-io",
+]

@@ -15,6 +15,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   linux:
     name: Linux build, lint and tests
     runs-on: ubuntu-24.04

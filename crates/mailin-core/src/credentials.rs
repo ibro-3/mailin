@@ -4,21 +4,24 @@ use std::sync::Mutex;
 
 use crate::account::AccountId;
 use crate::error::{Error, Result};
+use secrecy::{ExposeSecret, SecretString};
 
 /// Where account passwords live.
 ///
 /// Both front-ends use the platform keyring, but the trait keeps the core
 /// testable without a running Secret Service or Credential Manager.
+/// Passwords are handled as `SecretString` to prevent accidental logging
+/// and to zeroize memory on drop.
 pub trait CredentialsStore: Send + Sync {
-    fn set(&self, account: &AccountId, secret: &str) -> Result<()>;
-    fn get(&self, account: &AccountId) -> Result<Option<String>>;
+    fn set(&self, account: &AccountId, secret: &SecretString) -> Result<()>;
+    fn get(&self, account: &AccountId) -> Result<Option<SecretString>>;
     fn delete(&self, account: &AccountId) -> Result<()>;
 }
 
 /// In-memory store for tests and for `--self-test` runs.
 #[derive(Debug, Default)]
 pub struct MemoryCredentials {
-    secrets: Mutex<HashMap<AccountId, String>>,
+    secrets: Mutex<HashMap<AccountId, SecretString>>,
 }
 
 impl MemoryCredentials {
@@ -26,18 +29,18 @@ impl MemoryCredentials {
         Self::default()
     }
 
-    fn guard(&self) -> Result<std::sync::MutexGuard<'_, HashMap<AccountId, String>>> {
+    fn guard(&self) -> Result<std::sync::MutexGuard<'_, HashMap<AccountId, SecretString>>> {
         self.secrets.lock().map_err(|_| Error::LockPoisoned)
     }
 }
 
 impl CredentialsStore for MemoryCredentials {
-    fn set(&self, account: &AccountId, secret: &str) -> Result<()> {
-        self.guard()?.insert(*account, secret.to_owned());
+    fn set(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
+        self.guard()?.insert(*account, secret.clone());
         Ok(())
     }
 
-    fn get(&self, account: &AccountId) -> Result<Option<String>> {
+    fn get(&self, account: &AccountId) -> Result<Option<SecretString>> {
         Ok(self.guard()?.get(account).cloned())
     }
 
@@ -92,15 +95,15 @@ impl fmt::Debug for KeyringCredentials {
 
 #[cfg(feature = "keyring")]
 impl CredentialsStore for KeyringCredentials {
-    fn set(&self, account: &AccountId, secret: &str) -> Result<()> {
+    fn set(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
         self.entry(account)?
-            .set_password(secret)
+            .set_password(secret.expose_secret())
             .map_err(|e| Error::Credentials(e.to_string()))
     }
 
-    fn get(&self, account: &AccountId) -> Result<Option<String>> {
+    fn get(&self, account: &AccountId) -> Result<Option<SecretString>> {
         match self.entry(account)?.get_password() {
-            Ok(secret) => Ok(Some(secret)),
+            Ok(secret) => Ok(Some(SecretString::new(secret.into()))),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(Error::Credentials(e.to_string())),
         }
@@ -117,24 +120,25 @@ impl CredentialsStore for KeyringCredentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::SecretString;
 
     #[test]
     fn memory_store_round_trips() {
         let store = MemoryCredentials::new();
         let account = AccountId::new();
-        assert_eq!(store.get(&account).expect("get"), None);
-        store.set(&account, "hunter2").expect("set");
-        assert_eq!(
-            store.get(&account).expect("get").as_deref(),
-            Some("hunter2")
-        );
-        store.set(&account, "rotated").expect("set");
-        assert_eq!(
-            store.get(&account).expect("get").as_deref(),
-            Some("rotated")
-        );
+        assert!(store.get(&account).expect("get").is_none());
+        store
+            .set(&account, &SecretString::new("hunter2".into()))
+            .expect("set");
+        let secret = store.get(&account).expect("get").expect("secret");
+        assert_eq!(secret.expose_secret(), "hunter2");
+        store
+            .set(&account, &SecretString::new("rotated".into()))
+            .expect("set");
+        let secret = store.get(&account).expect("get").expect("secret");
+        assert_eq!(secret.expose_secret(), "rotated");
         store.delete(&account).expect("delete");
-        assert_eq!(store.get(&account).expect("get"), None);
+        assert!(store.get(&account).expect("get").is_none());
         store.delete(&account).expect("delete is idempotent");
     }
 
@@ -143,7 +147,9 @@ mod tests {
         let store = MemoryCredentials::new();
         let a = AccountId::new();
         let b = AccountId::new();
-        store.set(&a, "a-secret").expect("set");
-        assert_eq!(store.get(&b).expect("get"), None);
+        store
+            .set(&a, &SecretString::new("a-secret".into()))
+            .expect("set");
+        assert!(store.get(&b).expect("get").is_none());
     }
 }

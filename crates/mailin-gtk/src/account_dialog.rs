@@ -253,7 +253,10 @@ pub fn present(
                 Some(id) => account.id = id,
                 None => account_id.set(Some(account.id)),
             }
-            if let Err(error) = app.mailin.save_account(&account, Some(&password)) {
+            if let Err(error) = app
+                .mailin
+                .save_account(&account, Some(&secrecy::SecretString::new(password.into())))
+            {
                 error_label.set_text(&error.to_string());
                 error_label.set_visible(true);
                 return;

@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+base64 = { version = "0.22", features = ["std"] }
 windows-bindgen = "0.100"
 
 [lints]

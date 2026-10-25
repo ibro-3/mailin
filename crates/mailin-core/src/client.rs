@@ -16,6 +16,7 @@ use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
 use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry};
 use crate::store::Store;
+use secrecy::SecretString;
 
 /// Everything a UI needs to react to. Events are advisory: after receiving one
 /// the UI re-reads the affected rows from the store.
@@ -100,7 +101,7 @@ impl Mailin {
     // ---------------------------------------------------------------- accounts
 
     /// Create or update an account. The password is stored in the keyring.
-    pub fn save_account(&self, account: &Account, password: Option<&str>) -> Result<()> {
+    pub fn save_account(&self, account: &Account, password: Option<&SecretString>) -> Result<()> {
         account.validate()?;
         self.store.upsert_account(account)?;
         if let Some(password) = password {
@@ -137,13 +138,13 @@ impl Mailin {
         Ok(self.credentials.get(id)?.is_some())
     }
 
-    pub fn set_password(&self, id: &AccountId, password: &str) -> Result<()> {
+    pub fn set_password(&self, id: &AccountId, password: &SecretString) -> Result<()> {
         self.credentials.set(id, password)
     }
 
     /// Password for a connection attempt. The UI should only call this from a
     /// worker, never from a widget callback that renders it.
-    pub fn password(&self, id: &AccountId) -> Result<String> {
+    pub fn password(&self, id: &AccountId) -> Result<SecretString> {
         self.credentials
             .get(id)?
             .ok_or_else(|| Error::Credentials("no password is stored for this account".into()))
@@ -233,6 +234,7 @@ mod tests {
     use super::*;
     use crate::account::ServerSettings;
     use crate::credentials::MemoryCredentials;
+    use secrecy::{ExposeSecret, SecretString};
 
     fn account() -> Account {
         Account::new(
@@ -255,11 +257,16 @@ mod tests {
         let client = client();
         let mut events = client.subscribe();
         let acc = account();
-        client.save_account(&acc, Some("secret")).expect("save");
+        client
+            .save_account(&acc, Some(&SecretString::new("secret".into())))
+            .expect("save");
 
         assert_eq!(client.list_accounts().expect("list"), vec![acc.clone()]);
         assert!(client.has_password(&acc.id).expect("has"));
-        assert_eq!(client.password(&acc.id).expect("password"), "secret");
+        assert_eq!(
+            client.password(&acc.id).expect("password").expose_secret(),
+            "secret"
+        );
         assert_eq!(events.try_recv().expect("event"), Event::AccountsChanged);
     }
 
@@ -267,7 +274,9 @@ mod tests {
     fn removing_an_account_forgets_the_password() {
         let client = client();
         let acc = account();
-        client.save_account(&acc, Some("secret")).expect("save");
+        client
+            .save_account(&acc, Some(&SecretString::new("secret".into())))
+            .expect("save");
         client.remove_account(&acc.id).expect("remove");
         assert!(client.remove_account(&acc.id).is_err());
         assert!(!client.has_password(&acc.id).expect("has"));

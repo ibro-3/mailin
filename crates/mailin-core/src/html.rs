@@ -76,20 +76,34 @@ pub fn has_remote_content(html: &str) -> bool {
             break;
         };
         let tag = &rest[start..start + end];
+        // Check for http/https URLs in various attributes
         if tag.contains("http://")
             || tag.contains("https://")
             || tag.contains("src=\"//")
             || tag.contains("src='//")
             || tag.contains("srcset=\"//")
             || tag.contains("srcset='//")
+            || tag.contains("href=\"//")
+            || tag.contains("href='//")
+            || tag.contains("action=\"//")
+            || tag.contains("action='//")
             || tag.contains("url(//")
         {
             let resource = tag.contains("src=")
+                || tag.contains("srcset=")
+                || tag.contains("action=")
                 || tag.contains("background=")
                 || tag.contains("url(")
                 || tag.contains("@import")
-                || tag.contains("<link");
-            if resource {
+                || tag.contains("<link")
+                || tag.contains("<iframe")
+                || tag.contains("<frame")
+                || tag.contains("<video")
+                || tag.contains("<audio")
+                || tag.contains("<source")
+                || tag.contains("<form");
+            // Anchor hrefs are user-navigable, not auto-loaded resources
+            if resource && !tag.contains("<a ") && !tag.contains("<a>") {
                 return true;
             }
         }
@@ -100,6 +114,17 @@ pub fn has_remote_content(html: &str) -> bool {
         || lower.contains("url(http://")
         || lower.contains("url(https://")
         || lower.contains("url(//")
+        || lower.contains("url('http://")
+        || lower.contains("url('https://")
+        || lower.contains("url('//")
+        || lower.contains("url(\"http://")
+        || lower.contains("url(\"https://")
+        || lower.contains("url(\"//")
+        // srcset attributes in style blocks (rare but possible)
+        || lower.contains("srcset=\"http://")
+        || lower.contains("srcset=\"https://")
+        || lower.contains("srcset='http://")
+        || lower.contains("srcset='https://")
 }
 
 fn inject_head(html: &str, head: &str) -> String {
@@ -140,8 +165,34 @@ pub fn rewrite_cid_images(html: &str, images: &[(String, String)]) -> String {
         if id.is_empty() {
             continue;
         }
-        for prefix in ["cid:", "CID:"] {
-            output = output.replace(&format!("{prefix}{id}"), data_url);
+        // Generate all variations of the cid: reference that might appear in HTML:
+        // - cid:id, CID:id, Cid:id, etc. (case insensitive prefix)
+        // - With/without angle brackets around the content ID
+        // - With/without whitespace after the prefix and around the content ID
+        let mut patterns = Vec::new();
+        let prefixes = [
+            "cid:", "CID:", "Cid:", "cId:", "ciD:", "CId:", "CiD:", "cID:",
+        ];
+        for prefix in prefixes {
+            // Without brackets, without whitespace
+            patterns.push(format!("{prefix}{id}"));
+            // Without brackets, with whitespace after prefix
+            patterns.push(format!("{prefix} {id}"));
+            patterns.push(format!("{prefix}{id} "));
+            patterns.push(format!("{prefix} {id} "));
+            // With brackets in HTML (cid:<id>), without whitespace
+            patterns.push(format!("{prefix}<{id}>"));
+            // With brackets in HTML, with whitespace
+            patterns.push(format!("{prefix} <{id}>"));
+            patterns.push(format!("{prefix}<{id}> "));
+            patterns.push(format!("{prefix} <{id}> "));
+            // With whitespace around content ID in HTML (cid:  id  )
+            patterns.push(format!("{prefix}  {id}  "));
+            patterns.push(format!("{prefix}{id}  "));
+            patterns.push(format!("{prefix}  {id}"));
+        }
+        for pattern in patterns {
+            output = output.replace(&pattern, data_url);
         }
     }
     output
@@ -257,5 +308,270 @@ mod tests {
             escape("<img src=\"x\" onerror='y'>&"),
             "&lt;img src=&quot;x&quot; onerror=&#39;y&#39;&gt;&amp;"
         );
+    }
+    // ============================================================
+    // Phase 2 — Hardening: HTML policy edge-case tests
+    // ============================================================
+
+    #[test]
+    fn cid_rewriting_handles_angle_brackets_in_content_id() {
+        // Content IDs in MIME may be wrapped in angle brackets
+        let document = document(
+            "<img src=\"cid:<logo@example.com>\">",
+            false,
+            false,
+            &[(
+                "logo@example.com".into(),
+                "data:image/png;base64,AAAA".into(),
+            )],
+        );
+        assert!(document.contains("src=\"data:image/png;base64,AAAA\""));
+    }
+
+    #[test]
+    fn cid_rewriting_is_case_insensitive() {
+        let document = document(
+            "<img src=\"CID:logo@example.com\"><img src=\"Cid:other@example.com\">",
+            false,
+            false,
+            &[(
+                "logo@example.com".into(),
+                "data:image/png;base64,AAAA".into(),
+            )],
+        );
+        assert!(document.contains("src=\"data:image/png;base64,AAAA\""));
+        // Unmatched cid: references preserve their original case
+        assert!(document.contains("src=\"Cid:other@example.com\""));
+    }
+
+    #[test]
+    fn cid_rewriting_handles_whitespace_in_content_id() {
+        let document = document(
+            "<img src=\"cid:  logo@example.com  \">",
+            false,
+            false,
+            &[(
+                "logo@example.com".into(),
+                "data:image/png;base64,AAAA".into(),
+            )],
+        );
+        // Whitespace in the HTML src attribute should match trimmed content ID
+        assert!(document.contains("src=\"data:image/png;base64,AAAA\""));
+    }
+
+    #[test]
+    fn cid_rewriting_preserves_other_attributes() {
+        let document = document(
+            "<img src=\"cid:logo@example.com\" alt=\"Logo\" class=\"inline\" width=\"100\">",
+            false,
+            false,
+            &[(
+                "logo@example.com".into(),
+                "data:image/png;base64,AAAA".into(),
+            )],
+        );
+        assert!(document.contains("src=\"data:image/png;base64,AAAA\""));
+        assert!(document.contains("alt=\"Logo\""));
+        assert!(document.contains("class=\"inline\""));
+        assert!(document.contains("width=\"100\""));
+    }
+
+    #[test]
+    fn has_remote_content_detects_data_urls_as_local() {
+        // data: URLs should NOT trigger remote content detection
+        assert!(!has_remote_content(
+            "<img src=\"data:image/png;base64,AAAA\">"
+        ));
+        assert!(!has_remote_content(
+            "<img src='data:image/gif;base64,R0lGODlh'>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_protocol_relative_urls() {
+        // Protocol-relative URLs (//example.com) should be detected
+        assert!(has_remote_content(
+            "<img src=\"//tracker.example/pixel.png\">"
+        ));
+        assert!(has_remote_content(
+            "<img src='//cdn.example.com/image.jpg'>"
+        ));
+        assert!(has_remote_content(
+            "<style>@import \"//fonts.example.com/style.css\";</style>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_various_css_url_formats() {
+        assert!(has_remote_content(
+            "<style>background: url(http://example.com/x);</style>"
+        ));
+        assert!(has_remote_content(
+            "<style>background: url('https://example.com/x');</style>"
+        ));
+        assert!(has_remote_content(
+            "<style>background: url(\"https://example.com/x\");</style>"
+        ));
+        assert!(has_remote_content(
+            "<style>background-image: url(//example.com/x);</style>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_srcset_attributes() {
+        assert!(has_remote_content(
+            "<img srcset=\"https://example.com/1x.png 1x, https://example.com/2x.png 2x\">"
+        ));
+        assert!(has_remote_content(
+            "<img srcset='//example.com/image.jpg 1x'>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_link_tags() {
+        assert!(has_remote_content(
+            "<link rel=\"stylesheet\" href=\"https://example.com/style.css\">"
+        ));
+        assert!(has_remote_content(
+            "<link rel='preload' href='//example.com/font.woff2' as='font'>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_video_audio_sources() {
+        assert!(has_remote_content(
+            "<video><source src=\"https://example.com/video.mp4\"></video>"
+        ));
+        assert!(has_remote_content(
+            "<audio><source src=\"//example.com/audio.mp3\"></audio>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_iframe_and_frame() {
+        assert!(has_remote_content(
+            "<iframe src=\"https://example.com/frame.html\"></iframe>"
+        ));
+        assert!(has_remote_content(
+            "<frame src=\"//example.com/frame.html\">"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_detects_form_actions() {
+        assert!(has_remote_content(
+            "<form action=\"https://example.com/submit\"></form>"
+        ));
+        assert!(has_remote_content(
+            "<form action=\"//example.com/submit\"></form>"
+        ));
+    }
+
+    #[test]
+    fn has_remote_content_ignores_text_links() {
+        // Plain text URLs and anchor hrefs should NOT trigger (they're user-navigable)
+        assert!(!has_remote_content(
+            "Visit https://example.com for more info"
+        ));
+        assert!(!has_remote_content(
+            "<a href=\"https://example.com\">Click here</a>"
+        ));
+        assert!(!has_remote_content("<a href=\"//example.com\">Link</a>"));
+    }
+
+    #[test]
+    fn has_remote_content_ignores_cid_images() {
+        assert!(!has_remote_content("<img src=\"cid:logo@example.com\">"));
+        assert!(!has_remote_content("<img src='CID:logo@example.com'>"));
+    }
+
+    #[test]
+    fn csp_policy_blocks_scripts_by_default() {
+        let doc = document("<script>alert(1)</script>", false, false, &[]);
+        assert!(doc.contains("script-src 'nonce-"));
+        assert!(doc.contains("document.addEventListener('click'"));
+        assert!(doc.contains("event.preventDefault()"));
+    }
+
+    #[test]
+    fn csp_policy_blocks_forms_by_default() {
+        let doc = document("<form action=\"/submit\"><input></form>", false, false, &[]);
+        assert!(doc.contains("form-action 'none'"));
+    }
+
+    #[test]
+    fn csp_policy_blocks_frames_by_default() {
+        let doc = document("<iframe src=\"/frame\"></iframe>", false, false, &[]);
+        assert!(doc.contains("frame-src 'none'"));
+    }
+
+    #[test]
+    fn csp_policy_blocks_base_uri_by_default() {
+        let doc = document("<base href=\"https://example.com/\">", false, false, &[]);
+        assert!(doc.contains("base-uri 'none'"));
+    }
+
+    #[test]
+    fn csp_policy_allows_inline_styles_only() {
+        let doc = document("<div style=\"color: red;\"></div>", false, false, &[]);
+        assert!(doc.contains("style-src 'unsafe-inline'"));
+    }
+
+    #[test]
+    fn csp_policy_allows_data_fonts() {
+        let doc = document(
+            "<style>@font-face { src: url(data:font/woff2;base64,AAAA); }</style>",
+            false,
+            false,
+            &[],
+        );
+        assert!(doc.contains("font-src data:"));
+    }
+
+    #[test]
+    fn csp_nonce_is_unique_per_document() {
+        let doc1 = document("<p>test</p>", false, false, &[]);
+        let doc2 = document("<p>test</p>", false, false, &[]);
+        let nonce1 = extract_nonce(&doc1);
+        let nonce2 = extract_nonce(&doc2);
+        assert_ne!(nonce1, nonce2);
+        assert!(nonce1.starts_with("mailin-"));
+        assert!(nonce2.starts_with("mailin-"));
+    }
+
+    #[test]
+    fn dark_mode_colors_are_applied() {
+        let light = document("<p>test</p>", false, false, &[]);
+        let dark = document("<p>test</p>", true, true, &[]);
+        assert!(light.contains("#ffffff")); // light background
+        assert!(light.contains("#1c1c1c")); // light foreground
+        assert!(dark.contains("#1e1e1e")); // dark background
+        assert!(dark.contains("#eeeeee")); // dark foreground
+    }
+
+    #[test]
+    fn document_always_has_doctype_and_html() {
+        let doc = document("<p>Hello</p>", false, false, &[]);
+        assert!(doc.starts_with("<!DOCTYPE html><html><head>"));
+        assert!(doc.ends_with("</body></html>"));
+    }
+
+    #[test]
+    fn document_head_contains_charset_meta() {
+        let doc = document("<p>test</p>", false, false, &[]);
+        assert!(doc.contains("<meta charset=\"utf-8\">"));
+    }
+
+    #[test]
+    fn document_head_contains_referrer_policy() {
+        let doc = document("<p>test</p>", false, false, &[]);
+        assert!(doc.contains("<meta name=\"referrer\" content=\"no-referrer\">"));
+    }
+
+    fn extract_nonce(doc: &str) -> String {
+        let start =
+            doc.find("script-src 'nonce-").expect("nonce not found") + "script-src 'nonce-".len();
+        let end = doc[start..].find("'").expect("nonce end not found");
+        doc[start..start + end].to_owned()
     }
 }
