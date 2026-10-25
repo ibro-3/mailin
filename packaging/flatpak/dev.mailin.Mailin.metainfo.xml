@@ -48,6 +48,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="0.1.0" date="2026-10-25">
+      <description>
+        <p>Milestone 7: Windows packaging (self-contained zip, MSIX, Inno Setup installer), supply-chain hardening (cargo-deny), HTML policy edge-case tests, secrets as SecretString end-to-end, accessibility (GTK: a11y labels, keyboard nav, shortcuts overlay; WinUI: keyboard accelerators), CONDSTORE CHANGEDSINCE flag-delta sync with fallback.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-23">
       <description>
         <p>First milestone 4 build: HTML mail, attachments, compose, notifications.</p>

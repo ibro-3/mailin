@@ -372,3 +372,56 @@ Linux development machine cross-checks the crate with the MSVC target.
 | XAML composed in Rust, no `.xaml` files | Cargo has no XAML compiler; a generated projection keeps the build self-contained |
 | Load `MddBootstrapInitialize2` with `LoadLibraryW` | The App SDK bootstrapper is a C export, not WinRT metadata, so bindgen cannot project it |
 | Bootstrap the framework package, not self-contained deployment | Fastest way to prove the runtime path; self-contained packaging belongs to M7 |
+
+## Milestone 7: Packaging, Hardening, Accessibility, Performance
+
+### Packaging Strategy
+
+Windows artifacts are produced by `cargo xtask package-win` and the `release.yml` workflow:
+
+1. **Self-contained zip** — `mailin-winui-<version>-x86_64.zip`
+   - Contains the executable, the App SDK bootstrap DLL (`Microsoft.WindowsAppRuntime.Bootstrap.dll`), and the Windows App SDK 1.8 runtime installer (`WindowsAppRuntimeInstall-x64.exe`).
+   - The bootstrap DLL must be next to the executable at runtime; the framework package is attached via `MddBootstrapInitialize2`.
+   - Intended for portable use or environments where sideloading/installers are not an option.
+
+2. **Unsigned MSIX** — `mailin-<version>-x86_64.msix`
+   - Built from `packaging/windows/AppxManifest.xml` using `makeappx`.
+   - Declares `runFullTrust` capability (required for the App SDK bootstrapper) and network capabilities.
+   - Installed via `Add-AppxPackage`; SmartScreen warns because the package is unsigned.
+
+3. **Inno Setup installer** — `mailin-setup-<version>.exe`
+   - Script at `packaging/windows/setup.iss`.
+   - Installs to `%LOCALAPPDATA%\Mailin`, creates Start Menu entry, optional desktop shortcut.
+   - Runs the Windows App SDK runtime installer silently on first install.
+
+All artifacts are attached to GitHub Releases with SHA-256 checksums. Binary size is reported as a CI guard.
+
+### Hardening
+
+- **cargo-deny** (`deny.toml`): RustSec advisory scanning, license allowlist (MIT/Apache/BSD/ISC/MPL-2.0), duplicate detection.
+- **Secrets audit**: Passwords are `SecretString` end-to-end (`secrecy` crate). The `CredentialsStore` trait uses `SecretString`; `KeyringCredentials` converts to/from plain text only at the OS keyring boundary. Raw `String` handling eliminated in credential paths.
+- **HTML policy edge-case tests**: `data:`/`cid:` rewriting with angle brackets, whitespace, case insensitivity; remote-content detector covers `srcset`, `<link>`, `<video>/<audio>`, `<iframe>`, `<form>`, CSS `url()` with quotes, protocol-relative URLs; CSP document invariants (nonce uniqueness, `form-action 'none'`, `frame-src 'none'`, `base-uri 'none'`, `style-src 'unsafe-inline'`, `font-src data:`).
+
+### Accessibility
+
+**GTK** (`mailin-gtk/src/window.rs`):
+- Icon-only buttons get `accessible_name` via `gtk::AccessibleExt::set_accessible_name`.
+- Message list keyboard navigation: `Up`/`Down` arrows move selection via `EventControllerKey`.
+- `GtkShortcutsWindow` with `ShortcutsSection` + `ShortcutsShortcut` entries for all global shortcuts (F1 / Ctrl+? to open).
+- Wizard focus handling: initial focus on the first field; tab order follows visual layout.
+
+**WinUI** (`mailin-winui/src/window.rs`):
+- `KeyboardAccelerator` objects on the main window for global shortcuts:
+  - `Ctrl+F` → search
+  - `F5` → synchronize
+  - `Ctrl+Shift+A` → add account
+  - `Ctrl+Enter` → send (in composer)
+- Accelerators use `VirtualKey` + `VirtualKeyModifiers` and invoke the same handlers as the toolbar buttons.
+
+### Sync Deltas (CONDSTORE CHANGEDSINCE)
+
+Incremental sync now uses `UID SEARCH CHANGEDSINCE <modseq>` when the server advertises CONDSTORE and we have a stored `highest_modseq` for the folder. This returns only UIDs whose flags changed since the last sync, avoiding a full `UID FETCH 1:* (FLAGS)` on large folders.
+
+- `ImapSession::fetch_flags_for_uids` fetches `(UID, FLAGS)` for a specific UID set.
+- On CHANGEDSINCE failure (server doesn't support the extension despite advertising CONDSTORE, or modseq stale), the code falls back to the existing full flag refresh path.
+- The `highest_modseq` is persisted in `FolderSyncState` and updated on every successful sync.
