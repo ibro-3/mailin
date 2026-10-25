@@ -82,6 +82,47 @@ pub(crate) async fn sync_folder(
     }
 
     let local = mailbox.store().message_uids(folder.id)?;
+
+    // CHANGEDSINCE flag-delta sync (CONDSTORE):
+    // If the server supports CONDSTORE and we have a previous modseq, fetch
+    // only the messages whose flags have changed since the last sync.
+    // This avoids the expensive full flag refresh on large folders.
+    if mode == SyncMode::Incremental
+        && session.supports_condstore()
+        && let Some(last_modseq) = state.highest_modseq
+    {
+        // Search for messages with MODSEQ changed since our last sync
+        // CHANGEDSINCE returns UIDs where any flag changed
+        match session.search(&format!("CHANGEDSINCE {last_modseq}")).await {
+            Ok(changed_uids) if !changed_uids.is_empty() => {
+                tracing::debug!(
+                    folder = %folder.name,
+                    count = changed_uids.len(),
+                    since_modseq = last_modseq,
+                    "CONDSTORE CHANGEDSINCE found flag changes"
+                );
+                // Fetch flags only for changed messages
+                let changed_vec: Vec<u32> = changed_uids.into_iter().collect();
+                let flag_updates = session.fetch_flags_for_uids(&changed_vec).await?;
+                mailbox.store().set_flags_many(folder.id, &flag_updates)?;
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    folder = %folder.name,
+                    since_modseq = last_modseq,
+                    "no flag changes since last sync"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    folder = %folder.name,
+                    error = %e,
+                    "CHANGEDSINCE search failed, falling back to full flag refresh"
+                );
+            }
+        }
+    }
+
     let remote = match mode {
         SyncMode::Full => session.search("ALL").await?,
         SyncMode::Incremental => {

@@ -302,6 +302,31 @@ impl ImapSession {
         Ok(flags)
     }
 
+    /// Fetch flags for a specific set of UIDs, used by CHANGEDSINCE flag-delta sync.
+    pub async fn fetch_flags_for_uids(&mut self, uids: &[u32]) -> Result<Vec<(u32, Vec<String>)>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let set = uid_set(uids);
+        let mut stream = self
+            .inner
+            .uid_fetch(&set, "(UID FLAGS)")
+            .await
+            .map_err(|e| Error::Imap(format!("UID FETCH (flags) failed: {e}")))?;
+        let mut flags = Vec::new();
+        loop {
+            let fetch = stream
+                .try_next()
+                .await
+                .map_err(|e| Error::Imap(format!("UID FETCH (flags) failed: {e}")))?;
+            let Some(fetch) = fetch else { break };
+            if let Some(uid) = fetch.uid {
+                flags.push((uid, fetch.flags().map(flag_to_string).collect()));
+            }
+        }
+        Ok(flags)
+    }
+
     pub async fn fetch_body(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
         let mut stream = self
             .inner

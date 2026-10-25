@@ -15,8 +15,9 @@ use mailin_core::{
     MessageId, OutgoingMessage, html,
 };
 use mailin_winui_sys::{
-    Application, Button, ComboBox, DispatcherQueue, Grid, Orientation, ResourceDictionary,
-    ScrollViewer, StackPanel, TextBlock, TextBox, WebView2, Window,
+    Application, Button, ComboBox, DispatcherQueue, Grid, KeyboardAccelerator, Orientation,
+    ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox, VirtualKey,
+    VirtualKeyModifiers, WebView2, Window,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -1133,6 +1134,55 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let window = Window::new().context("could not create the WinUI window")?;
     window.SetTitle("Mailin")?;
     window.SetContent(&root)?;
+
+    // Keyboard accelerators for accessibility
+    let accelerators = window
+        .KeyboardAccelerators()
+        .context("could not get keyboard accelerators collection")?;
+    // Ctrl+F: Search
+    let search_accel = KeyboardAccelerator::new().context("could not create search accelerator")?;
+    search_accel.SetKey(VirtualKey::F)?;
+    search_accel.SetModifiers(VirtualKeyModifiers::Control)?;
+    search_accel.Invoked({
+        let this = Rc::downgrade(&this);
+        move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.run_search();
+            }
+        }
+    })?;
+    accelerators.Append(&search_accel)?;
+
+    // F5: Sync
+    let sync_accel = KeyboardAccelerator::new().context("could not create sync accelerator")?;
+    sync_accel.SetKey(VirtualKey::F5)?;
+    sync_accel.Invoked({
+        let this = Rc::downgrade(&this);
+        move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.sync_now();
+            }
+        }
+    })?;
+    accelerators.Append(&sync_accel)?;
+
+    // Ctrl+Shift+A: Add account
+    let add_accel =
+        KeyboardAccelerator::new().context("could not create add account accelerator")?;
+    add_accel.SetKey(VirtualKey::A)?;
+    add_accel.SetModifiers(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift)?;
+    add_accel.Invoked({
+        let this = Rc::downgrade(&this);
+        move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.add_account();
+            }
+        }
+    })?;
+    accelerators.Append(&add_accel)?;
+
+    // Ctrl+Enter: Send (handled in composer)
+    // Note: This will be added in the compose window
 
     let this = Rc::new(MainWindow {
         app: Arc::clone(state),

@@ -17,6 +17,7 @@ mailin-core.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_10"] }
+gdk = { package = "gdk4", version = "0.11" }
 libadwaita = { version = "0.9", features = ["v1_5"] }
 webkit6 = "0.6"
 tokio = { workspace = true, features = ["sync"] }

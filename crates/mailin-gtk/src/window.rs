@@ -11,7 +11,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use gdk::{Key, ModifierType};
 use gtk::gio::prelude::*;
+use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
     Account, AccountId, AttachmentMeta, Event, Folder, FolderId, FolderRole, MessageHeader,
@@ -463,6 +465,25 @@ impl MainWindow {
             }
         });
 
+        // Shortcuts window (F1 / Ctrl+?)
+        let shortcuts = build_shortcuts_window(&this.widgets.window);
+        let key_controller = gtk::EventControllerKey::new();
+        key_controller.connect_key_pressed({
+            let shortcuts = shortcuts.clone();
+            move |_, keyval, _, state| {
+                if keyval == Key::F1
+                    || (keyval == Key::question && state.contains(ModifierType::CONTROL_MASK))
+                {
+                    shortcuts.set_visible(true);
+                    shortcuts.present();
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            }
+        });
+        this.widgets.window.add_controller(key_controller);
+
         this.widgets.account_dropdown.connect_selected_notify({
             let this = Rc::clone(this);
             move |dropdown| {
@@ -509,6 +530,37 @@ impl MainWindow {
                 }
             }
         });
+
+        // Keyboard navigation for message list (Up/Down arrows)
+        let list_key_controller = gtk::EventControllerKey::new();
+        list_key_controller.connect_key_pressed({
+            let list_box = this.widgets.message_list.clone();
+            move |_, keyval, _, _| {
+                if keyval == Key::Up || keyval == Key::Down {
+                    if let Some(selected) = list_box.selected_row() {
+                        let idx = selected.index();
+                        let len = list_box.observe_children().n_items();
+                        let new_idx = if keyval == Key::Up {
+                            if idx > 0 { idx - 1 } else { idx }
+                        } else {
+                            let len_i32 = i32::try_from(len).unwrap_or(i32::MAX);
+                            if idx + 1 < len_i32 { idx + 1 } else { idx }
+                        };
+                        if let Some(row) = list_box.row_at_index(new_idx) {
+                            list_box.select_row(Some(&row));
+                        }
+                    } else if let Some(first) = list_box.row_at_index(0) {
+                        list_box.select_row(Some(&first));
+                    }
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            }
+        });
+        this.widgets
+            .message_list
+            .add_controller(list_key_controller);
 
         this.widgets.load_more.connect_clicked({
             let this = Rc::clone(this);
@@ -1623,7 +1675,46 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .tooltip_text(tooltip)
         .build();
     button.add_css_class("flat");
+    // Set accessible name via the Accessible interface
+    use gtk::accessible::Property;
+    button.update_property(&[Property::Description(tooltip)]);
     button
+}
+
+/// Build the keyboard shortcuts window for the help overlay.
+fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWindow {
+    let shortcuts = gtk::ShortcutsWindow::builder()
+        .title("Keyboard Shortcuts")
+        .modal(true)
+        .transient_for(parent)
+        .build();
+
+    let section = gtk::ShortcutsSection::builder()
+        .title("Mailin Keyboard Shortcuts")
+        .max_height(300)
+        .build();
+
+    let shortcuts_data = [
+        ("Ctrl+N", "New message"),
+        ("Ctrl+F", "Search mail"),
+        ("F5", "Synchronize"),
+        ("Ctrl+Shift+A", "Add account"),
+        ("Ctrl+Enter", "Send message (in composer)"),
+        ("↑/↓", "Navigate message list"),
+        ("Enter", "Open selected message"),
+        ("F1 / Ctrl+?", "Show this help"),
+    ];
+
+    for (accel, description) in shortcuts_data {
+        let shortcut = gtk::ShortcutsShortcut::builder()
+            .accelerator(accel)
+            .title(description)
+            .build();
+        section.append(&shortcut);
+    }
+
+    shortcuts.set_child(Some(&section));
+    shortcuts
 }
 
 fn clear_list(list: &gtk::ListBox) {
