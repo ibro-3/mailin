@@ -3616,6 +3616,19 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/windows-link/windows-link-0.2.1.crate",
+    "sha256": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5",
+    "dest": "cargo/vendor/windows-link-0.2.1"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\": \"f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5\", \"files\": {}}",
+    "dest": "cargo/vendor/windows-link-0.2.1",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
     "url": "https://static.crates.io/crates/windows-link/windows-link-0.100.0.crate",
     "sha256": "9b39de7c7fe78858b0144c50c3fc000bab3be17d5e9b85b1053871693c7f7415",
     "dest": "cargo/vendor/windows-link-0.100.0"
@@ -3642,6 +3655,45 @@
   {
     "type": "archive",
     "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/windows-native-keyring-store/windows-native-keyring-store-1.1.0.crate",
+    "sha256": "063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8",
+    "dest": "cargo/vendor/windows-native-keyring-store-1.1.0"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\": \"063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8\", \"files\": {}}",
+    "dest": "cargo/vendor/windows-native-keyring-store-1.1.0",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/windows-numerics/windows-numerics-0.100.0.crate",
+    "sha256": "d9c5500bf6a9098f27922953422ae7324cdd330c868e945801593455a6832701",
+    "dest": "cargo/vendor/windows-numerics-0.100.0"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\": \"d9c5500bf6a9098f27922953422ae7324cdd330c868e945801593455a6832701\", \"files\": {}}",
+    "dest": "cargo/vendor/windows-numerics-0.100.0",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/windows-reference/windows-reference-0.100.0.crate",
+    "sha256": "bdfaf342eb9cfa3b519410caa05f8ebd3b20b7e077cdf80d013a5bca4f1b194b",
+    "dest": "cargo/vendor/windows-reference-0.100.0"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\": \"bdfaf342eb9cfa3b519410caa05f8ebd3b20b7e077cdf80d013a5bca4f1b194b\", \"files\": {}}",
+    "dest": "cargo/vendor/windows-reference-0.100.0",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
     "url": "https://static.crates.io/crates/windows-result/windows-result-0.100.0.crate",
     "sha256": "44873a1ef61c85d5e2991db91fe656cfcf0731097e00dff1ac860f1cb3b752a0",
     "dest": "cargo/vendor/windows-result-0.100.0"
@@ -3663,45 +3715,6 @@
     "type": "inline",
     "contents": "{\"package\": \"6a70b590c684f1d2854f74999896f7c0558f1bdde62f599088599e20ea1d2f60\", \"files\": {}}",
     "dest": "cargo/vendor/windows-strings-0.100.0",
-    "dest-filename": ".cargo-checksum.json"
-  },
-  {
-    "type": "archive",
-    "archive-type": "tar-gzip",
-    "url": "https://static.crates.io/crates/windows-threading/windows-threading-0.100.0.crate",
-    "sha256": "cff005f1c94bffb9b073230837d3448d0e0ba3cf11c34b6f1f7d4c3875eded09",
-    "dest": "cargo/vendor/windows-threading-0.100.0"
-  },
-  {
-    "type": "inline",
-    "contents": "{\"package\": \"cff005f1c94bffb9b073230837d3448d0e0ba3cf11c34b6f1f7d4c3875eded09\", \"files\": {}}",
-    "dest": "cargo/vendor/windows-threading-0.100.0",
-    "dest-filename": ".cargo-checksum.json"
-  },
-  {
-    "type": "archive",
-    "archive-type": "tar-gzip",
-    "url": "https://static.crates.io/crates/windows-link/windows-link-0.2.1.crate",
-    "sha256": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5",
-    "dest": "cargo/vendor/windows-link-0.2.1"
-  },
-  {
-    "type": "inline",
-    "contents": "{\"package\": \"f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5\", \"files\": {}}",
-    "dest": "cargo/vendor/windows-link-0.2.1",
-    "dest-filename": ".cargo-checksum.json"
-  },
-  {
-    "type": "archive",
-    "archive-type": "tar-gzip",
-    "url": "https://static.crates.io/crates/windows-native-keyring-store/windows-native-keyring-store-1.1.0.crate",
-    "sha256": "063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8",
-    "dest": "cargo/vendor/windows-native-keyring-store-1.1.0"
-  },
-  {
-    "type": "inline",
-    "contents": "{\"package\": \"063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8\", \"files\": {}}",
-    "dest": "cargo/vendor/windows-native-keyring-store-1.1.0",
     "dest-filename": ".cargo-checksum.json"
   },
   {
@@ -3741,6 +3754,32 @@
     "type": "inline",
     "contents": "{\"package\": \"9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973\", \"files\": {}}",
     "dest": "cargo/vendor/windows-targets-0.52.6",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/windows-threading/windows-threading-0.100.0.crate",
+    "sha256": "cff005f1c94bffb9b073230837d3448d0e0ba3cf11c34b6f1f7d4c3875eded09",
+    "dest": "cargo/vendor/windows-threading-0.100.0"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\": \"cff005f1c94bffb9b073230837d3448d0e0ba3cf11c34b6f1f7d4c3875eded09\", \"files\": {}}",
+    "dest": "cargo/vendor/windows-threading-0.100.0",
+    "dest-filename": ".cargo-checksum.json"
+  },
+  {
+    "type": "archive",
+    "archive-type": "tar-gzip",
+    "url": "https://static.crates.io/crates/windows-time/windows-time-0.100.0.crate",
+    "sha256": "de136aac4d76b9ea94b2589774be8bcd91b31b2dd7dae54abdd63335590095e4",
+    "dest": "cargo/vendor/windows-time-0.100.0"
+  },
+  {
+    "type": "inline",
+    "contents": "{\"package\": \"de136aac4d76b9ea94b2589774be8bcd91b31b2dd7dae54abdd63335590095e4\", \"files\": {}}",
+    "dest": "cargo/vendor/windows-time-0.100.0",
     "dest-filename": ".cargo-checksum.json"
   },
   {
@@ -4109,7 +4148,7 @@
   },
   {
     "type": "inline",
-    "contents": "[source]\nvendored-sources = { directory = \"cargo/vendor\" }\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n",
+    "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n",
     "dest": "cargo",
     "dest-filename": "config"
   }

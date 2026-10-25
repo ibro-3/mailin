@@ -200,7 +200,7 @@ mod tests {
             vec![PathBuf::from("C:\\Mail\\note.txt")]
         );
 
-        let multiple = wide("C:\\Mail\\a.txt\0b.txt\0c.txt\0");
+        let multiple = wide("C:\\Mail\0a.txt\0b.txt\0c.txt\0");
         assert_eq!(
             parse_multiselect(&multiple),
             vec![
