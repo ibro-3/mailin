@@ -1,4 +1,4 @@
-//! The "Add Account" wizard.
+//! The "Add/Edit Account" wizard.
 //!
 //! The wizard collects identity data and explicit server settings. Host and
 //! port fields are prefilled from [`crate::autoconfig`] as the user types the
@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::glib;
-use mailin_core::{Account, AccountId, Security, ServerSettings};
+use mailin_core::{Account, AccountId, AuthMethod, OAuth2Tokens, Security, ServerSettings};
 
 use crate::app::AppState;
 use crate::autoconfig::{self, Suggestion};
@@ -35,8 +35,8 @@ struct ServerDraft {
 }
 
 impl Draft {
-    fn build(&self) -> std::result::Result<Account, String> {
-        if self.password.is_empty() {
+    fn build(&self, require_password: bool) -> std::result::Result<Account, String> {
+        if require_password && self.password.is_empty() {
             return Err("Enter the account password.".to_owned());
         }
 
@@ -72,15 +72,39 @@ impl ServerDraft {
             port,
             security: self.security,
             username: username.to_owned(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         })
     }
 }
 
+/// Mode for the account dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountDialogMode {
+    /// Add a new account.
+    Add,
+    /// Edit an existing account.
+    Edit,
+}
+
+/// Present the account dialog for adding or editing an account.
+///
+/// In edit mode, the form is pre-filled with the existing account's settings.
+/// The password field is left empty; if the user enters a new password, it will
+/// be updated. If left empty, the existing password is kept.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     app: Rc<AppState>,
+    mode: AccountDialogMode,
+    existing_account: Option<Account>,
     on_saved: impl Fn(AccountId) + 'static,
 ) {
+    let (title, subtitle, save_label) = match mode {
+        AccountDialogMode::Add => ("Add Account", "Connect an IMAP and SMTP mailbox", "Add Account"),
+        AccountDialogMode::Edit => ("Edit Account", "Update account settings", "Save Changes"),
+    };
+
+    // Create form fields
     let name_row = adw::EntryRow::builder().title("Display name").build();
     let email_row = adw::EntryRow::builder().title("Email address").build();
     let password_row = adw::PasswordEntryRow::builder().title("Password").build();
@@ -126,8 +150,8 @@ pub fn present(
     page.add(&outgoing);
 
     let header = adw::HeaderBar::new();
-    let title = adw::WindowTitle::new("Add Account", "Connect an IMAP and SMTP mailbox");
-    header.set_title_widget(Some(&title));
+    let window_title = adw::WindowTitle::new(title, subtitle);
+    header.set_title_widget(Some(&window_title));
 
     let error_label = gtk::Label::builder()
         .wrap(true)
@@ -139,8 +163,18 @@ pub fn present(
 
     let cancel = gtk::Button::with_label("Cancel");
     let test = gtk::Button::with_label("Test Connection");
-    let save = gtk::Button::with_label("Add Account");
+    let save = gtk::Button::with_label(save_label);
     save.add_css_class("suggested-action");
+
+    // Remove button for edit mode
+    let remove = match mode {
+        AccountDialogMode::Edit => {
+            let btn = gtk::Button::with_label("Remove Account");
+            btn.add_css_class("destructive-action");
+            Some(btn)
+        }
+        AccountDialogMode::Add => None,
+    };
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     actions.set_margin_top(12);
@@ -149,6 +183,9 @@ pub fn present(
     actions.set_margin_end(18);
     actions.append(&error_label);
     actions.append(&test);
+    if let Some(remove) = &remove {
+        actions.append(remove);
+    }
     actions.append(&cancel);
     actions.append(&save);
 
@@ -161,11 +198,31 @@ pub fn present(
     toolbar.add_bottom_bar(&bottom);
 
     let dialog = adw::Dialog::builder()
-        .title("Add Account")
+        .title(title)
         .content_width(560)
         .content_height(700)
         .child(&toolbar)
         .build();
+
+    // Pre-fill form if editing
+    if let Some(account) = existing_account.clone() {
+        name_row.set_text(&account.display_name);
+        email_row.set_text(&account.email);
+        // Password left empty - user can enter new one to change it
+
+        imap_host.set_text(&account.imap.host);
+        imap_port.set_text(&account.imap.port.to_string());
+        imap_user.set_text(&account.imap.username);
+        imap_security.set_selected(security_index(account.imap.security));
+
+        smtp_host.set_text(&account.smtp.host);
+        smtp_port.set_text(&account.smtp.port.to_string());
+        smtp_user.set_text(&account.smtp.username);
+        smtp_security.set_selected(security_index(account.smtp.security));
+
+        // Disable email field in edit mode (account identity shouldn't change)
+        email_row.set_sensitive(false);
+    }
 
     // Fill server fields from the address domain while they are still the
     // values we suggested ourselves. Anything the user typed is preserved.
@@ -238,7 +295,9 @@ pub fn present(
         move |_| {
             let draft = rows.draft();
             let password = draft.password.clone();
-            let account = match draft.build() {
+            // In edit mode, we don't require password for test if it's empty
+            let require_password = mode == AccountDialogMode::Add;
+            let account = match draft.build(require_password) {
                 Ok(account) => account,
                 Err(error) => {
                     error_label.set_text(&error);
@@ -268,6 +327,10 @@ pub fn present(
         }
     });
 
+    // Clone existing_account for use in both save and remove closures
+    let existing_account_for_save = existing_account.clone();
+    let existing_account_for_remove = existing_account.clone();
+
     let on_saved: Rc<dyn Fn(AccountId)> = Rc::new(on_saved);
     save.connect_clicked({
         let dialog = dialog.clone();
@@ -291,7 +354,9 @@ pub fn present(
         move |_| {
             let draft = rows.draft();
             let password = draft.password.clone();
-            let mut account = match draft.build() {
+            // In edit mode, we don't require password if it's empty (keep existing)
+            let require_password = mode == AccountDialogMode::Add;
+            let mut account = match draft.build(require_password) {
                 Ok(account) => account,
                 Err(error) => {
                     error_label.set_text(&error);
@@ -301,14 +366,22 @@ pub fn present(
             };
             // Keep the identifier across retries: a failed keyring write must
             // not leave an account row behind that a second click duplicates.
-            match account_id.get() {
-                Some(id) => account.id = id,
-                None => account_id.set(Some(account.id)),
+            // In edit mode, preserve the existing account ID.
+            if let Some(existing) = &existing_account_for_save {
+                account.id = existing.id;
+            } else {
+                match account_id.get() {
+                    Some(id) => account.id = id,
+                    None => account_id.set(Some(account.id)),
+                }
             }
-            if let Err(error) = app
-                .mailin
-                .save_account(&account, Some(&secrecy::SecretString::new(password.into())))
-            {
+            // Only update password if user entered a new one
+            let password_opt = if password.is_empty() {
+                None
+            } else {
+                Some(secrecy::SecretString::new(password.into()))
+            };
+            if let Err(error) = app.mailin.save_account(&account, password_opt.as_ref()) {
                 error_label.set_text(&error.to_string());
                 error_label.set_visible(true);
                 return;
@@ -318,6 +391,54 @@ pub fn present(
             dialog.close();
         }
     });
+
+    // Remove account handler
+    if let Some(remove) = remove {
+        let dialog = dialog.clone();
+        let app = Rc::clone(&app);
+        let existing = existing_account_for_remove.clone();
+        // Get parent window before the closure to avoid lifetime issues
+        let window = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+        remove.connect_clicked(move |_| {
+            if let Some(account) = &existing {
+                // Show confirmation dialog
+                let confirm = gtk::AlertDialog::builder()
+                    .message("Remove account?")
+                    .detail(&format!(
+                        "Are you sure you want to remove '{}' ({})? This will delete all local data for this account.",
+                        account.display_name, account.email
+                    ))
+                    .build();
+                confirm.set_buttons(&["Cancel", "Remove"]);
+                confirm.set_cancel_button(0);
+                confirm.set_default_button(0);
+
+                // Extract the mailin from app for use in callback
+                let mailin = app.mailin.clone();
+                let dialog = dialog.clone();
+                let account_id = account.id;
+                let window = window.clone();
+
+                // Use choose_future to handle the response asynchronously
+                glib::spawn_future_local(async move {
+                    let response = confirm.choose_future(window.as_ref()).await;
+                    match response {
+                        Ok(1) => { // "Remove" button (index 1)
+                            if let Err(e) = mailin.remove_account(&account_id) {
+                                eprintln!("Failed to remove account: {e}");
+                            } else {
+                                // sync_account is called by the remove_account internally
+                            }
+                            dialog.close();
+                        }
+                        _ => {
+                            // Cancel or other - do nothing
+                        }
+                    }
+                });
+            }
+        });
+    }
 
     dialog.present(Some(parent));
 }
@@ -407,7 +528,7 @@ mod tests {
 
     #[test]
     fn empty_optional_fields_get_sensible_defaults() {
-        let account = sample().build().expect("valid draft");
+        let account = sample().build(true).expect("valid draft");
         assert_eq!(account.display_name, "ada");
         assert_eq!(account.imap.username, "ada@example.com");
         assert_eq!(account.smtp.username, "ada@example.com");
@@ -418,18 +539,26 @@ mod tests {
     fn missing_password_is_rejected() {
         let mut draft = sample();
         draft.password.clear();
-        assert!(draft.build().is_err());
+        assert!(draft.build(true).is_err());
+    }
+
+    #[test]
+    fn edit_mode_allows_empty_password() {
+        let mut draft = sample();
+        draft.password.clear();
+        // In edit mode (require_password = false), empty password should be OK
+        assert!(draft.build(false).is_ok());
     }
 
     #[test]
     fn invalid_port_and_host_are_rejected() {
         let mut draft = sample();
         draft.imap.port = "nope".into();
-        assert!(draft.build().is_err());
+        assert!(draft.build(true).is_err());
 
         let mut draft = sample();
         draft.smtp.host = "  ".into();
-        assert!(draft.build().is_err());
+        assert!(draft.build(true).is_err());
     }
 
     #[test]
@@ -474,7 +603,7 @@ mod tests {
             engine,
         });
 
-        present(&window, app, |_| {});
+        present(&window, app, AccountDialogMode::Add, None, |_| {});
 
         let main_loop = gtk::glib::MainLoop::new(None, false);
         let quit = main_loop.clone();

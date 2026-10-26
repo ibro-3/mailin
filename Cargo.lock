@@ -507,6 +507,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
 name = "email-encoding"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1473,6 +1479,7 @@ dependencies = [
  "async-imap",
  "base64 0.22.1",
  "directories",
+ "either",
  "futures-util",
  "keyring",
  "lettre",

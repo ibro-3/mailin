@@ -849,13 +849,52 @@ impl MainWindow {
 
     fn add_account(self: &Rc<Self>) {
         let this = Rc::clone(self);
-        match account_dialog::present(Arc::clone(&self.app), move |id| {
-            this.refresh_accounts();
-            this.select_account(id);
-        }) {
+        match account_dialog::present(
+            Arc::clone(&self.app),
+            account_dialog::AccountDialogMode::Add,
+            None,
+            move |id| {
+                this.refresh_accounts();
+                this.select_account(id);
+            },
+        ) {
             Ok(_) => {}
             Err(error) => self.show_error(&format!("Could not open the account wizard: {error:#}")),
         }
+    }
+
+    fn edit_account(self: &Rc<Self>) {
+        let this = Rc::clone(this);
+        let account = self.state().selection.account;
+        let Some(account_id) = account else { return };
+        let Some(account) = self.state().accounts.iter().find(|a| a.id == account_id).cloned() else { return };
+        match account_dialog::present(
+            Arc::clone(&self.app),
+            account_dialog::AccountDialogMode::Edit,
+            Some(account),
+            move |id| {
+                this.refresh_accounts();
+                this.select_account(id);
+            },
+        ) {
+            Ok(_) => {}
+            Err(error) => self.show_error(&format!("Could not open the account wizard: {error:#}")),
+        }
+    }
+
+    fn remove_account(self: &Rc<Self>) {
+        let account = self.state().selection.account;
+        let Some(account_id) = account else { return };
+        let Some(account) = self.state().accounts.iter().find(|a| a.id == account_id).cloned() else { return };
+        let mailin = self.app.mailin.clone();
+        let this = Rc::clone(this);
+        std::thread::spawn(move || {
+            if let Err(e) = mailin.remove_account(&account.id) {
+                eprintln!("Failed to remove account: {e}");
+            } else {
+                this.refresh_accounts();
+            }
+        });
     }
 
     /// Show the keyboard shortcuts help window.
@@ -887,6 +926,19 @@ impl MainWindow {
         });
 
         let _ = shortcuts_window.Activate();
+    }
+
+    fn show_preferences(self: &Rc<Self>) {
+        let xaml_root = match self.widgets.window.XamlRoot() {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::error!("Failed to get XamlRoot: {e:#}");
+                return;
+            }
+        };
+        if let Err(e) = crate::preferences::show_preferences(&self.app, &xaml_root) {
+            tracing::error!("Failed to show preferences: {e:#}");
+        }
     }
 
     // ---------------------------------------------------------------- events
@@ -1244,6 +1296,20 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     })?;
     accelerators.Append(&help_accel2)?;
 
+    // Ctrl+,: Show preferences
+    let prefs_accel = KeyboardAccelerator::new().context("could not create preferences accelerator")?;
+    prefs_accel.SetKey(VirtualKey::OemComma)?;
+    prefs_accel.SetModifiers(VirtualKeyModifiers::Control)?;
+    prefs_accel.Invoked({
+        let this = Rc::downgrade(&this);
+        move |_, _| {
+            if let Some(this) = this.upgrade() {
+                this.show_preferences();
+            }
+        }
+    })?;
+    accelerators.Append(&prefs_accel)?;
+
     let this = Rc::new(MainWindow {
         app: Arc::clone(state),
         state: Mutex::new(State {
@@ -1592,6 +1658,15 @@ fn build_shortcuts_window(parent: &Window) -> Result<Window> {
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Ctrl+Shift+A" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
                     <TextBlock Grid.Column="2" Text="Add account"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+," FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Preferences"/>
                 </Grid>
                 <Grid>
                     <Grid.ColumnDefinitions>

@@ -28,7 +28,7 @@ pub mod store;
 mod sync;
 mod tls;
 
-pub use account::{Account, AccountId, AccountSyncSettings, Security, ServerSettings};
+pub use account::{Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, Security, ServerSettings};
 pub use client::{Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{Config, Paths, SyncPreferences, Theme, UiPreferences};

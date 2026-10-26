@@ -23,7 +23,6 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
 use webkit6::prelude::*;
 
-use crate::account_dialog;
 use crate::app::AppState;
 use crate::compose;
 use crate::format;
@@ -55,6 +54,7 @@ struct Widgets {
     banner: adw::Banner,
     account_dropdown: gtk::DropDown,
     add_button: gtk::Button,
+    account_menu_button: gtk::MenuButton,
     compose_button: gtk::Button,
     empty_add: gtk::Button,
     folder_list: gtk::ListBox,
@@ -149,6 +149,15 @@ impl MainWindow {
         account_dropdown.set_hexpand(true);
         account_dropdown.set_tooltip_text(Some("Switch account"));
         let add_button = icon_button("list-add-symbolic", "Add account (Ctrl+Shift+A)");
+
+        // Account menu button with edit/remove options
+        let account_menu = gtk::PopoverMenu::from_model(None::<&gio::MenuModel>);
+        let account_menu_button = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Account options")
+            .popover(&account_menu)
+            .build();
+
         let account_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         account_bar.set_margin_top(8);
         account_bar.set_margin_bottom(8);
@@ -156,6 +165,7 @@ impl MainWindow {
         account_bar.set_margin_end(12);
         account_bar.append(&account_dropdown);
         account_bar.append(&add_button);
+        account_bar.append(&account_menu_button);
 
         let folder_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
@@ -416,6 +426,7 @@ impl MainWindow {
                 banner,
                 account_dropdown,
                 add_button,
+                account_menu_button,
                 compose_button,
                 empty_add,
                 folder_list,
@@ -483,6 +494,28 @@ impl MainWindow {
             }
         });
         this.widgets.window.add_controller(key_controller);
+
+        // Account menu (edit/remove)
+        let menu = gio::Menu::new();
+        let edit_action = gio::SimpleAction::new("account-edit", None);
+        edit_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| MainWindow::edit_account(&this)
+        });
+        this.widgets.window.add_action(&edit_action);
+        menu.append(Some("Edit"), Some("win.account-edit"));
+
+        let remove_action = gio::SimpleAction::new("account-remove", None);
+        remove_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| MainWindow::remove_account(&this)
+        });
+        this.widgets.window.add_action(&remove_action);
+        menu.append(Some("Remove"), Some("win.account-remove"));
+
+        let account_menu_model = gio::Menu::new();
+        account_menu_model.append_section(None, &menu);
+        this.widgets.account_menu_button.set_menu_model(Some(&account_menu_model));
 
         this.widgets.account_dropdown.connect_selected_notify({
             let this = Rc::clone(this);
@@ -671,6 +704,7 @@ impl MainWindow {
             application.set_accels_for_action("win.reply", &["<Control>r"]);
             application.set_accels_for_action("win.reply-all", &["<Control><Shift>r"]);
             application.set_accels_for_action("win.forward", &["<Control><Shift>f"]);
+            application.set_accels_for_action("win.preferences", &["<Control>comma"]);
         }
 
         let compose_action = gio::SimpleAction::new("compose", None);
@@ -716,6 +750,13 @@ impl MainWindow {
             move |_, _| this.sync_now()
         });
         this.widgets.window.add_action(&sync_action);
+
+        let preferences_action = gio::SimpleAction::new("preferences", None);
+        preferences_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| crate::preferences::show_preferences(&this.widgets.window, &this.app)
+        });
+        this.widgets.window.add_action(&preferences_action);
 
         // Event pump. Polling the tokio broadcast channel keeps every store
         // read on the GTK main thread without an extra bridge thread.
@@ -1580,11 +1621,88 @@ impl MainWindow {
     }
 
     fn add_account(this: &Rc<Self>) {
-        account_dialog::present(&this.widgets.window, Rc::clone(&this.app), {
-            let this = Rc::clone(this);
-            move |id| {
-                this.refresh_accounts();
-                this.select_account(id);
+        crate::account_dialog::present(
+            &this.widgets.window,
+            Rc::clone(&this.app),
+            crate::account_dialog::AccountDialogMode::Add,
+            None,
+            {
+                let this = Rc::clone(this);
+                move |id| {
+                    this.refresh_accounts();
+                    this.select_account(id);
+                }
+            },
+        );
+    }
+
+    fn edit_account(this: &Rc<Self>) {
+        let account = this.selection.borrow().account;
+        let Some(account_id) = account else { return };
+        let Some(account) = this
+            .accounts
+            .borrow()
+            .iter()
+            .find(|a| a.id == account_id)
+            .cloned()
+        else {
+            return;
+        };
+        crate::account_dialog::present(
+            &this.widgets.window,
+            Rc::clone(&this.app),
+            crate::account_dialog::AccountDialogMode::Edit,
+            Some(account),
+            {
+                let this = Rc::clone(this);
+                move |id| {
+                    this.refresh_accounts();
+                    this.select_account(id);
+                }
+            },
+        );
+    }
+
+    fn remove_account(this: &Rc<Self>) {
+        let account = this.selection.borrow().account;
+        let Some(account_id) = account else { return };
+        let Some(account) = this
+            .accounts
+            .borrow()
+            .iter()
+            .find(|a| a.id == account_id)
+            .cloned()
+        else {
+            return;
+        };
+        let confirm = gtk::AlertDialog::builder()
+            .message("Remove account?")
+            .detail(&format!(
+                "Are you sure you want to remove '{}' ({})? This will delete all local data for this account.",
+                account.display_name, account.email
+            ))
+            .build();
+        confirm.set_buttons(&["Cancel", "Remove"]);
+        confirm.set_cancel_button(0);
+        confirm.set_default_button(0);
+
+        let mailin = this.app.mailin.clone();
+        let this = Rc::clone(this);
+        let account_id = account.id;
+
+        glib::spawn_future_local(async move {
+            let response = confirm.choose_future(Some(&this.widgets.window)).await;
+            match response {
+                Ok(1) => { // "Remove" button (index 1)
+                    if let Err(e) = mailin.remove_account(&account_id) {
+                        this.show_error(&e.to_string());
+                    } else {
+                        this.refresh_accounts();
+                    }
+                }
+                _ => {
+                    // Cancel or error - do nothing
+                }
             }
         });
     }
@@ -1695,14 +1813,17 @@ fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWind
         .build();
 
     let shortcuts_data = [
-        ("Ctrl+N", "New message"),
-        ("Ctrl+F", "Search mail"),
+        ("<Control>N", "New message"),
+        ("<Control>F", "Search mail"),
         ("F5", "Synchronize"),
-        ("Ctrl+Shift+A", "Add account"),
-        ("Ctrl+Enter", "Send message (in composer)"),
-        ("↑/↓", "Navigate message list"),
-        ("Enter", "Open selected message"),
-        ("F1 / Ctrl+?", "Show this help"),
+        ("<Control><Shift>A", "Add account"),
+        ("<Control>comma", "Preferences"),
+        ("<Control>Return", "Send message (in composer)"),
+        ("Up", "Navigate message list (up)"),
+        ("Down", "Navigate message list (down)"),
+        ("Return", "Open selected message"),
+        ("F1", "Show this help"),
+        ("<Control>slash", "Show this help (alternate)"),
     ];
 
     for (accel, description) in shortcuts_data {

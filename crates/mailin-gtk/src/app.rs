@@ -93,7 +93,7 @@ pub fn run() -> glib::ExitCode {
     application.run()
 }
 
-fn apply_theme(theme: Theme) {
+pub fn apply_theme(theme: Theme) {
     let scheme = match theme {
         Theme::System => adw::ColorScheme::Default,
         Theme::Light => adw::ColorScheme::ForceLight,

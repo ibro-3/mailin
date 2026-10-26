@@ -60,6 +60,50 @@ pub enum Security {
     None,
 }
 
+/// Authentication method for IMAP/SMTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMethod {
+    /// Username/password authentication.
+    #[default]
+    Password,
+    /// OAuth2 / XOAUTH2 authentication.
+    OAuth2,
+}
+
+/// OAuth2 tokens for an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OAuth2Tokens {
+    /// Access token for XOAUTH2 authentication.
+    pub access_token: String,
+    /// Refresh token for obtaining new access tokens.
+    pub refresh_token: String,
+    /// Unix timestamp when the access token expires.
+    pub expires_at: i64,
+}
+
+impl Default for OAuth2Tokens {
+    fn default() -> Self {
+        Self {
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+        }
+    }
+}
+
+impl OAuth2Tokens {
+    /// Check if the access token is expired or about to expire (within 5 minutes).
+    pub fn is_expired(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        self.expires_at <= now + 300 // 5 minutes buffer
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerSettings {
     pub host: String,
@@ -67,6 +111,18 @@ pub struct ServerSettings {
     #[serde(default)]
     pub security: Security,
     pub username: String,
+    /// Authentication method (defaults to Password).
+    #[serde(default)]
+    pub auth_method: AuthMethod,
+    /// OAuth2 tokens (only used when auth_method is OAuth2).
+    #[serde(default, skip_serializing_if = "OAuth2Tokens::is_empty")]
+    pub oauth2: OAuth2Tokens,
+}
+
+impl OAuth2Tokens {
+    fn is_empty(&self) -> bool {
+        self.access_token.is_empty() && self.refresh_token.is_empty()
+    }
 }
 
 impl ServerSettings {
@@ -76,6 +132,8 @@ impl ServerSettings {
             port: 993,
             security: Security::Tls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 
@@ -85,6 +143,8 @@ impl ServerSettings {
             port: 143,
             security: Security::StartTls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 
@@ -94,6 +154,8 @@ impl ServerSettings {
             port: 465,
             security: Security::Tls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 
@@ -103,6 +165,8 @@ impl ServerSettings {
             port: 587,
             security: Security::StartTls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 }

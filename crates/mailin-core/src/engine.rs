@@ -14,13 +14,14 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+use either::Either;
 
 use async_imap::extensions::idle::IdleResponse;
 use tokio::runtime::Runtime;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
-use crate::account::{Account, AccountId};
+use crate::account::{Account, AccountId, AuthMethod};
 use crate::client::{Event, Mailin};
 use crate::error::{Error, Result};
 use crate::imap::ImapSession;
@@ -307,12 +308,13 @@ async fn account_worker(
                 continue;
             }
         };
-        let password = match state.mailbox.password(&account_id) {
-            Ok(password) => password,
-            Err(error) => {
+
+        // For OAuth2 accounts, we need the access token instead of a password
+        let auth_creds = if account.imap.auth_method == AuthMethod::OAuth2 {
+            if account.imap.oauth2.access_token.is_empty() {
                 state.mailbox.publish(Event::AccountError {
                     account_id,
-                    message: error.to_string(),
+                    message: "OAuth2 access token not configured".into(),
                 });
                 if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
                     return;
@@ -320,10 +322,28 @@ async fn account_worker(
                 backoff = next_backoff(backoff);
                 continue;
             }
+            // Create a secret string with the access token for OAuth2
+            Either::Right(secrecy::SecretString::new(account.imap.oauth2.access_token.clone().into()))
+        } else {
+            let password = match state.mailbox.password(&account_id) {
+                Ok(password) => password,
+                Err(error) => {
+                    state.mailbox.publish(Event::AccountError {
+                        account_id,
+                        message: error.to_string(),
+                    });
+                    if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
+                        return;
+                    }
+                    backoff = next_backoff(backoff);
+                    continue;
+                }
+            };
+            Either::Left(password)
         };
 
         let started = Instant::now();
-        match run_session(&state, &account, &password, &mut commands, &mut pending).await {
+        match run_session(&state, &account, auth_creds, &mut commands, &mut pending).await {
             Ok(()) => return,
             Err(error) => {
                 state.mailbox.publish(Event::AccountError {
@@ -371,12 +391,16 @@ async fn wait_with_backoff(
 async fn run_session(
     state: &Arc<EngineState>,
     account: &Account,
-    password: &SecretString,
+    auth_creds: Either<SecretString, SecretString>,
     commands: &mut mpsc::UnboundedReceiver<WorkerCommand>,
     pending: &mut VecDeque<WorkerCommand>,
 ) -> Result<()> {
     let tls = crate::tls::client_config()?;
-    let mut session = ImapSession::connect(&account.imap, password.expose_secret(), tls).await?;
+    let password_or_token = match &auth_creds {
+        Either::Left(p) => p.expose_secret(),
+        Either::Right(t) => t.expose_secret(),
+    };
+    let mut session = ImapSession::connect(&account.imap, password_or_token, tls).await?;
     let remote = session.list_folders().await?;
     sync::refresh_folders(&state.mailbox, account.id, &remote)?;
 
@@ -723,7 +747,23 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
         .mailbox
         .account(&entry.account_id)?
         .ok_or(Error::AccountNotFound(entry.account_id))?;
-    let password = state.mailbox.password(&entry.account_id)?;
+    
+    // For OAuth2 accounts, use the access token
+    let auth_creds = if account.smtp.auth_method == AuthMethod::OAuth2 {
+        if account.smtp.oauth2.access_token.is_empty() {
+            return Err(Error::Config("OAuth2 access token not configured for SMTP".into()));
+        }
+        Either::Right(secrecy::SecretString::new(account.smtp.oauth2.access_token.clone().into()))
+    } else {
+        let password = state.mailbox.password(&entry.account_id)?;
+        Either::Left(password)
+    };
+    
+    let password_or_token = match &auth_creds {
+        Either::Left(p) => p.expose_secret(),
+        Either::Right(t) => t.expose_secret(),
+    };
+    
     let envelope: OutgoingEnvelope = serde_json::from_str(&entry.envelope_json)?;
 
     state
@@ -734,7 +774,7 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
 
     crate::smtp::send(
         &account.smtp,
-        password.expose_secret(),
+        password_or_token,
         &entry.raw,
         &envelope,
     )
@@ -748,11 +788,11 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
         .set_outbox_state(entry.id, OutboxState::Sent, None)?;
     state.mailbox.publish(Event::OutboxChanged);
 
-    append_to_sent(state, &account, password.expose_secret(), &entry.raw).await;
+    append_to_sent(state, &account, password_or_token, &entry.raw).await;
     Ok(())
 }
 
-async fn append_to_sent(state: &Arc<EngineState>, account: &Account, password: &str, raw: &[u8]) {
+async fn append_to_sent(state: &Arc<EngineState>, account: &Account, password_or_token: &str, raw: &[u8]) {
     let sent = match state.mailbox.list_folders(&account.id) {
         Ok(folders) => folders
             .into_iter()
@@ -771,7 +811,7 @@ async fn append_to_sent(state: &Arc<EngineState>, account: &Account, password: &
             return;
         }
     };
-    match ImapSession::connect(&account.imap, password, tls).await {
+    match ImapSession::connect(&account.imap, password_or_token, tls).await {
         Ok(mut session) => {
             if let Err(error) = session.append(&sent.name, "(\\Seen)", raw).await {
                 tracing::warn!(folder = %sent.name, %error, "could not append to Sent");

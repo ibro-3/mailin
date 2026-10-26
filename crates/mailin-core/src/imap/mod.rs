@@ -19,11 +19,32 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
-use crate::account::{Security, ServerSettings};
+use crate::account::{AuthMethod, Security, ServerSettings};
 use crate::error::{Error, Result};
 use crate::model::FolderRole;
 
 use self::parse::ParsedHeader;
+
+/// XOAUTH2 authenticator for async_imap.
+///
+/// Implements the `async_imap::Authenticator` trait to provide the
+/// XOAUTH2 authentication string format expected by the server.
+struct Xoauth2Authenticator {
+    user: String,
+    access_token: String,
+}
+
+impl async_imap::Authenticator for &Xoauth2Authenticator {
+    type Response = String;
+
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        // XOAUTH2 format: user=<user>\x01auth=Bearer <token>\x01\x01
+        format!(
+            "user={}\x01auth=Bearer {}\x01\x01",
+            self.user, self.access_token
+        )
+    }
+}
 
 /// Abstraction over the two stream flavours used for IMAP so that
 /// `async_imap::Session` can be a single type.
@@ -166,10 +187,25 @@ impl ImapSession {
         };
 
         let client = async_imap::Client::new(stream);
-        let mut session = client
-            .login(&settings.username, password)
-            .await
-            .map_err(|(e, _)| Error::Imap(format!("login failed: {e}")))?;
+
+        // Authenticate based on the configured method
+        let mut session = if settings.auth_method == AuthMethod::OAuth2 && !settings.oauth2.access_token.is_empty() {
+            // Use XOAUTH2 authentication
+            let authenticator = Xoauth2Authenticator {
+                user: settings.username.clone(),
+                access_token: settings.oauth2.access_token.clone(),
+            };
+            client
+                .authenticate("XOAUTH2", &authenticator)
+                .await
+                .map_err(|(e, _)| Error::Imap(format!("XOAUTH2 authentication failed: {e}")))?
+        } else {
+            // Use traditional password authentication
+            client
+                .login(&settings.username, password)
+                .await
+                .map_err(|(e, _)| Error::Imap(format!("login failed: {e}")))?
+        };
 
         let capabilities = session.capabilities().await.ok();
         let condstore = capabilities

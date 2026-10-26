@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mailin_core::{
-    Account, AccountId, Engine, Mailin, MemoryCredentials, MessageHeader, OutgoingEnvelope,
-    Security, ServerSettings, Store,
+    Account, AccountId, AuthMethod, Engine, Mailin, MemoryCredentials, MessageHeader,
+    OAuth2Tokens, OutgoingEnvelope, Security, ServerSettings, Store,
 };
 use secrecy::SecretString;
 
@@ -138,12 +138,16 @@ fn sync_send_and_fetch_body_round_trip() {
             port: imap_port,
             security: Security::None,
             username: LOGIN.to_owned(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         },
         ServerSettings {
             host: smtp_host,
             port: smtp_port,
             security: Security::None,
             username: LOGIN.to_owned(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         },
     );
     mailin

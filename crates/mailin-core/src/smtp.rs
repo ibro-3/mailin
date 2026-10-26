@@ -3,11 +3,11 @@
 use std::time::Duration;
 
 use lettre::address::{Address, Envelope};
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 
-use crate::account::{Security, ServerSettings};
+use crate::account::{AuthMethod, Security, ServerSettings};
 use crate::error::{Error, Result};
 use crate::model::OutgoingEnvelope;
 
@@ -29,15 +29,32 @@ pub(crate) async fn send(
         Security::None => Tls::None,
     };
 
-    let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
-        .port(settings.port)
-        .credentials(Credentials::new(
+    let transport: AsyncSmtpTransport<Tokio1Executor> = if settings.auth_method == AuthMethod::OAuth2 && !settings.oauth2.access_token.is_empty() {
+        // Use XOAUTH2 authentication
+        let credentials = Credentials::new(
+            settings.username.clone(),
+            settings.oauth2.access_token.clone(),
+        );
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
+            .port(settings.port)
+            .credentials(credentials)
+            .authentication(vec![Mechanism::Xoauth2])
+            .tls(tls)
+            .timeout(Some(SEND_TIMEOUT))
+            .build()
+    } else {
+        // Use traditional password authentication
+        let credentials = Credentials::new(
             settings.username.clone(),
             password.to_owned(),
-        ))
-        .tls(tls)
-        .timeout(Some(SEND_TIMEOUT))
-        .build();
+        );
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
+            .port(settings.port)
+            .credentials(credentials)
+            .tls(tls)
+            .timeout(Some(SEND_TIMEOUT))
+            .build()
+    };
 
     let from: Address = outgoing
         .from
@@ -77,15 +94,32 @@ pub(crate) async fn test_connection(
         Security::None => Tls::None,
     };
 
-    let transport: AsyncSmtpTransport<Tokio1Executor> = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
-        .port(settings.port)
-        .credentials(Credentials::new(
+    let transport: AsyncSmtpTransport<Tokio1Executor> = if settings.auth_method == AuthMethod::OAuth2 && !settings.oauth2.access_token.is_empty() {
+        // Use XOAUTH2 authentication
+        let credentials = Credentials::new(
+            settings.username.clone(),
+            settings.oauth2.access_token.clone(),
+        );
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
+            .port(settings.port)
+            .credentials(credentials)
+            .authentication(vec![Mechanism::Xoauth2])
+            .tls(tls)
+            .timeout(Some(SEND_TIMEOUT))
+            .build()
+    } else {
+        // Use traditional password authentication
+        let credentials = Credentials::new(
             settings.username.clone(),
             password.to_owned(),
-        ))
-        .tls(tls)
-        .timeout(Some(SEND_TIMEOUT))
-        .build();
+        );
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(settings.host.as_str())
+            .port(settings.port)
+            .credentials(credentials)
+            .tls(tls)
+            .timeout(Some(SEND_TIMEOUT))
+            .build()
+    };
 
     // Test the connection by sending a NOOP command
     let _ = transport.test_connection().await

@@ -6,6 +6,7 @@ mod autoconfig;
 mod compose;
 mod format;
 mod html;
+mod preferences;
 mod window;
 
 fn main() -> gtk::glib::ExitCode {
