@@ -513,6 +513,17 @@ impl Store {
         Ok(Some(MessageId(id)))
     }
 
+    /// Remove one cached message by its local id. Used after the server has
+    /// moved or permanently deleted it.
+    pub fn delete_message_by_id(&self, id: MessageId) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", params![id.0])?;
+        let removed = tx.execute("DELETE FROM messages WHERE id = ?1", params![id.0])?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
     // -------------------------------------------------------------- attachments
 
     pub fn replace_attachments(

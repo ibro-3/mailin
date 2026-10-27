@@ -71,8 +71,25 @@ pub enum AuthMethod {
     OAuth2,
 }
 
+/// Identity provider used for OAuth2 authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OAuthProvider {
+    /// Google (Gmail and Google Workspace).
+    #[default]
+    Google,
+    /// Microsoft 365, Outlook.com and Exchange Online.
+    Microsoft,
+    /// Yahoo Mail.
+    Yahoo,
+    /// Fastmail.
+    Fastmail,
+    /// Any other provider; endpoints are read from `MAILIN_OAUTH_*` env vars.
+    Custom,
+}
+
 /// OAuth2 tokens for an account.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OAuth2Tokens {
     /// Access token for XOAUTH2 authentication.
@@ -81,16 +98,10 @@ pub struct OAuth2Tokens {
     pub refresh_token: String,
     /// Unix timestamp when the access token expires.
     pub expires_at: i64,
-}
-
-impl Default for OAuth2Tokens {
-    fn default() -> Self {
-        Self {
-            access_token: String::new(),
-            refresh_token: String::new(),
-            expires_at: 0,
-        }
-    }
+    /// Provider that issued the tokens.
+    pub provider: OAuthProvider,
+    /// Public OAuth2 client identifier used to obtain the tokens.
+    pub client_id: String,
 }
 
 impl OAuth2Tokens {
@@ -121,7 +132,7 @@ pub struct ServerSettings {
 
 impl OAuth2Tokens {
     fn is_empty(&self) -> bool {
-        self.access_token.is_empty() && self.refresh_token.is_empty()
+        self.access_token.is_empty() && self.refresh_token.is_empty() && self.client_id.is_empty()
     }
 }
 

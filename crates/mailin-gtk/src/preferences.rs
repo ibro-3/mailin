@@ -23,9 +23,7 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     general_page.set_icon_name(Some("preferences-system-symbolic"));
 
     // Appearance group
-    let appearance_group = adw::PreferencesGroup::builder()
-        .title("Appearance")
-        .build();
+    let appearance_group = adw::PreferencesGroup::builder().title("Appearance").build();
 
     let theme_combo = gtk::DropDown::from_strings(&["System", "Light", "Dark"]);
     match config.borrow().ui.theme {
@@ -44,9 +42,7 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     general_page.add(&appearance_group);
 
     // Messages group
-    let messages_group = adw::PreferencesGroup::builder()
-        .title("Messages")
-        .build();
+    let messages_group = adw::PreferencesGroup::builder().title("Messages").build();
 
     let html_switch = gtk::Switch::builder()
         .active(config.borrow().ui.html_enabled)
@@ -69,7 +65,14 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     messages_group.add(&remote_content_row);
 
     let page_size_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(config.borrow().ui.page_size as f64, 1.0, 1000.0, 1.0, 10.0, 0.0))
+        .adjustment(&gtk::Adjustment::new(
+            config.borrow().ui.page_size as f64,
+            1.0,
+            1000.0,
+            1.0,
+            10.0,
+            0.0,
+        ))
         .numeric(true)
         .build();
     let page_size_row = adw::ActionRow::builder()
@@ -116,12 +119,17 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     sync_page.set_icon_name(Some("view-refresh-symbolic"));
 
     // Polling group
-    let polling_group = adw::PreferencesGroup::builder()
-        .title("Polling")
-        .build();
+    let polling_group = adw::PreferencesGroup::builder().title("Polling").build();
 
     let poll_interval_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(config.borrow().sync.poll_interval_secs as f64, 15.0, 1800.0, 1.0, 60.0, 0.0))
+        .adjustment(&gtk::Adjustment::new(
+            config.borrow().sync.poll_interval_secs as f64,
+            15.0,
+            1800.0,
+            1.0,
+            60.0,
+            0.0,
+        ))
         .numeric(true)
         .build();
     let poll_interval_row = adw::ActionRow::builder()
@@ -132,7 +140,14 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     polling_group.add(&poll_interval_row);
 
     let max_parallel_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(config.borrow().sync.max_parallel_accounts as f64, 1.0, 16.0, 1.0, 1.0, 0.0))
+        .adjustment(&gtk::Adjustment::new(
+            config.borrow().sync.max_parallel_accounts as f64,
+            1.0,
+            16.0,
+            1.0,
+            1.0,
+            0.0,
+        ))
         .numeric(true)
         .build();
     let max_parallel_row = adw::ActionRow::builder()
@@ -149,7 +164,8 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         .title("Message Bodies")
         .build();
 
-    let body_sync_combo = gtk::DropDown::from_strings(&["On demand (when opened)", "Eager (background)"]);
+    let body_sync_combo =
+        gtk::DropDown::from_strings(&["On demand (when opened)", "Eager (background)"]);
     match config.borrow().sync.body_sync {
         mailin_core::config::BodySyncPolicy::OnOpen => body_sync_combo.set_selected(0),
         mailin_core::config::BodySyncPolicy::Eager => body_sync_combo.set_selected(1),
@@ -165,12 +181,17 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     sync_page.add(&body_group);
 
     // Retention group
-    let retention_group = adw::PreferencesGroup::builder()
-        .title("Retention")
-        .build();
+    let retention_group = adw::PreferencesGroup::builder().title("Retention").build();
 
     let retention_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(config.borrow().sync.retention_days as f64, 0.0, 3650.0, 1.0, 30.0, 0.0))
+        .adjustment(&gtk::Adjustment::new(
+            config.borrow().sync.retention_days as f64,
+            0.0,
+            3650.0,
+            1.0,
+            30.0,
+            0.0,
+        ))
         .numeric(true)
         .build();
     let retention_row = adw::ActionRow::builder()

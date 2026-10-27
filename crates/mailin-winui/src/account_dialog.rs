@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use mailin_core::autoconfig::{self, Suggestion};
-use mailin_core::{Account, AccountId, Security, ServerSettings};
+use mailin_core::{
+    Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
+    ServerSettings,
+};
 use mailin_winui_sys::{ComboBox, Grid, PasswordBox, TextBlock, TextBox, Window};
 
 use crate::app::AppState;
@@ -21,6 +24,8 @@ struct Draft {
     display_name: String,
     email: String,
     password: String,
+    auth_method: AuthMethod,
+    oauth2: OAuth2Tokens,
     imap: ServerDraft,
     smtp: ServerDraft,
 }
@@ -35,8 +40,16 @@ struct ServerDraft {
 
 impl Draft {
     fn build(&self, require_password: bool) -> std::result::Result<Account, String> {
-        if require_password && self.password.is_empty() {
-            return Err("Enter the account password.".to_owned());
+        if require_password {
+            match self.auth_method {
+                AuthMethod::Password if self.password.is_empty() => {
+                    return Err("Enter the account password.".to_owned());
+                }
+                AuthMethod::OAuth2 if self.oauth2.access_token.is_empty() => {
+                    return Err("Sign in with the provider to obtain an access token.".to_owned());
+                }
+                _ => {}
+            }
         }
 
         let email = self.email.trim();
@@ -46,8 +59,14 @@ impl Draft {
             self.display_name.trim()
         };
 
-        let imap = self.imap.build(email, "IMAP")?;
-        let smtp = self.smtp.build(email, "SMTP")?;
+        let mut imap = self.imap.build(email, "IMAP")?;
+        let mut smtp = self.smtp.build(email, "SMTP")?;
+        if self.auth_method == AuthMethod::OAuth2 {
+            imap.auth_method = AuthMethod::OAuth2;
+            imap.oauth2 = self.oauth2.clone();
+            smtp.auth_method = AuthMethod::OAuth2;
+            smtp.oauth2 = self.oauth2.clone();
+        }
         let account = Account::new(display_name, email, imap, smtp);
         account.validate().map_err(|error| error.to_string())?;
         Ok(account)
@@ -79,6 +98,10 @@ struct FormRows {
     name: TextBox,
     email: TextBox,
     password: PasswordBox,
+    auth_method: ComboBox,
+    oauth_provider: ComboBox,
+    oauth_client_id: TextBox,
+    oauth_tokens: Arc<Mutex<OAuth2Tokens>>,
     imap_host: TextBox,
     imap_port: TextBox,
     imap_user: TextBox,
@@ -91,10 +114,19 @@ struct FormRows {
 
 impl FormRows {
     fn draft(&self) -> Draft {
+        let mut oauth2 = self
+            .oauth_tokens
+            .lock()
+            .map(|tokens| tokens.clone())
+            .unwrap_or_default();
+        oauth2.provider = provider_at(ui::selected_index(&self.oauth_provider));
+        oauth2.client_id = ui::text_value(&self.oauth_client_id);
         Draft {
             display_name: ui::text_value(&self.name),
             email: ui::text_value(&self.email),
             password: ui::password_value(&self.password),
+            auth_method: auth_at(ui::selected_index(&self.auth_method)),
+            oauth2,
             imap: ServerDraft {
                 host: ui::text_value(&self.imap_host),
                 port: ui::text_value(&self.imap_port),
@@ -141,7 +173,11 @@ pub fn present(
     on_saved: impl Fn(AccountId) + 'static,
 ) -> Result<Window> {
     let (title_text, subtitle_text, save_label) = match mode {
-        AccountDialogMode::Add => ("Add Account", "Connect an IMAP and SMTP mailbox", "Add Account"),
+        AccountDialogMode::Add => (
+            "Add Account",
+            "Connect an IMAP and SMTP mailbox",
+            "Add Account",
+        ),
         AccountDialogMode::Edit => ("Edit Account", "Update account settings", "Save Changes"),
     };
 
@@ -165,9 +201,32 @@ pub fn present(
     let name = ui::text_box("Ada Lovelace")?;
     let email = ui::text_box("ada@example.com")?;
     let password = ui::password_box("Password")?;
+    let auth_method = ui::combo(&["Password", "OAuth2 (recommended)"], 0)?;
+    let password_field = ui::field("Password", &password)?;
     ui::append(&form, &ui::field("Display name", &name)?)?;
     ui::append(&form, &ui::field("Email address", &email)?)?;
-    ui::append(&form, &ui::field("Password", &password)?)?;
+    ui::append(&form, &ui::field("Authentication", &auth_method)?)?;
+    ui::append(&form, &password_field)?;
+
+    // OAuth2 sign-in section, hidden while password authentication is active.
+    let oauth_panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 10.0)?;
+    let oauth_provider = ui::combo(&provider_labels(), 0)?;
+    let oauth_client_id = ui::text_box("OAuth2 client ID")?;
+    let oauth_sign_in = ui::button("Sign in with browser…")?;
+    let oauth_status = ui::text("")?;
+    ui::append(
+        &oauth_panel,
+        &ui::heading("OAuth2 sign-in", Some(16.0), Some(600))?,
+    )?;
+    ui::append(&oauth_panel, &ui::field("Provider", &oauth_provider)?)?;
+    ui::append(
+        &oauth_panel,
+        &ui::field("OAuth2 client ID", &oauth_client_id)?,
+    )?;
+    ui::append(&oauth_panel, &oauth_sign_in)?;
+    ui::append(&oauth_panel, &oauth_status)?;
+    ui::set_visible(&oauth_panel, false)?;
+    ui::append(&form, &oauth_panel)?;
 
     let incoming = ui::heading("Incoming mail (IMAP)", Some(16.0), Some(600))?;
     ui::append(&form, &incoming)?;
@@ -231,11 +290,34 @@ pub fn present(
     window.SetTitle(title_text)?;
     window.SetContent(&root)?;
 
+    let oauth_tokens: Arc<Mutex<OAuth2Tokens>> = Arc::new(Mutex::new(OAuth2Tokens::default()));
+    let previous_provider = Arc::new(Mutex::new(OAuthProvider::default()));
+
     // Pre-fill form if editing
     if let Some(account) = existing_account.clone() {
         let _ = name.SetText(&account.display_name);
         let _ = email.SetText(&account.email);
         // Password left empty - user can enter new one to change it
+
+        let oauth = account.imap.auth_method == AuthMethod::OAuth2;
+        ui::select_index(&auth_method, auth_index(account.imap.auth_method));
+        let _ = ui::set_visible(&oauth_panel, oauth);
+        let _ = ui::set_visible(&password_field, !oauth);
+        if oauth {
+            if let Ok(mut tokens) = oauth_tokens.lock() {
+                *tokens = account.imap.oauth2.clone();
+            }
+            ui::select_index(
+                &oauth_provider,
+                provider_index(account.imap.oauth2.provider),
+            );
+            let _ = oauth_client_id.SetText(&account.imap.oauth2.client_id);
+            let _ = oauth_status.SetText("Signed in. Sign in again to replace the token.");
+            let _ = ui::set_visible(&oauth_status, true);
+            if let Ok(mut previous) = previous_provider.lock() {
+                *previous = account.imap.oauth2.provider;
+            }
+        }
 
         let _ = imap_host.SetText(&account.imap.host);
         let _ = imap_port.SetText(&account.imap.port.to_string());
@@ -251,6 +333,97 @@ pub fn present(
         let _ = email.SetIsEnabled(false);
     }
 
+    revokers.keep(ui::on_selection_changed(&auth_method, {
+        let oauth_panel = oauth_panel.clone();
+        let password_field = password_field.clone();
+        let auth_method = auth_method.clone();
+        move || {
+            let oauth = ui::selected_index(&auth_method) == 1;
+            let _ = ui::set_visible(&oauth_panel, oauth);
+            let _ = ui::set_visible(&password_field, !oauth);
+        }
+    })?);
+
+    revokers.keep(ui::on_selection_changed(&oauth_provider, {
+        let oauth_provider = oauth_provider.clone();
+        let oauth_client_id = oauth_client_id.clone();
+        let oauth_tokens = Arc::clone(&oauth_tokens);
+        let previous_provider = Arc::clone(&previous_provider);
+        move || {
+            let provider = provider_at(ui::selected_index(&oauth_provider));
+            let previous = previous_provider
+                .lock()
+                .map(|mut slot| std::mem::replace(&mut *slot, provider))
+                .unwrap_or_default();
+            if let Ok(mut tokens) = oauth_tokens.lock() {
+                if tokens.provider != provider {
+                    tokens.access_token.clear();
+                    tokens.refresh_token.clear();
+                    tokens.expires_at = 0;
+                    tokens.provider = provider;
+                }
+            }
+            let current = ui::text_value(&oauth_client_id);
+            if current.trim().is_empty() || current == previous.default_client_id() {
+                let _ = oauth_client_id.SetText(&provider.default_client_id());
+            }
+        }
+    })?);
+
+    revokers.keep(ui::on_click(&oauth_sign_in, {
+        let window = window.clone();
+        let email = email.clone();
+        let oauth_provider = oauth_provider.clone();
+        let oauth_client_id = oauth_client_id.clone();
+        let oauth_status = oauth_status.clone();
+        let oauth_tokens = Arc::clone(&oauth_tokens);
+        move || {
+            let provider = provider_at(ui::selected_index(&oauth_provider));
+            let client_id = ui::text_value(&oauth_client_id);
+            let hint = ui::text_value(&email);
+            let pending = match PendingAuthorization::begin(provider, &client_id, Some(&hint)) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    let _ = oauth_status.SetText(&error.to_string());
+                    let _ = ui::set_visible(&oauth_status, true);
+                    return;
+                }
+            };
+            let url = pending.auth_url().to_owned();
+            if let Err(error) = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &url])
+                .spawn()
+            {
+                let _ = oauth_status.SetText(&format!("Could not open the browser: {error}"));
+                let _ = ui::set_visible(&oauth_status, true);
+                return;
+            }
+            let _ = oauth_status.SetText("Waiting for the browser to complete sign-in…");
+            let _ = ui::set_visible(&oauth_status, true);
+
+            let window = window.clone();
+            let oauth_status = oauth_status.clone();
+            let oauth_tokens = Arc::clone(&oauth_tokens);
+            std::thread::spawn(move || {
+                let result = pending.wait(std::time::Duration::from_secs(300));
+                let _ = window.DispatcherQueue().TryEnqueue(move || {
+                    match result {
+                        Ok(tokens) => {
+                            if let Ok(mut slot) = oauth_tokens.lock() {
+                                *slot = tokens;
+                            }
+                            let _ = oauth_status.SetText("Signed in successfully.");
+                        }
+                        Err(error) => {
+                            let _ = oauth_status.SetText(&format!("Sign-in failed: {error}"));
+                        }
+                    }
+                    let _ = ui::set_visible(&oauth_status, true);
+                });
+            });
+        }
+    })?);
+
     // Fill server fields from the address domain while they are still the
     // values the previous suggestion put there. Anything the user typed wins.
     let last_suggestion: Arc<Mutex<Option<Suggestion>>> = Arc::new(Mutex::new(None));
@@ -259,6 +432,10 @@ pub fn present(
         name,
         email,
         password,
+        auth_method,
+        oauth_provider,
+        oauth_client_id,
+        oauth_tokens: Arc::clone(&oauth_tokens),
         imap_host,
         imap_port,
         imap_user,
@@ -338,6 +515,10 @@ pub fn present(
             name: rows.name.clone(),
             email: rows.email.clone(),
             password: rows.password.clone(),
+            auth_method: rows.auth_method.clone(),
+            oauth_provider: rows.oauth_provider.clone(),
+            oauth_client_id: rows.oauth_client_id.clone(),
+            oauth_tokens: Arc::clone(&rows.oauth_tokens),
             imap_host: rows.imap_host.clone(),
             imap_port: rows.imap_port.clone(),
             imap_user: rows.imap_user.clone(),
@@ -367,7 +548,11 @@ pub fn present(
             let error = error.clone();
             std::thread::spawn(move || {
                 let runtime = tokio::runtime::Runtime::new().unwrap();
-                let result = runtime.block_on(app.mailin.test_connection(&account.imap, &account.smtp, &password));
+                let result = runtime.block_on(app.mailin.test_connection(
+                    &account.imap,
+                    &account.smtp,
+                    &password,
+                ));
                 match result {
                     Ok(()) => {
                         let _ = error.SetText("Connection successful!");
@@ -396,6 +581,10 @@ pub fn present(
             name: rows.name.clone(),
             email: rows.email.clone(),
             password: rows.password.clone(),
+            auth_method: rows.auth_method.clone(),
+            oauth_provider: rows.oauth_provider.clone(),
+            oauth_client_id: rows.oauth_client_id.clone(),
+            oauth_tokens: Arc::clone(&rows.oauth_tokens),
             imap_host: rows.imap_host.clone(),
             imap_port: rows.imap_port.clone(),
             imap_user: rows.imap_user.clone(),
@@ -409,6 +598,7 @@ pub fn present(
         move || {
             let draft = rows.draft();
             let password = draft.password.clone();
+            let is_oauth = draft.auth_method == AuthMethod::OAuth2;
             // In edit mode, we don't require password if it's empty (keep existing)
             let require_password = mode == AccountDialogMode::Add;
             let mut account = match draft.build(require_password) {
@@ -432,8 +622,9 @@ pub fn present(
                     }
                 }
             }
-            // Only update password if user entered a new one
-            let password_opt = if password.is_empty() {
+            // Only update password if user entered a new one. OAuth2 accounts
+            // keep tokens in the account row and do not use the keyring.
+            let password_opt = if password.is_empty() || is_oauth {
                 None
             } else {
                 Some(password)
@@ -459,10 +650,8 @@ pub fn present(
                 // Show confirmation dialog
                 let confirm_window = Window::new().unwrap();
                 confirm_window.SetTitle("Remove account?")?;
-                confirm_window.SetContent(&ui::stack(
-                    mailin_winui_sys::Orientation::Vertical,
-                    12.0,
-                )?)?;
+                confirm_window
+                    .SetContent(&ui::stack(mailin_winui_sys::Orientation::Vertical, 12.0)?)?;
 
                 // We'll use a simple ContentDialog-like approach with a window
                 // For simplicity, just confirm and remove
@@ -510,6 +699,50 @@ fn security_at(index: usize) -> Security {
     }
 }
 
+fn auth_index(method: AuthMethod) -> usize {
+    match method {
+        AuthMethod::Password => 0,
+        AuthMethod::OAuth2 => 1,
+    }
+}
+
+fn auth_at(index: usize) -> AuthMethod {
+    match index {
+        1 => AuthMethod::OAuth2,
+        _ => AuthMethod::Password,
+    }
+}
+
+fn provider_labels() -> [&'static str; 5] {
+    [
+        OAuthProvider::Google.label(),
+        OAuthProvider::Microsoft.label(),
+        OAuthProvider::Yahoo.label(),
+        OAuthProvider::Fastmail.label(),
+        OAuthProvider::Custom.label(),
+    ]
+}
+
+fn provider_index(provider: OAuthProvider) -> usize {
+    match provider {
+        OAuthProvider::Google => 0,
+        OAuthProvider::Microsoft => 1,
+        OAuthProvider::Yahoo => 2,
+        OAuthProvider::Fastmail => 3,
+        OAuthProvider::Custom => 4,
+    }
+}
+
+fn provider_at(index: usize) -> OAuthProvider {
+    match index {
+        1 => OAuthProvider::Microsoft,
+        2 => OAuthProvider::Yahoo,
+        3 => OAuthProvider::Fastmail,
+        4 => OAuthProvider::Custom,
+        _ => OAuthProvider::Google,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +752,8 @@ mod tests {
             display_name: String::new(),
             email: "ada@example.com".into(),
             password: "secret".into(),
+            auth_method: AuthMethod::Password,
+            oauth2: OAuth2Tokens::default(),
             imap: ServerDraft {
                 host: "imap.example.com".into(),
                 port: "993".into(),
@@ -532,6 +767,18 @@ mod tests {
                 security: Security::Tls,
             },
         }
+    }
+
+    #[test]
+    fn oauth2_requires_an_access_token() {
+        let mut draft = sample();
+        draft.password.clear();
+        draft.auth_method = AuthMethod::OAuth2;
+        assert!(draft.build(true).is_err());
+        draft.oauth2.access_token = "token".into();
+        let account = draft.build(true).expect("OAuth2 draft");
+        assert_eq!(account.imap.auth_method, AuthMethod::OAuth2);
+        assert_eq!(account.smtp.auth_method, AuthMethod::OAuth2);
     }
 
     #[test]

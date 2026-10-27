@@ -16,7 +16,22 @@ use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
 use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry};
 use crate::store::Store;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
+
+/// Prefix that distinguishes an OAuth2 refresh token from a password in the
+/// keyring entry shared by both credential types.
+const OAUTH2_PREFIX: &str = "oauth2-refresh:";
+
+fn is_oauth2_secret(secret: &SecretString) -> bool {
+    secret.expose_secret().starts_with(OAUTH2_PREFIX)
+}
+
+fn refresh_token_from_secret(secret: &SecretString) -> Option<String> {
+    secret
+        .expose_secret()
+        .strip_prefix(OAUTH2_PREFIX)
+        .map(str::to_owned)
+}
 
 /// Everything a UI needs to react to. Events are advisory: after receiving one
 /// the UI re-reads the affected rows from the store.
@@ -101,9 +116,23 @@ impl Mailin {
     // ---------------------------------------------------------------- accounts
 
     /// Create or update an account. The password is stored in the keyring.
+    ///
+    /// OAuth2 refresh tokens are also kept in the keyring: the account row
+    /// stores the short-lived access token and metadata, while the long-lived
+    /// refresh token never touches the SQLite file.
     pub fn save_account(&self, account: &Account, password: Option<&SecretString>) -> Result<()> {
         account.validate()?;
-        self.store.upsert_account(account)?;
+
+        let mut stored = account.clone();
+        let refresh_token = stored.imap.oauth2.refresh_token.clone();
+        if !refresh_token.is_empty() {
+            let secret = SecretString::new(format!("{OAUTH2_PREFIX}{refresh_token}").into());
+            self.credentials.set(&account.id, &secret)?;
+            stored.imap.oauth2.refresh_token.clear();
+            stored.smtp.oauth2.refresh_token.clear();
+        }
+
+        self.store.upsert_account(&stored)?;
         if let Some(password) = password {
             self.credentials.set(&account.id, password)?;
         }
@@ -127,15 +156,25 @@ impl Mailin {
     }
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
-        self.store.list_accounts()
+        let accounts = self.store.list_accounts()?;
+        accounts
+            .into_iter()
+            .map(|account| self.hydrate_oauth2(account))
+            .collect()
     }
 
     pub fn account(&self, id: &AccountId) -> Result<Option<Account>> {
-        self.store.account(id)
+        self.store
+            .account(id)?
+            .map(|account| self.hydrate_oauth2(account))
+            .transpose()
     }
 
     pub fn has_password(&self, id: &AccountId) -> Result<bool> {
-        Ok(self.credentials.get(id)?.is_some())
+        Ok(self
+            .credentials
+            .get(id)?
+            .is_some_and(|secret| !is_oauth2_secret(&secret)))
     }
 
     pub fn set_password(&self, id: &AccountId, password: &SecretString) -> Result<()> {
@@ -147,7 +186,23 @@ impl Mailin {
     pub fn password(&self, id: &AccountId) -> Result<SecretString> {
         self.credentials
             .get(id)?
+            .filter(|secret| !is_oauth2_secret(secret))
             .ok_or_else(|| Error::Credentials("no password is stored for this account".into()))
+    }
+
+    /// Add the refresh token from the keyring to an account loaded from the
+    /// store. Missing keyring entries are not an error: the account may be a
+    /// password account, or the user may be editing it before signing in.
+    fn hydrate_oauth2(&self, mut account: Account) -> Result<Account> {
+        let Some(secret) = self.credentials.get(&account.id)? else {
+            return Ok(account);
+        };
+        let Some(refresh_token) = refresh_token_from_secret(&secret) else {
+            return Ok(account);
+        };
+        account.imap.oauth2.refresh_token = refresh_token.clone();
+        account.smtp.oauth2.refresh_token = refresh_token;
+        Ok(account)
     }
 
     /// Test both IMAP and SMTP connections for the given account settings.
@@ -251,12 +306,14 @@ pub async fn test_connection(
 ) -> Result<()> {
     // Test IMAP connection
     let tls = crate::tls::client_config()?;
-    let imap_session = crate::imap::ImapSession::connect(imap, password, tls.clone()).await
+    let imap_session = crate::imap::ImapSession::connect(imap, password, tls.clone())
+        .await
         .map_err(|e| crate::Error::Imap(format!("IMAP connection failed: {e}")))?;
     imap_session.logout().await;
 
     // Test SMTP connection
-    crate::smtp::test_connection(smtp, password).await
+    crate::smtp::test_connection(smtp, password)
+        .await
         .map_err(|e| crate::Error::Smtp(format!("SMTP connection failed: {e}")))?;
 
     Ok(())
@@ -314,6 +371,36 @@ mod tests {
         assert!(client.remove_account(&acc.id).is_err());
         assert!(!client.has_password(&acc.id).expect("has"));
         assert!(client.list_accounts().expect("list").is_empty());
+    }
+
+    #[test]
+    fn oauth2_refresh_tokens_are_kept_out_of_the_database() {
+        use crate::account::{AuthMethod, OAuth2Tokens};
+
+        let client = client();
+        let mut acc = account();
+        let tokens = OAuth2Tokens {
+            access_token: "access".into(),
+            refresh_token: "refresh".into(),
+            expires_at: 42,
+            ..OAuth2Tokens::default()
+        };
+        acc.imap.auth_method = AuthMethod::OAuth2;
+        acc.imap.oauth2 = tokens.clone();
+        acc.smtp.auth_method = AuthMethod::OAuth2;
+        acc.smtp.oauth2 = tokens;
+
+        client.save_account(&acc, None).expect("save");
+
+        let stored = client.store.account(&acc.id).expect("read").expect("row");
+        assert!(stored.imap.oauth2.refresh_token.is_empty());
+        assert_eq!(stored.imap.oauth2.access_token, "access");
+
+        let loaded = client.account(&acc.id).expect("load").expect("account");
+        assert_eq!(loaded.imap.oauth2.refresh_token, "refresh");
+        assert_eq!(loaded.smtp.oauth2.refresh_token, "refresh");
+        assert!(!client.has_password(&acc.id).expect("has password"));
+        assert!(client.password(&acc.id).is_err());
     }
 
     #[test]

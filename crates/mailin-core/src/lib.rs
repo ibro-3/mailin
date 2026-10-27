@@ -23,12 +23,16 @@ pub mod error;
 pub mod html;
 mod imap;
 pub mod model;
+pub mod oauth;
 mod smtp;
 pub mod store;
 mod sync;
 mod tls;
 
-pub use account::{Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, Security, ServerSettings};
+pub use account::{
+    Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, OAuthProvider, Security,
+    ServerSettings,
+};
 pub use client::{Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{Config, Paths, SyncPreferences, Theme, UiPreferences};
@@ -39,6 +43,7 @@ pub use model::{
     AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
     MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, UpsertedMessage,
 };
+pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use store::{FolderUpsert, Store};
 
 #[cfg(feature = "keyring")]

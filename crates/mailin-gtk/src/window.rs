@@ -60,6 +60,10 @@ struct Widgets {
     folder_list: gtk::ListBox,
     folder_stack: gtk::Stack,
     list_title: gtk::Label,
+    archive_button: gtk::Button,
+    junk_button: gtk::Button,
+    trash_button: gtk::Button,
+    message_menu_button: gtk::MenuButton,
     message_list: gtk::ListBox,
     message_empty: adw::StatusPage,
     list_stack: gtk::Stack,
@@ -207,8 +211,23 @@ impl MainWindow {
         list_header.set_margin_end(14);
         list_header.append(&list_title);
 
+        let archive_button = icon_button(
+            "package-x-generic-symbolic",
+            "Archive selected (Ctrl+Shift+E)",
+        );
+        let junk_button = icon_button("dialog-warning-symbolic", "Mark as Junk (Ctrl+Shift+J)");
+        let trash_button = icon_button("user-trash-symbolic", "Move to Trash (Delete)");
+        let message_menu_button = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Message actions")
+            .build();
+        list_header.append(&archive_button);
+        list_header.append(&junk_button);
+        list_header.append(&trash_button);
+        list_header.append(&message_menu_button);
+
         let message_list = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::Single)
+            .selection_mode(gtk::SelectionMode::Multiple)
             .build();
         message_list.add_css_class("navigation-sidebar");
         let message_scroller = gtk::ScrolledWindow::builder()
@@ -432,6 +451,10 @@ impl MainWindow {
                 folder_list,
                 folder_stack,
                 list_title,
+                archive_button,
+                junk_button,
+                trash_button,
+                message_menu_button,
                 message_list,
                 message_empty,
                 list_stack,
@@ -515,7 +538,79 @@ impl MainWindow {
 
         let account_menu_model = gio::Menu::new();
         account_menu_model.append_section(None, &menu);
-        this.widgets.account_menu_button.set_menu_model(Some(&account_menu_model));
+        this.widgets
+            .account_menu_button
+            .set_menu_model(Some(&account_menu_model));
+
+        // Message actions: toolbar buttons and the overflow menu share the
+        // same window actions so accelerators and menus never drift apart.
+        let archive_action = gio::SimpleAction::new("archive", None);
+        archive_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.archive_selected()
+        });
+        this.widgets.window.add_action(&archive_action);
+
+        let delete_action = gio::SimpleAction::new("delete", None);
+        delete_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.delete_selected(false)
+        });
+        this.widgets.window.add_action(&delete_action);
+
+        let delete_permanent_action = gio::SimpleAction::new("delete-permanent", None);
+        delete_permanent_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.delete_selected(true)
+        });
+        this.widgets.window.add_action(&delete_permanent_action);
+
+        let junk_action = gio::SimpleAction::new("junk", None);
+        junk_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.mark_selected_junk(true)
+        });
+        this.widgets.window.add_action(&junk_action);
+
+        let not_junk_action = gio::SimpleAction::new("not-junk", None);
+        not_junk_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.mark_selected_junk(false)
+        });
+        this.widgets.window.add_action(&not_junk_action);
+
+        let empty_trash_action = gio::SimpleAction::new("empty-trash", None);
+        empty_trash_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.empty_trash()
+        });
+        this.widgets.window.add_action(&empty_trash_action);
+
+        this.widgets.archive_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.archive_selected()
+        });
+        this.widgets.junk_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.mark_selected_junk(true)
+        });
+        this.widgets.trash_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.delete_selected(false)
+        });
+
+        let message_menu = gio::Menu::new();
+        message_menu.append(Some("Archive"), Some("win.archive"));
+        message_menu.append(Some("Move to Trash"), Some("win.delete"));
+        message_menu.append(Some("Mark as Junk"), Some("win.junk"));
+        message_menu.append(Some("Not Junk"), Some("win.not-junk"));
+        let destructive = gio::Menu::new();
+        destructive.append(Some("Delete Permanently"), Some("win.delete-permanent"));
+        destructive.append(Some("Empty Trash"), Some("win.empty-trash"));
+        message_menu.append_section(None, &destructive);
+        this.widgets
+            .message_menu_button
+            .set_menu_model(Some(&message_menu));
 
         this.widgets.account_dropdown.connect_selected_notify({
             let this = Rc::clone(this);
@@ -705,6 +800,11 @@ impl MainWindow {
             application.set_accels_for_action("win.reply-all", &["<Control><Shift>r"]);
             application.set_accels_for_action("win.forward", &["<Control><Shift>f"]);
             application.set_accels_for_action("win.preferences", &["<Control>comma"]);
+            application.set_accels_for_action("win.archive", &["<Control><Shift>e"]);
+            application.set_accels_for_action("win.delete", &["Delete"]);
+            application.set_accels_for_action("win.delete-permanent", &["<Control>Delete"]);
+            application.set_accels_for_action("win.junk", &["<Control><Shift>j"]);
+            application.set_accels_for_action("win.not-junk", &["<Control><Shift>k"]);
         }
 
         let compose_action = gio::SimpleAction::new("compose", None);
@@ -1111,7 +1211,29 @@ impl MainWindow {
 
     // --------------------------------------------------------------- reader
 
-    fn open_message(&self, message: &MessageHeader) {
+    fn open_message(self: &Rc<Self>, message: &MessageHeader) {
+        // A draft opens in the composer rather than the reader, ready to be
+        // resumed and sent.
+        let is_draft = message.is_draft()
+            || self
+                .folders
+                .borrow()
+                .iter()
+                .find(|folder| folder.id == message.folder_id)
+                .is_some_and(|folder| folder.role == FolderRole::Drafts);
+        if is_draft {
+            let body = self
+                .app
+                .mailin
+                .message_body(message.id)
+                .ok()
+                .flatten()
+                .and_then(|(text, _)| text);
+            let draft = mailin_core::compose::draft_from_header(message, body.as_deref());
+            Self::open_compose(self, draft);
+            return;
+        }
+
         self.selection.borrow_mut().message = Some(message.id);
         if self.remote_allowed.get() != Some(message.id) {
             self.remote_allowed.set(None);
@@ -1389,6 +1511,79 @@ impl MainWindow {
     fn selected_message(&self) -> Option<MessageHeader> {
         let id = self.selection.borrow().message?;
         self.app.mailin.message(id).ok().flatten()
+    }
+
+    /// All messages currently selected in the list, in list order.
+    fn selected_message_ids(&self) -> Vec<MessageId> {
+        let messages = self.messages.borrow();
+        self.widgets
+            .message_list
+            .selected_rows()
+            .iter()
+            .filter_map(|row| {
+                messages
+                    .get(usize::try_from(row.index()).unwrap_or(usize::MAX))
+                    .map(|message| message.id)
+            })
+            .collect()
+    }
+
+    fn toast(&self, text: &str) {
+        self.widgets.toast.add_toast(adw::Toast::new(text));
+    }
+
+    fn archive_selected(&self) {
+        let ids = self.selected_message_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.app.engine.archive_messages(&ids);
+        self.toast("Archiving…");
+    }
+
+    fn delete_selected(&self, permanent: bool) {
+        let ids = self.selected_message_ids();
+        if ids.is_empty() {
+            return;
+        }
+        if permanent {
+            self.app.engine.permanently_delete_messages(&ids);
+            self.toast("Deleting…");
+            return;
+        }
+        let in_trash = self
+            .selection
+            .borrow()
+            .folder
+            .and_then(|folder_id| self.app.mailin.folder(folder_id).ok().flatten())
+            .is_some_and(|folder| folder.role == FolderRole::Trash);
+        self.app.engine.delete_messages(&ids);
+        self.toast(if in_trash {
+            "Deleting permanently…"
+        } else {
+            "Moving to Trash…"
+        });
+    }
+
+    fn mark_selected_junk(&self, junk: bool) {
+        let ids = self.selected_message_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.app.engine.mark_messages_junk(&ids, junk);
+        self.toast(if junk {
+            "Marking as Junk…"
+        } else {
+            "Moving to Inbox…"
+        });
+    }
+
+    fn empty_trash(&self) {
+        let Some(account_id) = self.selection.borrow().account else {
+            return;
+        };
+        self.app.engine.empty_trash(account_id);
+        self.toast("Emptying Trash…");
     }
 
     fn toggle_seen(&self) {
@@ -1677,7 +1872,7 @@ impl MainWindow {
         };
         let confirm = gtk::AlertDialog::builder()
             .message("Remove account?")
-            .detail(&format!(
+            .detail(format!(
                 "Are you sure you want to remove '{}' ({})? This will delete all local data for this account.",
                 account.display_name, account.email
             ))
@@ -1693,7 +1888,8 @@ impl MainWindow {
         glib::spawn_future_local(async move {
             let response = confirm.choose_future(Some(&this.widgets.window)).await;
             match response {
-                Ok(1) => { // "Remove" button (index 1)
+                Ok(1) => {
+                    // "Remove" button (index 1)
                     if let Err(e) = mailin.remove_account(&account_id) {
                         this.show_error(&e.to_string());
                     } else {
@@ -1819,6 +2015,11 @@ fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWind
         ("<Control><Shift>A", "Add account"),
         ("<Control>comma", "Preferences"),
         ("<Control>Return", "Send message (in composer)"),
+        ("Delete", "Move selected messages to Trash"),
+        ("<Control>Delete", "Delete selected messages permanently"),
+        ("<Control><Shift>E", "Archive selected messages"),
+        ("<Control><Shift>J", "Mark selected messages as Junk"),
+        ("<Control><Shift>K", "Mark selected messages as not Junk"),
         ("Up", "Navigate message list (up)"),
         ("Down", "Navigate message list (down)"),
         ("Return", "Open selected message"),

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mailin_core::{
-    Account, AccountId, AuthMethod, Engine, Mailin, MemoryCredentials, MessageHeader,
-    OAuth2Tokens, OutgoingEnvelope, Security, ServerSettings, Store,
+    Account, AccountId, AuthMethod, Engine, Mailin, MemoryCredentials, MessageHeader, OAuth2Tokens,
+    OutgoingEnvelope, Security, ServerSettings, Store,
 };
 use secrecy::SecretString;
 

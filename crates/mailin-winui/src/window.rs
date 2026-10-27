@@ -99,6 +99,9 @@ struct Widgets {
     forward_button: Button,
     flag_button: Button,
     read_button: Button,
+    archive_button: Button,
+    trash_button: Button,
+    junk_button: Button,
     /// Keyboard shortcuts help window (created on demand)
     shortcuts_window: std::cell::RefCell<Option<Window>>,
 }
@@ -462,6 +465,26 @@ impl MainWindow {
     // --------------------------------------------------------------- reader
 
     fn open_message(self: &Rc<Self>, message: MessageHeader) {
+        let is_draft = message.is_draft()
+            || self
+                .state()
+                .folders
+                .iter()
+                .find(|folder| folder.id == message.folder_id)
+                .is_some_and(|folder| folder.role == FolderRole::Drafts);
+        if is_draft {
+            let body = self
+                .app
+                .mailin
+                .message_body(message.id)
+                .ok()
+                .flatten()
+                .and_then(|(text, _)| text);
+            let draft = mailin_core::compose::draft_from_header(&message, body.as_deref());
+            self.open_compose(draft);
+            return;
+        }
+
         {
             let mut state = self.state();
             state.selection.message = Some(message.id);
@@ -781,6 +804,30 @@ impl MainWindow {
         }
     }
 
+    fn archive_selected(&self) {
+        let Some(message) = self.selected_message() else {
+            return;
+        };
+        self.app.engine.archive_messages(&[message.id]);
+        self.show_banner("Archiving…");
+    }
+
+    fn delete_selected(&self) {
+        let Some(message) = self.selected_message() else {
+            return;
+        };
+        self.app.engine.delete_messages(&[message.id]);
+        self.show_banner("Moving to Trash…");
+    }
+
+    fn mark_selected_junk(&self) {
+        let Some(message) = self.selected_message() else {
+            return;
+        };
+        self.app.engine.mark_messages_junk(&[message.id], true);
+        self.show_banner("Marking as Junk…");
+    }
+
     // --------------------------------------------------------------- compose
 
     fn compose_reply(self: &Rc<Self>, all: bool) {
@@ -867,7 +914,15 @@ impl MainWindow {
         let this = Rc::clone(this);
         let account = self.state().selection.account;
         let Some(account_id) = account else { return };
-        let Some(account) = self.state().accounts.iter().find(|a| a.id == account_id).cloned() else { return };
+        let Some(account) = self
+            .state()
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .cloned()
+        else {
+            return;
+        };
         match account_dialog::present(
             Arc::clone(&self.app),
             account_dialog::AccountDialogMode::Edit,
@@ -885,7 +940,15 @@ impl MainWindow {
     fn remove_account(self: &Rc<Self>) {
         let account = self.state().selection.account;
         let Some(account_id) = account else { return };
-        let Some(account) = self.state().accounts.iter().find(|a| a.id == account_id).cloned() else { return };
+        let Some(account) = self
+            .state()
+            .accounts
+            .iter()
+            .find(|a| a.id == account_id)
+            .cloned()
+        else {
+            return;
+        };
         let mailin = self.app.mailin.clone();
         let this = Rc::clone(this);
         std::thread::spawn(move || {
@@ -1168,10 +1231,16 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::stretch_horizontal(&actions_spacer)?;
     let flag_button = ui::button("Star")?;
     let read_button = ui::button("Mark read")?;
+    let archive_button = ui::button("Archive")?;
+    let trash_button = ui::button("Trash")?;
+    let junk_button = ui::button("Junk")?;
     ui::append(&actions, &html_button)?;
     ui::append(&actions, &reply_button)?;
     ui::append(&actions, &reply_all_button)?;
     ui::append(&actions, &forward_button)?;
+    ui::append(&actions, &archive_button)?;
+    ui::append(&actions, &junk_button)?;
+    ui::append(&actions, &trash_button)?;
     ui::append(&actions, &actions_spacer)?;
     ui::append(&actions, &flag_button)?;
     ui::append(&actions, &read_button)?;
@@ -1297,7 +1366,8 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     accelerators.Append(&help_accel2)?;
 
     // Ctrl+,: Show preferences
-    let prefs_accel = KeyboardAccelerator::new().context("could not create preferences accelerator")?;
+    let prefs_accel =
+        KeyboardAccelerator::new().context("could not create preferences accelerator")?;
     prefs_accel.SetKey(VirtualKey::OemComma)?;
     prefs_accel.SetModifiers(VirtualKeyModifiers::Control)?;
     prefs_accel.Invoked({
@@ -1365,6 +1435,9 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             forward_button,
             flag_button,
             read_button,
+            archive_button,
+            trash_button,
+            junk_button,
             shortcuts_window: std::cell::RefCell::new(None),
         },
     });
@@ -1440,6 +1513,19 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     this.events.keep(ui::on_click(&this.widgets.flag_button, {
         let this = Rc::clone(this);
         move || this.toggle_flagged()
+    })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.archive_button, {
+            let this = Rc::clone(this);
+            move || this.archive_selected()
+        })?);
+    this.events.keep(ui::on_click(&this.widgets.trash_button, {
+        let this = Rc::clone(this);
+        move || this.delete_selected()
+    })?);
+    this.events.keep(ui::on_click(&this.widgets.junk_button, {
+        let this = Rc::clone(this);
+        move || this.mark_selected_junk()
     })?);
     this.events.keep(ui::on_click(&this.widgets.html_button, {
         let this = Rc::clone(this);

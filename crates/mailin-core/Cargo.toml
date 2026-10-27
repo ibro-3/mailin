@@ -35,11 +35,13 @@ rustls-platform-verifier = "0.7"
 secrecy.workspace = true
 serde.workspace = true
 serde_json = "1"
+sha2 = "0.10"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "sync"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 toml.workspace = true
 tracing.workspace = true
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 uuid.workspace = true
 
 [dev-dependencies]

@@ -1,13 +1,13 @@
 //! Compose window: build a message, attach files and queue it in the outbox.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 use libadwaita as adw;
 
-use mailin_core::compose::recipient_addresses;
+use mailin_core::compose::{new_draft_key, recipient_addresses};
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
 
 use crate::app::AppState;
@@ -48,6 +48,11 @@ pub fn present(
     let send = gtk::Button::with_label("Send");
     send.add_css_class("suggested-action");
     header.pack_end(&send);
+
+    let save = gtk::Button::with_label("Save Draft");
+    save.set_tooltip_text(Some("Save Draft (auto-saves every 30 seconds)"));
+    save.add_css_class("flat");
+    header.pack_end(&save);
 
     let attach = gtk::Button::builder()
         .icon_name("mail-attachment-symbolic")
@@ -124,19 +129,135 @@ pub fn present(
 
     let attachments: Rc<RefCell<Vec<ComposeAttachment>>> =
         Rc::new(RefCell::new(draft.attachments.clone()));
-    rebuild_attachments(&attachment_list, &attachments_group, &attachments);
+    let dirty = Rc::new(Cell::new(false));
+    rebuild_attachments(
+        &attachment_list,
+        &attachments_group,
+        &attachments,
+        Some(Rc::clone(&dirty)),
+    );
+
+    // Drafts are server-side messages whose Message-ID acts as the identity
+    // for replacing an earlier auto-save.
+    let draft_key = Rc::new(RefCell::new(
+        draft
+            .draft_key
+            .clone()
+            .unwrap_or_else(|| new_draft_key(&account.email)),
+    ));
+    let closed = Rc::new(Cell::new(false));
+    let sent = Rc::new(Cell::new(false));
+
+    let snapshot: Rc<dyn Fn() -> OutgoingMessage> = {
+        let account = account.clone();
+        let draft_key = Rc::clone(&draft_key);
+        let to_row = to_row.clone();
+        let cc_row = cc_row.clone();
+        let bcc_row = bcc_row.clone();
+        let subject_row = subject_row.clone();
+        let body_view = body_view.clone();
+        let attachments = Rc::clone(&attachments);
+        let in_reply_to = draft.in_reply_to.clone();
+        let references = draft.references.clone();
+        Rc::new(move || OutgoingMessage {
+            from_name: account.display_name.clone(),
+            from_addr: account.email.clone(),
+            to: to_row.text().to_string(),
+            cc: cc_row.text().to_string(),
+            bcc: bcc_row.text().to_string(),
+            subject: subject_row.text().to_string(),
+            body: {
+                let buffer = body_view.buffer();
+                buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string()
+            },
+            in_reply_to: in_reply_to.clone(),
+            references: references.clone(),
+            draft_key: Some(draft_key.borrow().clone()),
+            attachments: attachments.borrow().clone(),
+        })
+    };
+
+    let save_draft: Rc<dyn Fn(bool)> = {
+        let snapshot = Rc::clone(&snapshot);
+        let dirty = Rc::clone(&dirty);
+        let app = Rc::clone(&app);
+        let account_id = account.id;
+        let banner = banner.clone();
+        Rc::new(move |force: bool| {
+            if !force && !dirty.replace(false) {
+                return;
+            }
+            let outgoing = snapshot();
+            match outgoing.build_draft() {
+                Ok(_) => {
+                    app.engine.save_draft(account_id, outgoing);
+                    banner.set_title("Draft saved");
+                    banner.set_revealed(true);
+                }
+                Err(error) => {
+                    dirty.set(true);
+                    banner.set_title(&format!("Could not save the draft: {error}"));
+                    banner.set_revealed(true);
+                }
+            }
+        })
+    };
+
+    for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
+        let dirty = Rc::clone(&dirty);
+        row.connect_changed(move |_| dirty.set(true));
+    }
+    {
+        let dirty = Rc::clone(&dirty);
+        body_view.buffer().connect_changed(move |_| dirty.set(true));
+    }
+
+    save.connect_clicked({
+        let save_draft = Rc::clone(&save_draft);
+        move |_| save_draft(true)
+    });
+
+    // Auto-save while the composer is open. The timeout is cancelled on close.
+    {
+        let save_draft = Rc::clone(&save_draft);
+        let closed = Rc::clone(&closed);
+        glib::timeout_add_seconds_local(30, move || {
+            if closed.get() {
+                return glib::ControlFlow::Break;
+            }
+            save_draft(false);
+            glib::ControlFlow::Continue
+        });
+    }
+
+    window.connect_close_request({
+        let save_draft = Rc::clone(&save_draft);
+        let closed = Rc::clone(&closed);
+        let sent = Rc::clone(&sent);
+        move |_| {
+            if !closed.get() && !sent.get() {
+                save_draft(false);
+            }
+            closed.set(true);
+            glib::Propagation::Proceed
+        }
+    });
 
     let picker_window = window.clone();
     let picker_list = attachment_list.clone();
     let picker_group = attachments_group.clone();
     let picker_attachments = Rc::clone(&attachments);
     let picker_banner = banner.clone();
+    let picker_dirty = Rc::clone(&dirty);
     attach.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::builder().title("Attach files").build();
         let list = picker_list.clone();
         let group = picker_group.clone();
         let attachments = Rc::clone(&picker_attachments);
         let banner = picker_banner.clone();
+        let dirty = Rc::clone(&picker_dirty);
         dialog.open_multiple(
             Some(&picker_window),
             None::<&gio::Cancellable>,
@@ -151,7 +272,10 @@ pub fn present(
                         continue;
                     };
                     match load_attachment(&file) {
-                        Ok(attachment) => attachments.borrow_mut().push(attachment),
+                        Ok(attachment) => {
+                            attachments.borrow_mut().push(attachment);
+                            dirty.set(true);
+                        }
                         Err(message) => failed = Some(message),
                     }
                 }
@@ -159,37 +283,27 @@ pub fn present(
                     banner.set_title(&message);
                     banner.set_revealed(true);
                 }
-                rebuild_attachments(&list, &group, &attachments);
+                rebuild_attachments(&list, &group, &attachments, Some(Rc::clone(&dirty)));
             },
         );
     });
 
     let close_window = window.clone();
-    let send_to_row = to_row.clone();
-    let send_cc_row = cc_row.clone();
-    let send_bcc_row = bcc_row.clone();
-    let send_subject_row = subject_row.clone();
+    let send_snapshot = Rc::clone(&snapshot);
+    let send_key = Rc::clone(&draft_key);
+    let send_sent = Rc::clone(&sent);
+    let send_closed = Rc::clone(&closed);
     send.connect_clicked(move |_| {
-        let outgoing = OutgoingMessage {
-            from_name: account.display_name.clone(),
-            from_addr: account.email.clone(),
-            to: send_to_row.text().to_string(),
-            cc: send_cc_row.text().to_string(),
-            bcc: send_bcc_row.text().to_string(),
-            subject: send_subject_row.text().to_string(),
-            body: {
-                let buffer = body_view.buffer();
-                buffer
-                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                    .to_string()
-            },
-            in_reply_to: draft.in_reply_to.clone(),
-            references: draft.references.clone(),
-            attachments: attachments.borrow().clone(),
-        };
+        let outgoing = send_snapshot();
         match outgoing.build() {
             Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
                 Ok(_) => {
+                    let key = send_key.borrow().clone();
+                    if !key.is_empty() {
+                        app.engine.discard_draft(account.id, key);
+                    }
+                    send_sent.set(true);
+                    send_closed.set(true);
                     on_sent();
                     close_window.close();
                 }
@@ -228,6 +342,7 @@ fn rebuild_attachments(
     list: &gtk::ListBox,
     group: &adw::PreferencesGroup,
     attachments: &Rc<RefCell<Vec<ComposeAttachment>>>,
+    dirty: Option<Rc<Cell<bool>>>,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
@@ -252,11 +367,20 @@ fn rebuild_attachments(
         let attachments = Rc::clone(attachments);
         let remove_list = list.clone();
         let remove_group = group.clone();
+        let remove_dirty = dirty.clone();
         remove.connect_clicked(move |_| {
             if index < attachments.borrow().len() {
                 attachments.borrow_mut().remove(index);
             }
-            rebuild_attachments(&remove_list, &remove_group, &attachments);
+            if let Some(dirty) = &remove_dirty {
+                dirty.set(true);
+            }
+            rebuild_attachments(
+                &remove_list,
+                &remove_group,
+                &attachments,
+                remove_dirty.clone(),
+            );
         });
         row.add_suffix(&remove);
         list.append(&row);
@@ -366,6 +490,7 @@ fn reply_with(
         body: quoted_reply(message, body),
         in_reply_to: message.message_id.clone(),
         references,
+        draft_key: None,
         attachments: Vec::new(),
     }
 }

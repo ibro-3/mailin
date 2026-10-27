@@ -136,6 +136,10 @@ pub(crate) struct ImapSession {
     inner: Session<ImapStream>,
     condstore: bool,
     idle: bool,
+    /// RFC 6851 MOVE support.
+    supports_move: bool,
+    /// RFC 4315 UIDPLUS support.
+    supports_uidplus: bool,
 }
 
 impl fmt::Debug for ImapSession {
@@ -143,6 +147,8 @@ impl fmt::Debug for ImapSession {
         f.debug_struct("ImapSession")
             .field("condstore", &self.condstore)
             .field("idle", &self.idle)
+            .field("supports_move", &self.supports_move)
+            .field("supports_uidplus", &self.supports_uidplus)
             .finish_non_exhaustive()
     }
 }
@@ -189,7 +195,9 @@ impl ImapSession {
         let client = async_imap::Client::new(stream);
 
         // Authenticate based on the configured method
-        let mut session = if settings.auth_method == AuthMethod::OAuth2 && !settings.oauth2.access_token.is_empty() {
+        let mut session = if settings.auth_method == AuthMethod::OAuth2
+            && !settings.oauth2.access_token.is_empty()
+        {
             // Use XOAUTH2 authentication
             let authenticator = Xoauth2Authenticator {
                 user: settings.username.clone(),
@@ -214,11 +222,19 @@ impl ImapSession {
         let idle = capabilities
             .as_ref()
             .is_some_and(|caps| caps.has_str("IDLE"));
+        let supports_move = capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.has_str("MOVE"));
+        let supports_uidplus = capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.has_str("UIDPLUS"));
 
         Ok(Self {
             inner: session,
             condstore,
             idle,
+            supports_move,
+            supports_uidplus,
         })
     }
 
@@ -230,15 +246,31 @@ impl ImapSession {
         self.idle
     }
 
+    pub(crate) fn supports_move(&self) -> bool {
+        self.supports_move
+    }
+
+    pub(crate) fn supports_uidplus(&self) -> bool {
+        self.supports_uidplus
+    }
+
     pub(crate) fn into_session(self) -> Session<ImapStream> {
         self.inner
     }
 
-    pub(crate) fn from_session(inner: Session<ImapStream>, condstore: bool, idle: bool) -> Self {
+    pub(crate) fn from_session(
+        inner: Session<ImapStream>,
+        condstore: bool,
+        idle: bool,
+        supports_move: bool,
+        supports_uidplus: bool,
+    ) -> Self {
         Self {
             inner,
             condstore,
             idle,
+            supports_move,
+            supports_uidplus,
         }
     }
 
@@ -405,6 +437,69 @@ impl ImapSession {
             .map_err(|e| Error::Imap(format!("UID STORE failed: {e}")))?
             .is_some()
         {}
+        Ok(())
+    }
+
+    /// Move messages to another mailbox.
+    ///
+    /// Uses RFC 6851 `UID MOVE` when the server supports it and falls back to
+    /// `UID COPY` + `\Deleted` + `EXPUNGE` otherwise.
+    pub async fn move_messages(&mut self, uids: &[u32], target: &str) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set = uid_set(uids);
+        if self.supports_move {
+            return self
+                .inner
+                .uid_mv(&set, target)
+                .await
+                .map_err(|e| Error::Imap(format!("UID MOVE to {target} failed: {e}")));
+        }
+
+        self.inner
+            .uid_copy(&set, target)
+            .await
+            .map_err(|e| Error::Imap(format!("UID COPY to {target} failed: {e}")))?;
+        self.delete_messages(uids).await
+    }
+
+    /// Mark messages `\Deleted` and expunge them from the selected mailbox.
+    pub async fn delete_messages(&mut self, uids: &[u32]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        for uid in uids {
+            self.store_flags_command(*uid, "+", &["\\Deleted".to_owned()])
+                .await?;
+        }
+        if self.supports_uidplus {
+            let mut stream = Box::pin(
+                self.inner
+                    .uid_expunge(uid_set(uids))
+                    .await
+                    .map_err(|e| Error::Imap(format!("UID EXPUNGE failed: {e}")))?,
+            );
+            while stream
+                .try_next()
+                .await
+                .map_err(|e| Error::Imap(format!("UID EXPUNGE failed: {e}")))?
+                .is_some()
+            {}
+        } else {
+            let mut stream = Box::pin(
+                self.inner
+                    .expunge()
+                    .await
+                    .map_err(|e| Error::Imap(format!("EXPUNGE failed: {e}")))?,
+            );
+            while stream
+                .try_next()
+                .await
+                .map_err(|e| Error::Imap(format!("EXPUNGE failed: {e}")))?
+                .is_some()
+            {}
+        }
         Ok(())
     }
 

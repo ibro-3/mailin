@@ -78,9 +78,15 @@ fn create_general_section(config: &Config) -> Result<StackPanel> {
     theme_panel.Children()?.Append(&theme_label)?;
 
     let theme_combo = ComboBox::new()?;
-    theme_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent("System")?)?;
-    theme_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent("Light")?)?;
-    theme_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent("Dark")?)?;
+    theme_combo
+        .Items()?
+        .Append(&ComboBoxItem::new()?.SetContent("System")?)?;
+    theme_combo
+        .Items()?
+        .Append(&ComboBoxItem::new()?.SetContent("Light")?)?;
+    theme_combo
+        .Items()?
+        .Append(&ComboBoxItem::new()?.SetContent("Dark")?)?;
     match config.ui.theme {
         Theme::System => theme_combo.SetSelectedIndex(0)?,
         Theme::Light => theme_combo.SetSelectedIndex(1)?,
@@ -92,11 +98,19 @@ fn create_general_section(config: &Config) -> Result<StackPanel> {
     panel.Children()?.Append(&theme_panel)?;
 
     // HTML rendering
-    let html_panel = create_switch_row("Render HTML messages", "Display HTML formatting when available", config.ui.html_enabled)?;
+    let html_panel = create_switch_row(
+        "Render HTML messages",
+        "Display HTML formatting when available",
+        config.ui.html_enabled,
+    )?;
     panel.Children()?.Append(&html_panel)?;
 
     // Remote content
-    let remote_panel = create_switch_row("Load remote content", "Allow images and resources from the network (can be overridden per-account)", config.ui.remote_content_enabled)?;
+    let remote_panel = create_switch_row(
+        "Load remote content",
+        "Allow images and resources from the network (can be overridden per-account)",
+        config.ui.remote_content_enabled,
+    )?;
     panel.Children()?.Append(&remote_panel)?;
 
     // Page size
@@ -113,7 +127,9 @@ fn create_general_section(config: &Config) -> Result<StackPanel> {
     // For simplicity, use a ComboBox for page size
     let page_size_combo = ComboBox::new()?;
     for size in [50, 100, 200, 500, 1000] {
-        page_size_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent(size.to_string())?)?;
+        page_size_combo
+            .Items()?
+            .Append(&ComboBoxItem::new()?.SetContent(size.to_string())?)?;
     }
     let current_page_size = config.ui.page_size;
     let selected_index = match current_page_size {
@@ -131,11 +147,19 @@ fn create_general_section(config: &Config) -> Result<StackPanel> {
     panel.Children()?.Append(&page_size_panel)?;
 
     // Mark as read
-    let mark_read_panel = create_switch_row("Mark as read on open", "Automatically mark messages read when opened", config.ui.mark_read_on_open)?;
+    let mark_read_panel = create_switch_row(
+        "Mark as read on open",
+        "Automatically mark messages read when opened",
+        config.ui.mark_read_on_open,
+    )?;
     panel.Children()?.Append(&mark_read_panel)?;
 
     // Notifications
-    let notifications_panel = create_switch_row("Show new mail notifications", "Display desktop notifications for new messages", config.ui.notifications)?;
+    let notifications_panel = create_switch_row(
+        "Show new mail notifications",
+        "Display desktop notifications for new messages",
+        config.ui.notifications,
+    )?;
     panel.Children()?.Append(&notifications_panel)?;
 
     Ok(panel)
@@ -164,7 +188,9 @@ fn create_sync_section(config: &Config) -> Result<StackPanel> {
 
     let poll_combo = ComboBox::new()?;
     for interval in [15, 30, 60, 120, 300, 600, 1800] {
-        poll_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent(interval.to_string())?)?;
+        poll_combo
+            .Items()?
+            .Append(&ComboBoxItem::new()?.SetContent(interval.to_string())?)?;
     }
     let current_poll = config.sync.poll_interval_secs;
     let selected_index = match current_poll {
@@ -196,7 +222,9 @@ fn create_sync_section(config: &Config) -> Result<StackPanel> {
 
     let parallel_combo = ComboBox::new()?;
     for i in 1..=16 {
-        parallel_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent(i.to_string())?)?;
+        parallel_combo
+            .Items()?
+            .Append(&ComboBoxItem::new()?.SetContent(i.to_string())?)?;
     }
     parallel_combo.SetSelectedIndex((config.sync.max_parallel_accounts as i32 - 1) as u32)?;
     parallel_combo.SetWidth(200.0)?;
@@ -216,8 +244,12 @@ fn create_sync_section(config: &Config) -> Result<StackPanel> {
     body_panel.Children()?.Append(&body_label)?;
 
     let body_combo = ComboBox::new()?;
-    body_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent("On demand (when opened)")?)?;
-    body_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent("Eager (background)")?)?;
+    body_combo
+        .Items()?
+        .Append(&ComboBoxItem::new()?.SetContent("On demand (when opened)")?)?;
+    body_combo
+        .Items()?
+        .Append(&ComboBoxItem::new()?.SetContent("Eager (background)")?)?;
     match config.sync.body_sync {
         mailin_core::config::BodySyncPolicy::OnOpen => body_combo.SetSelectedIndex(0)?,
         mailin_core::config::BodySyncPolicy::Eager => body_combo.SetSelectedIndex(1)?,
@@ -240,7 +272,9 @@ fn create_sync_section(config: &Config) -> Result<StackPanel> {
 
     let retention_combo = ComboBox::new()?;
     for days in [0, 30, 90, 180, 365, 730, 1095, 1825, 3650] {
-        retention_combo.Items()?.Append(&ComboBoxItem::new()?.SetContent(days.to_string())?)?;
+        retention_combo
+            .Items()?
+            .Append(&ComboBoxItem::new()?.SetContent(days.to_string())?)?;
     }
     let current_retention = config.sync.retention_days;
     let selected_index = match current_retention {

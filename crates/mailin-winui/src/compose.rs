@@ -3,12 +3,15 @@
 //! The behaviour matches the GTK composer: new messages, reply, reply-all and
 //! forward, files up to 50 MB, and queueing through `Engine::queue_and_send`.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use mailin_core::compose::recipient_addresses;
+use mailin_core::compose::{new_draft_key, recipient_addresses};
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
-use mailin_winui_sys::{Grid, Orientation, StackPanel, TextBlock, TextWrapping, Window};
+use mailin_winui_sys::{
+    DispatcherQueue, Grid, Orientation, StackPanel, TextBlock, TextWrapping, Window,
+};
 
 use crate::app::AppState;
 use crate::format;
@@ -48,8 +51,10 @@ pub fn present(
     ui::stretch_horizontal(&title)?;
     ui::append(&header, &title)?;
     let attach = ui::button("Attach files")?;
+    let save = ui::button("Save Draft")?;
     let send = ui::button("Send")?;
     ui::append(&header, &attach)?;
+    ui::append(&header, &save)?;
     ui::append(&header, &send)?;
     ui::set_row(&header, 0)?;
     ui::append(&root, &header)?;
@@ -109,12 +114,92 @@ pub fn present(
         &attachment_events,
     );
 
+    let draft_key: Arc<Mutex<String>> = Arc::new(Mutex::new(
+        draft
+            .draft_key
+            .clone()
+            .unwrap_or_else(|| new_draft_key(&account.email)),
+    ));
+    let dirty = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicBool::new(false));
+
+    let make_draft: Arc<dyn Fn() -> OutgoingMessage> = {
+        let account = account.clone();
+        let draft_key = Arc::clone(&draft_key);
+        let attachments = Arc::clone(&attachments);
+        let to = to.clone();
+        let cc = cc.clone();
+        let bcc = bcc.clone();
+        let subject = subject.clone();
+        let body = body.clone();
+        let in_reply_to = draft.in_reply_to.clone();
+        let references = draft.references.clone();
+        Arc::new(move || OutgoingMessage {
+            from_name: account.display_name.clone(),
+            from_addr: account.email.clone(),
+            to: ui::text_value(&to),
+            cc: ui::text_value(&cc),
+            bcc: ui::text_value(&bcc),
+            subject: ui::text_value(&subject),
+            body: ui::text_value(&body),
+            in_reply_to: in_reply_to.clone(),
+            references: references.clone(),
+            draft_key: draft_key.lock().map(|key| key.clone()).ok(),
+            attachments: attachments
+                .lock()
+                .map(|items| items.clone())
+                .unwrap_or_default(),
+        })
+    };
+
+    let save_draft: Arc<dyn Fn(bool)> = {
+        let app = Arc::clone(&app);
+        let make_draft = Arc::clone(&make_draft);
+        let dirty = Arc::clone(&dirty);
+        let sent = Arc::clone(&sent);
+        let banner = error.clone();
+        let account_id = account.id;
+        Arc::new(move |force: bool| {
+            if sent.load(Ordering::Relaxed) {
+                return;
+            }
+            if !force && !dirty.swap(false, Ordering::Relaxed) {
+                return;
+            }
+            let outgoing = make_draft();
+            match outgoing.build_draft() {
+                Ok(_) => {
+                    app.engine.save_draft(account_id, outgoing);
+                    let _ = banner.SetText("Draft saved");
+                    let _ = ui::set_visible(&banner, true);
+                }
+                Err(failure) => {
+                    dirty.store(true, Ordering::Relaxed);
+                    let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
+                    let _ = ui::set_visible(&banner, true);
+                }
+            }
+        })
+    };
+
+    for textbox in [&to, &cc, &bcc, &subject, &body] {
+        let dirty = Arc::clone(&dirty);
+        revokers.keep(ui::on_text_changed(textbox, move || {
+            dirty.store(true, Ordering::Relaxed);
+        })?);
+    }
+    revokers.keep(ui::on_click(&save, {
+        let save_draft = Arc::clone(&save_draft);
+        move || save_draft(true)
+    })?);
+
     revokers.keep(ui::on_click(&attach, {
         let list = attachment_list.clone();
         let title = attachments_title.clone();
         let attachments = Arc::clone(&attachments);
         let events = attachment_events.clone();
         let banner = error.clone();
+        let dirty = Arc::clone(&dirty);
         move || {
             let paths = platform::pick_files("Attach files");
             let mut failed = None;
@@ -124,6 +209,7 @@ pub fn present(
                         if let Ok(mut items) = attachments.lock() {
                             items.push(attachment);
                         }
+                        dirty.store(true, Ordering::Relaxed);
                     }
                     Err(message) => failed = Some(message),
                 }
@@ -147,33 +233,21 @@ pub fn present(
         let app = Arc::clone(&app);
         let on_sent = Arc::clone(&on_sent);
         let account = account.clone();
-        let draft = draft.clone();
-        let attachments = Arc::clone(&attachments);
+        let make_draft = Arc::clone(&make_draft);
+        let draft_key = Arc::clone(&draft_key);
+        let sent = Arc::clone(&sent);
         let banner = error.clone();
-        let to = to.clone();
-        let cc = cc.clone();
-        let bcc = bcc.clone();
-        let subject = subject.clone();
-        let body = body.clone();
         move || {
-            let outgoing = OutgoingMessage {
-                from_name: account.display_name.clone(),
-                from_addr: account.email.clone(),
-                to: ui::text_value(&to),
-                cc: ui::text_value(&cc),
-                bcc: ui::text_value(&bcc),
-                subject: ui::text_value(&subject),
-                body: ui::text_value(&body),
-                in_reply_to: draft.in_reply_to.clone(),
-                references: draft.references.clone(),
-                attachments: attachments
-                    .lock()
-                    .map(|items| items.clone())
-                    .unwrap_or_default(),
-            };
+            let outgoing = make_draft();
             match outgoing.build() {
                 Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
                     Ok(_) => {
+                        sent.store(true, Ordering::Relaxed);
+                        if let Ok(key) = draft_key.lock() {
+                            if !key.is_empty() {
+                                app.engine.discard_draft(account.id, key.clone());
+                            }
+                        }
                         on_sent();
                         let _ = window.Close();
                     }
@@ -190,10 +264,32 @@ pub fn present(
         }
     })?);
 
+    // Auto-save every 30 seconds while the composer is open.
+    let queue =
+        DispatcherQueue::GetForCurrentThread().context("the composer has no dispatcher queue")?;
+    let timer = queue
+        .CreateTimer()
+        .context("could not create the draft auto-save timer")?;
+    timer.SetInterval(windows_time::TimeSpan {
+        duration: 30 * 10_000_000,
+    })?;
+    timer.SetIsRepeating(true)?;
+    let save_for_timer = Arc::clone(&save_draft);
+    revokers.keep(timer.Tick(move |_, _| {
+        save_for_timer(false);
+    })?);
+    timer
+        .Start()
+        .context("could not start the draft auto-save timer")?;
+
     let window_token = ui::keep_alive(&window);
     let cleanup = revokers.clone();
     let attachments_cleanup = attachment_events.clone();
+    let save_for_close = Arc::clone(&save_draft);
+    let timer_for_close = timer.clone();
     let closed = window.Closed(move |_, _| {
+        save_for_close(false);
+        let _ = timer_for_close.Stop();
         cleanup.clear();
         attachments_cleanup.clear();
         ui::release(window_token);
@@ -324,6 +420,7 @@ fn reply_with(
         body: quoted_reply(message, body),
         in_reply_to: message.message_id.clone(),
         references,
+        draft_key: None,
         attachments: Vec::new(),
     }
 }

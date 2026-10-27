@@ -11,7 +11,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::error::{Error, Result};
-use crate::model::OutgoingEnvelope;
+use crate::model::{MessageHeader, OutgoingEnvelope};
 
 /// A file attached to an outgoing message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,10 @@ pub struct OutgoingMessage {
     /// Message IDs of the conversation, used for threading by receiving
     /// clients. Values may be given with or without angle brackets.
     pub references: Vec<String>,
+    /// Stable RFC 5322 Message-ID for a draft. Reusing it lets the server-side
+    /// draft be replaced instead of duplicated on every auto-save. Empty for
+    /// messages that are about to be sent.
+    pub draft_key: Option<String>,
     pub attachments: Vec<ComposeAttachment>,
 }
 
@@ -56,6 +60,17 @@ impl OutgoingMessage {
     /// Header values are stripped of line breaks, so a malicious or accidental
     /// newline in a subject cannot inject headers.
     pub fn build(&self) -> Result<(Vec<u8>, OutgoingEnvelope)> {
+        self.build_inner(true)
+    }
+
+    /// Build a draft that may have no recipients yet. Drafts are appended to
+    /// the Drafts folder rather than transmitted, so the envelope is not
+    /// validated.
+    pub fn build_draft(&self) -> Result<Vec<u8>> {
+        self.build_inner(false).map(|(raw, _)| raw)
+    }
+
+    fn build_inner(&self, require_recipients: bool) -> Result<(Vec<u8>, OutgoingEnvelope)> {
         let from = parse_single(&self.from_name, &self.from_addr)?;
         let to = parse_mailboxes(&self.to)?;
         let cc = parse_mailboxes(&self.cc)?;
@@ -67,7 +82,9 @@ impl OutgoingMessage {
             cc: cc.iter().map(|mailbox| mailbox.address.clone()).collect(),
             bcc: bcc.iter().map(|mailbox| mailbox.address.clone()).collect(),
         };
-        envelope.validate()?;
+        if require_recipients {
+            envelope.validate()?;
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -78,7 +95,13 @@ impl OutgoingMessage {
             .address
             .split_once('@')
             .map_or("mailin.local", |(_, domain)| domain);
-        let message_id = format!("{}@{}", uuid::Uuid::new_v4(), domain);
+        let message_id = self
+            .draft_key
+            .as_deref()
+            .map(message_id_header)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_matches(['<', '>']).to_owned())
+            .unwrap_or_else(|| format!("{}@{}", uuid::Uuid::new_v4(), domain));
 
         let mut message = String::with_capacity(1024 + self.body.len());
         write_header(&mut message, "Date", &date);
@@ -147,6 +170,32 @@ impl OutgoingMessage {
 
         Ok((message.into_bytes(), envelope))
     }
+}
+
+/// Rebuild a composer draft from a stored Drafts-folder message. The Message-ID
+/// becomes the draft key so the next save replaces the same server message.
+pub fn draft_from_header(header: &MessageHeader, body: Option<&str>) -> OutgoingMessage {
+    OutgoingMessage {
+        from_name: header.from_name.clone().unwrap_or_default(),
+        from_addr: header.from_addr.clone().unwrap_or_default(),
+        to: header.to_addrs.clone(),
+        cc: header.cc_addrs.clone(),
+        bcc: String::new(),
+        subject: header.subject.clone(),
+        body: body.unwrap_or_default().to_owned(),
+        in_reply_to: None,
+        references: Vec::new(),
+        draft_key: header.message_id.clone(),
+        attachments: Vec::new(),
+    }
+}
+
+/// A fresh Message-ID used to replace a draft on later auto-saves.
+pub fn new_draft_key(from_addr: &str) -> String {
+    let domain = from_addr
+        .split_once('@')
+        .map_or("mailin.local", |(_, domain)| domain);
+    format!("{}@{}", uuid::Uuid::new_v4(), domain)
 }
 
 /// Parse an address list into bare addresses. Front-ends use this to build
@@ -577,5 +626,46 @@ mod tests {
             sanitize_mime_type("bad\r\nheader"),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn drafts_may_have_no_recipients_and_reuse_the_key() {
+        let mut message = draft();
+        message.to.clear();
+        message.subject.clear();
+        message.draft_key = Some("draft-key@example.com".into());
+        // Sending this must still fail, but saving a draft is allowed.
+        assert!(message.build().is_err());
+        let raw = text(&message.build_draft().expect("draft build"));
+        assert!(raw.contains("Message-ID: <draft-key@example.com>"));
+        assert!(raw.contains("To: \r\n"));
+    }
+
+    #[test]
+    fn a_stored_draft_can_be_resumed() {
+        let header = MessageHeader {
+            id: crate::model::MessageId(7),
+            folder_id: crate::model::FolderId(3),
+            uid: 42,
+            message_id: Some("draft-key@example.com".into()),
+            thread_key: None,
+            subject: "Unfinished".into(),
+            from_name: Some("Ada".into()),
+            from_addr: Some("ada@example.com".into()),
+            to_addrs: "grace@example.com".into(),
+            cc_addrs: String::new(),
+            sent_at: None,
+            received_at: 0,
+            snippet: None,
+            size: None,
+            flags: vec!["\\Draft".into()],
+            has_attachments: false,
+            body_fetched: true,
+        };
+        let draft = draft_from_header(&header, Some("Half written"));
+        assert_eq!(draft.to, "grace@example.com");
+        assert_eq!(draft.subject, "Unfinished");
+        assert_eq!(draft.body, "Half written");
+        assert_eq!(draft.draft_key.as_deref(), Some("draft-key@example.com"));
     }
 }

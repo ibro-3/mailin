@@ -38,6 +38,9 @@ pub enum Error {
     #[error("TLS error: {0}")]
     Tls(String),
 
+    #[error("OAuth2 error: {0}")]
+    OAuth(String),
+
     #[error("protocol error: {0}")]
     Protocol(String),
 
