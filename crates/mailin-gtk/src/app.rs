@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use mailin_core::{Config, Engine, Mailin, Paths, Theme};
+use mailin_core::{Config, Engine, Mailin, OutgoingMessage, Paths, Theme};
 
 use crate::window::MainWindow;
 
@@ -90,6 +90,19 @@ pub fn run() -> glib::ExitCode {
         }
     });
 
+    // Handle mailto: URI activation (e.g., from browser links)
+    application.connect_open({
+        move |_application, files, _hint| {
+            for file in files {
+                let uri = file.uri();
+                if let Some(draft) = parse_mailto_uri(&uri) {
+                    crate::window::set_mailto_draft(draft);
+                    return;
+                }
+            }
+        }
+    });
+
     application.run()
 }
 
@@ -100,4 +113,46 @@ pub fn apply_theme(theme: Theme) {
         Theme::Dark => adw::ColorScheme::ForceDark,
     };
     adw::StyleManager::default().set_color_scheme(scheme);
+}
+
+/// Parse a mailto: URI into an OutgoingMessage draft.
+/// Supports: mailto:addr?subject=...&body=...&cc=...&bcc=...
+fn parse_mailto_uri(uri: &str) -> Option<OutgoingMessage> {
+    let uri = uri.strip_prefix("mailto:")?;
+    let (addr_part, query_part) = uri.split_once('?').unwrap_or((uri, ""));
+    let to = percent_decode(addr_part)?;
+    let mut draft = OutgoingMessage {
+        to,
+        ..OutgoingMessage::default()
+    };
+    for pair in query_part.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        let value = percent_decode(value)?;
+        match key {
+            "subject" => draft.subject = value,
+            "body" => draft.body = value,
+            "cc" => draft.cc = value,
+            "bcc" => draft.bcc = value,
+            _ => {}
+        }
+    }
+    Some(draft)
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex1 = chars.next()?;
+            let hex2 = chars.next()?;
+            let byte = u8::from_str_radix(&format!("{hex1}{hex2}"), 16).ok()?;
+            result.push(byte as char);
+        } else if c == '+' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+    Some(result)
 }

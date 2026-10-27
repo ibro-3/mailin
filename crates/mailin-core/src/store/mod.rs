@@ -757,6 +757,18 @@ impl Store {
         )?;
         Ok(count as u32)
     }
+
+    pub fn list_outbox(&self, account: &AccountId) -> Result<Vec<OutboxEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, raw, envelope_json, state, attempts, last_error, created_at, updated_at
+             FROM outbox
+             WHERE account_id = ?1 AND state != 'sent'
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], map_outbox)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::from)
+    }
 }
 
 // -------------------------------------------------------------------- helpers

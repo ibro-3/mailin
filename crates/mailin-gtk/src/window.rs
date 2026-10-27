@@ -17,7 +17,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
     Account, AccountId, AttachmentMeta, Event, Folder, FolderId, FolderRole, MessageHeader,
-    MessageId, OutgoingMessage,
+    MessageId, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -39,7 +39,11 @@ const MAX_PAGE: u32 = 1_000;
 struct Selection {
     account: Option<AccountId>,
     folder: Option<FolderId>,
+    /// When `true`, the message list shows outbox entries instead of the selected folder.
+    show_outbox: bool,
     message: Option<MessageId>,
+    /// Outbox entries currently shown (when show_outbox is true)
+    outbox_entries: Vec<OutboxEntry>,
     query: String,
     search: bool,
     /// Number of headers requested for the current folder.
@@ -91,6 +95,26 @@ struct Widgets {
 struct PendingAttachment {
     message_id: MessageId,
     attachment: AttachmentMeta,
+}
+
+/// Holder for a mailto: draft that should be opened on the next window creation.
+/// Used when the mailto: link activates before the main window exists.
+static MAILTO_DRAFT: std::sync::Mutex<Option<OutgoingMessage>> = std::sync::Mutex::new(None);
+
+/// Public API to set a mailto draft for the next window.
+pub fn set_mailto_draft(draft: OutgoingMessage) {
+    if let Ok(mut guard) = MAILTO_DRAFT.lock() {
+        *guard = Some(draft);
+    }
+}
+
+/// Take the mailto draft if one was set.
+pub fn take_mailto_draft() -> Option<OutgoingMessage> {
+    if let Ok(mut guard) = MAILTO_DRAFT.lock() {
+        guard.take()
+    } else {
+        None
+    }
 }
 
 pub struct MainWindow {
@@ -480,6 +504,12 @@ impl MainWindow {
 
         Self::connect(&this);
         this.refresh_accounts();
+
+        // Check for a mailto: draft that was set before window creation
+        if let Some(draft) = take_mailto_draft() {
+            this.open_compose_with_draft(draft);
+        }
+
         this
     }
 
@@ -586,6 +616,27 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&empty_trash_action);
 
+        let outbox_retry_action = gio::SimpleAction::new("outbox-retry", None);
+        outbox_retry_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.outbox_retry_selected()
+        });
+        this.widgets.window.add_action(&outbox_retry_action);
+
+        let outbox_discard_action = gio::SimpleAction::new("outbox-discard", None);
+        outbox_discard_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.outbox_discard_selected()
+        });
+        this.widgets.window.add_action(&outbox_discard_action);
+
+        let outbox_edit_action = gio::SimpleAction::new("outbox-edit", None);
+        outbox_edit_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| MainWindow::outbox_edit_selected(&this)
+        });
+        this.widgets.window.add_action(&outbox_edit_action);
+
         this.widgets.archive_button.connect_clicked({
             let this = Rc::clone(this);
             move |_| this.archive_selected()
@@ -604,6 +655,11 @@ impl MainWindow {
         message_menu.append(Some("Move to Trash"), Some("win.delete"));
         message_menu.append(Some("Mark as Junk"), Some("win.junk"));
         message_menu.append(Some("Not Junk"), Some("win.not-junk"));
+        let outbox_section = gio::Menu::new();
+        outbox_section.append(Some("Retry"), Some("win.outbox-retry"));
+        outbox_section.append(Some("Discard"), Some("win.outbox-discard"));
+        outbox_section.append(Some("Edit"), Some("win.outbox-edit"));
+        message_menu.append_section(None, &outbox_section);
         let destructive = gio::Menu::new();
         destructive.append(Some("Delete Permanently"), Some("win.delete-permanent"));
         destructive.append(Some("Empty Trash"), Some("win.empty-trash"));
@@ -973,13 +1029,31 @@ impl MainWindow {
             self.clear_folders();
             return;
         };
-        let folders = match self.app.mailin.list_folders(&account_id) {
+        let mut folders = match self.app.mailin.list_folders(&account_id) {
             Ok(folders) => folders,
             Err(error) => {
                 self.show_error(&error.to_string());
                 return;
             }
         };
+
+        // Add virtual Outbox folder at the end
+        let outbox_len = self.app.mailin.outbox_len().unwrap_or(0);
+        if outbox_len > 0 {
+            folders.push(Folder {
+                id: FolderId(-1), // Virtual ID for Outbox
+                account_id,
+                name: "Outbox".to_owned(),
+                delimiter: "/".to_owned(),
+                role: FolderRole::Other,
+                uid_validity: None,
+                uid_next: None,
+                highest_modseq: None,
+                last_synced_at: None,
+                message_count: outbox_len,
+                unread_count: outbox_len,
+            });
+        }
 
         let selected_id = self.selection.borrow().folder;
         let index = selected_id
@@ -1031,15 +1105,17 @@ impl MainWindow {
     }
 
     fn select_folder(&self, folder: &Folder) {
+        let is_outbox = folder.id.0 == -1;
         {
             let mut selection = self.selection.borrow_mut();
-            if selection.folder == Some(folder.id) && !selection.search {
+            if selection.folder == Some(folder.id) && !selection.search && selection.show_outbox == is_outbox {
                 return;
             }
             selection.folder = Some(folder.id);
             selection.message = None;
             selection.search = false;
             selection.query.clear();
+            selection.show_outbox = is_outbox;
             selection.limit = self.page_size();
         }
         self.programmatic.set(true);
@@ -1048,11 +1124,13 @@ impl MainWindow {
         self.widgets.list_title.set_text(&folder_title(folder));
         self.show_reader_empty();
         self.refresh_messages();
-        let stale = folder
-            .last_synced_at
-            .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
-        if stale {
-            self.app.engine.sync_folder(folder.id);
+        if !is_outbox {
+            let stale = folder
+                .last_synced_at
+                .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
+            if stale {
+                self.app.engine.sync_folder(folder.id);
+            }
         }
     }
 
@@ -1063,18 +1141,20 @@ impl MainWindow {
     }
 
     fn refresh_messages(&self) {
-        let (search, query, folder_id, limit) = {
+        let (search, query, folder_id, limit, show_outbox, account_id) = {
             let selection = self.selection.borrow();
             (
                 selection.search,
                 selection.query.clone(),
                 selection.folder,
                 selection.limit,
+                selection.show_outbox,
+                selection.account,
             )
         };
 
         if search {
-            let Some(account_id) = self.selection.borrow().account else {
+            let Some(account_id) = account_id else {
                 return;
             };
             match self.app.mailin.search(&account_id, &query, SEARCH_LIMIT) {
@@ -1083,6 +1163,15 @@ impl MainWindow {
                 }
                 Err(error) => self.show_error(&error.to_string()),
             }
+            return;
+        }
+
+        if show_outbox {
+            let Some(account_id) = account_id else {
+                self.clear_messages();
+                return;
+            };
+            self.refresh_outbox(account_id);
             return;
         }
 
@@ -1106,6 +1195,38 @@ impl MainWindow {
             }
             Err(error) => self.show_error(&error.to_string()),
         }
+    }
+
+    fn refresh_outbox(&self, account_id: AccountId) {
+        match self.app.mailin.list_outbox(&account_id) {
+            Ok(entries) => {
+                let title = format!("Outbox ({})", entries.len());
+                self.show_outbox_entries(entries, title);
+            }
+            Err(error) => self.show_error(&error.to_string()),
+        }
+    }
+
+    fn show_outbox_entries(&self, entries: Vec<OutboxEntry>, title: String) {
+        let now = format::now_unix();
+        let empty = entries.is_empty();
+
+        self.programmatic.set(true);
+        clear_list(&self.widgets.message_list);
+        for entry in &entries {
+            self.widgets.message_list.append(&outbox_entry_row(entry, now));
+        }
+        self.programmatic.set(false);
+
+        self.widgets.list_title.set_text(&title);
+        self.widgets
+            .list_stack
+            .set_visible_child_name(if empty { "empty" } else { "list" });
+        self.widgets.load_more.set_visible(false);
+        self.show_reader_empty();
+
+        // Store entries for selection tracking
+        self.selection.borrow_mut().outbox_entries = entries;
     }
 
     fn show_messages(&self, messages: Vec<MessageHeader>, title: String, more: bool) {
@@ -1586,6 +1707,88 @@ impl MainWindow {
         self.toast("Emptying Trash…");
     }
 
+    fn outbox_retry_selected(&self) {
+        let Some(account_id) = self.selection.borrow().account else {
+            return;
+        };
+        let ids = self.selected_outbox_ids();
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.app.engine.retry_outbox(account_id, id);
+        }
+        self.toast("Retrying…");
+    }
+
+    fn outbox_discard_selected(&self) {
+        let Some(account_id) = self.selection.borrow().account else {
+            return;
+        };
+        let ids = self.selected_outbox_ids();
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.app.engine.cancel_outbox(account_id, id);
+        }
+        self.toast("Discarding…");
+    }
+
+    fn outbox_edit_selected(this: &Rc<Self>) {
+        let Some(account_id) = this.selection.borrow().account else {
+            return;
+        };
+        let ids = this.selected_outbox_ids();
+        if ids.len() != 1 {
+            return;
+        }
+        let id = ids[0];
+        if let Ok(Some(entry)) = this.app.mailin.outbox_entry(id) {
+            if let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) {
+                let mut draft = OutgoingMessage {
+                    from_name: String::new(),
+                    from_addr: env.from,
+                    to: env.to.join(", "),
+                    cc: env.cc.join(", "),
+                    bcc: env.bcc.join(", "),
+                    subject: String::new(),
+                    body: String::new(),
+                    in_reply_to: None,
+                    references: Vec::new(),
+                    draft_key: None,
+                    attachments: Vec::new(),
+                };
+                // Parse the raw message to get subject and body
+                if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
+                    draft.subject = parsed.subject().unwrap_or_default().to_owned();
+                    if let Some(text) = parsed.body_text(0) {
+                        draft.body = text.to_string();
+                    }
+                } else {
+                    // Fallback: extract subject from envelope
+                    draft.subject = env.to.join(", ");
+                }
+                // Need to mark the original entry as cancelled so it doesn't get sent again
+                this.app.engine.cancel_outbox(account_id, id);
+                Self::open_compose(this, draft);
+            }
+        }
+    }
+
+    fn selected_outbox_ids(&self) -> Vec<i64> {
+        let entries = self.selection.borrow().outbox_entries.clone();
+        self.widgets
+            .message_list
+            .selected_rows()
+            .iter()
+            .filter_map(|row| {
+                let index = row.index() as usize;
+                entries.get(index).map(|entry| entry.id)
+            })
+            .collect()
+    }
+
     fn toggle_seen(&self) {
         let Some(message) = self.selected_message() else {
             return;
@@ -1687,6 +1890,41 @@ impl MainWindow {
         );
     }
 
+    /// Public method to open compose window with a draft (for mailto: links).
+    pub fn open_compose_with_draft(&self, draft: OutgoingMessage) {
+        // We need an Rc<Self> for open_compose, so we create a weak reference
+        // and upgrade it. Since this is called on an existing window, we can
+        // use the fact that the window is already reference-counted.
+        // We'll create a new Rc by using the existing window's reference.
+        // For simplicity, we'll use a workaround: create a dummy Rc that
+        // doesn't actually own the window but just calls the method.
+        // The real solution would be to restructure open_compose to take &Self.
+        
+        // Instead, let's just call open_compose directly with a workaround
+        // We can't easily get an Rc<Self> from &Self, so let's use a different approach.
+        // Store the draft in the selection and trigger compose via the existing mechanism.
+        // Actually, the simplest fix: make open_compose take &Self instead of &Rc<Self>
+        
+        // For now, let's use a different approach: just call the internal logic directly
+        let Some(account_id) = self.selection.borrow().account else {
+            self.widgets
+                .toast
+                .add_toast(adw::Toast::new("Add an account before composing mail"));
+            return;
+        };
+        let parent = self.widgets.window.clone().upcast::<gtk::Window>();
+        let toast = self.widgets.toast.clone();
+        compose::present(
+            &parent,
+            Rc::clone(&self.app),
+            account_id,
+            draft,
+            move || {
+                toast.add_toast(adw::Toast::new("Message queued in the outbox"));
+            },
+        );
+    }
+
     // --------------------------------------------------------------- events
 
     fn drain_events(&self, events: &mut broadcast::Receiver<Event>) {
@@ -1695,6 +1933,7 @@ impl MainWindow {
         let mut messages_changed = false;
         let mut body_ready = None;
         let mut account_error = None;
+        let mut outbox_changed = false;
         let mut new_messages = Vec::new();
 
         loop {
@@ -1711,7 +1950,7 @@ impl MainWindow {
                     account_id, count, ..
                 }) => new_messages.push((account_id, count)),
                 Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
-                Ok(Event::OutboxChanged) => {}
+                Ok(Event::OutboxChanged) => outbox_changed = true,
                 Ok(Event::AccountError { message, .. }) => account_error = Some(message),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {
@@ -1749,6 +1988,16 @@ impl MainWindow {
         }
         if let Some(message) = account_error {
             self.show_error(&message);
+        }
+        if outbox_changed {
+            // If we're viewing the outbox, refresh it. Otherwise refresh folders
+            // to update the badge count.
+            let selection = self.selection.borrow();
+            if selection.show_outbox {
+                self.refresh_messages();
+            } else {
+                self.refresh_folders();
+            }
         }
     }
 
@@ -2192,6 +2441,68 @@ fn message_row(message: &MessageHeader, now: i64) -> gtk::ListBoxRow {
         message.from_display(),
         format::subject_label(message)
     )));
+    row
+}
+
+fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    outer.set_margin_top(8);
+    outer.set_margin_bottom(8);
+    outer.set_margin_start(12);
+    outer.set_margin_end(12);
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    column.set_hexpand(true);
+
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+    let state_text = entry.state.as_str().to_uppercase();
+    let state_label = gtk::Label::new(Some(&state_text));
+    state_label.add_css_class("caption");
+    match entry.state {
+        OutboxState::Queued => state_label.add_css_class("accent"),
+        OutboxState::Sending => state_label.add_css_class("warning"),
+        OutboxState::Failed => state_label.add_css_class("error"),
+        OutboxState::Sent => state_label.add_css_class("success"),
+    }
+    line.append(&state_label);
+
+    if let Some(error) = &entry.last_error {
+        let error_label = gtk::Label::new(Some(&format!("— {}", error)));
+        error_label.add_css_class("caption");
+        error_label.add_css_class("dim-label");
+        error_label.set_ellipsize(pango::EllipsizeMode::End);
+        error_label.set_hexpand(true);
+        line.append(&error_label);
+    } else {
+        let attempts_label = gtk::Label::new(Some(&format!("attempt {}/5", entry.attempts + 1)));
+        attempts_label.add_css_class("caption");
+        attempts_label.add_css_class("dim-label");
+        line.append(&attempts_label);
+    }
+    column.append(&line);
+
+    // Parse envelope to show recipient
+    let subject = if let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) {
+        let to = env.to.join(", ");
+        let cc = if env.cc.is_empty() {
+            String::new()
+        } else {
+            format!(" (Cc: {})", env.cc.join(", "))
+        };
+        format!("To: {}{}", to, cc)
+    } else {
+        "Unknown recipient".to_owned()
+    };
+    let subject_label = gtk::Label::new(Some(&subject));
+    subject_label.set_xalign(0.0);
+    subject_label.set_ellipsize(pango::EllipsizeMode::End);
+    column.append(&subject_label);
+
+    outer.append(&column);
+    row.set_child(Some(&outer));
+    row.set_tooltip_text(Some(&format!("ID: {}", entry.id)));
     row
 }
 

@@ -3715,6 +3715,24 @@ pub struct IAccessKeyInvokedEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    IActivatedEventArgs,
+    IActivatedEventArgs_Vtbl,
+    0xcf651713_cd08_4fd8_b697_a281b6544e2e
+);
+impl windows_core::RuntimeType for IActivatedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IActivatedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IActivatedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
     IAnchorRequestedEventArgs,
     IAnchorRequestedEventArgs_Vtbl,
     0xd5645e80_d4d3_5df8_a3ac_1f9beeb2bcef
@@ -10798,6 +10816,59 @@ pub struct IProjection_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    IPropertySet,
+    IPropertySet_Vtbl,
+    0x8a43ed9f_f4e6_4421_acf9_1dab2986820c
+);
+impl windows_core::RuntimeType for IPropertySet {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IPropertySet,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IPropertySet_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IProtocolActivatedEventArgs,
+    IProtocolActivatedEventArgs_Vtbl,
+    0x6095f4dd_b7c0_46ab_81fe_d90f36d00d24
+);
+impl windows_core::RuntimeType for IProtocolActivatedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IProtocolActivatedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(IProtocolActivatedEventArgs, IActivatedEventArgs);
+impl IProtocolActivatedEventArgs {
+    pub fn Uri(&self) -> windows_core::Result<Uri> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Uri)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IProtocolActivatedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Uri: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IRectangleGeometry,
     IRectangleGeometry_Vtbl,
     0xb6143890_a5f5_54e0_ab42_d88bab451f04
@@ -11070,6 +11141,19 @@ impl windows_core::RuntimeType for IScalarTransition {
 }
 #[repr(C)]
 pub struct IScalarTransition_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IScheduledToastNotification,
+    IScheduledToastNotification_Vtbl,
+    0x79f577f8_0de7_48cd_9740_9b370490c838
+);
+impl windows_core::RuntimeType for IScheduledToastNotification {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IScheduledToastNotification_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -15983,6 +16067,600 @@ pub struct ITextPointer_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    IToastDismissedEventArgs,
+    IToastDismissedEventArgs_Vtbl,
+    0x3f89d935_d9cb_4538_a0f0_ffe7659938f8
+);
+impl windows_core::RuntimeType for IToastDismissedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToastDismissedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IToastFailedEventArgs,
+    IToastFailedEventArgs_Vtbl,
+    0x35176862_cfd4_44f8_ad64_f500fd896c3b
+);
+impl windows_core::RuntimeType for IToastFailedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToastFailedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IToastNotification,
+    IToastNotification_Vtbl,
+    0x997e2675_059e_4e60_8b06_1760917c8b80
+);
+impl windows_core::RuntimeType for IToastNotification {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IToastNotification {
+    pub fn Content(&self) -> windows_core::Result<XmlDocument> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Content)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetExpirationTime(
+        &self,
+        value: Option<windows_time::DateTime>,
+    ) -> windows_core::Result<()> {
+        let value__ =
+            value.map(<windows_reference::IReference<windows_time::DateTime> as From<_>>::from);
+        unsafe {
+            (windows_core::Interface::vtable(self).SetExpirationTime)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Param::param(value__.as_ref()).abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn ExpirationTime(&self) -> windows_core::Result<windows_time::DateTime> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ExpirationTime)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+            .and_then(|r__: windows_reference::IReference<windows_time::DateTime>| r__.Value())
+        }
+    }
+    pub fn Dismissed<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<ToastNotification>, windows_core::Ref<ToastDismissedEventArgs>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<ToastNotification, ToastDismissedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<ToastNotification, ToastDismissedEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<ToastNotification, ToastDismissedEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Dismissed)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveDismissed,
+            ))
+        }
+    }
+    pub fn Activated<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<ToastNotification>, windows_core::Ref<windows_core::IInspectable>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<ToastNotification, windows_core::IInspectable> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<ToastNotification, windows_core::IInspectable>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<ToastNotification, windows_core::IInspectable, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Activated)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveActivated,
+            ))
+        }
+    }
+    pub fn Failed<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<ToastNotification>, windows_core::Ref<ToastFailedEventArgs>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<ToastNotification, ToastFailedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<ToastNotification, ToastFailedEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<ToastNotification, ToastFailedEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Failed)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveFailed,
+            ))
+        }
+    }
+}
+#[repr(C)]
+pub struct IToastNotification_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Content: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetExpirationTime: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub ExpirationTime: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Dismissed: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveDismissed:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Activated: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveActivated:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Failed: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveFailed:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToastNotificationActivatedEventArgs,
+    IToastNotificationActivatedEventArgs_Vtbl,
+    0x92a86f82_5290_431d_be85_c4aaeeb8685f
+);
+impl windows_core::RuntimeType for IToastNotificationActivatedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IToastNotificationActivatedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(IToastNotificationActivatedEventArgs, IActivatedEventArgs);
+impl IToastNotificationActivatedEventArgs {
+    pub fn Argument(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Argument)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn UserInput(&self) -> windows_core::Result<ValueSet> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).UserInput)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IToastNotificationActivatedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Argument: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub UserInput: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToastNotificationFactory,
+    IToastNotificationFactory_Vtbl,
+    0x04124b20_82c6_4229_b109_fd9ed4662b53
+);
+impl windows_core::RuntimeType for IToastNotificationFactory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToastNotificationFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateToastNotification: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToastNotificationHistory,
+    IToastNotificationHistory_Vtbl,
+    0x5caddc63_01d3_4c97_986f_0533483fee14
+);
+impl windows_core::RuntimeType for IToastNotificationHistory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IToastNotificationHistory {
+    pub fn RemoveGroup(&self, group: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveGroup)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(group)),
+            )
+            .ok()
+        }
+    }
+    pub fn RemoveGroupWithId(&self, group: &str, applicationid: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveGroupWithId)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(group)),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(applicationid)),
+            )
+            .ok()
+        }
+    }
+    pub fn RemoveGroupedTagWithId(
+        &self,
+        tag: &str,
+        group: &str,
+        applicationid: &str,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveGroupedTagWithId)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(tag)),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(group)),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(applicationid)),
+            )
+            .ok()
+        }
+    }
+    pub fn RemoveGroupedTag(&self, tag: &str, group: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveGroupedTag)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(tag)),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(group)),
+            )
+            .ok()
+        }
+    }
+    pub fn Remove(&self, tag: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Remove)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(tag)),
+            )
+            .ok()
+        }
+    }
+    pub fn Clear(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Clear)(windows_core::Interface::as_raw(self))
+                .ok()
+        }
+    }
+    pub fn ClearWithId(&self, applicationid: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).ClearWithId)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(applicationid)),
+            )
+            .ok()
+        }
+    }
+}
+#[repr(C)]
+pub struct IToastNotificationHistory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub RemoveGroup: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub RemoveGroupWithId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub RemoveGroupedTagWithId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub RemoveGroupedTag: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Remove: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Clear: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub ClearWithId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToastNotificationManagerForUser,
+    IToastNotificationManagerForUser_Vtbl,
+    0x79ab57f6_43fe_487b_8a7f_99567200ae94
+);
+impl windows_core::RuntimeType for IToastNotificationManagerForUser {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IToastNotificationManagerForUser {
+    pub fn CreateToastNotifier(&self) -> windows_core::Result<ToastNotifier> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateToastNotifier)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateToastNotifierWithId(
+        &self,
+        applicationid: &str,
+    ) -> windows_core::Result<ToastNotifier> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateToastNotifierWithId)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(applicationid)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn History(&self) -> windows_core::Result<ToastNotificationHistory> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).History)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn User(&self) -> windows_core::Result<User> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).User)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IToastNotificationManagerForUser_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateToastNotifier: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateToastNotifierWithId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub History: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub User: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToastNotificationManagerStatics,
+    IToastNotificationManagerStatics_Vtbl,
+    0x50ac103f_d235_4598_bbef_98fe4d1a3ad4
+);
+impl windows_core::RuntimeType for IToastNotificationManagerStatics {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToastNotificationManagerStatics_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateToastNotifier: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateToastNotifierWithId: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GetTemplateContent: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        ToastTemplateType,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToastNotifier,
+    IToastNotifier_Vtbl,
+    0x75927b93_03f3_41ec_91d3_6e5bac1b38e7
+);
+impl windows_core::RuntimeType for IToastNotifier {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IToastNotifier {
+    pub fn Show<P0>(&self, notification: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ToastNotification>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).Show)(
+                windows_core::Interface::as_raw(self),
+                notification.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn Hide<P0>(&self, notification: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ToastNotification>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).Hide)(
+                windows_core::Interface::as_raw(self),
+                notification.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn Setting(&self) -> windows_core::Result<NotificationSetting> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Setting)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn AddToSchedule<P0>(&self, scheduledtoast: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ScheduledToastNotification>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).AddToSchedule)(
+                windows_core::Interface::as_raw(self),
+                scheduledtoast.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn RemoveFromSchedule<P0>(&self, scheduledtoast: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ScheduledToastNotification>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveFromSchedule)(
+                windows_core::Interface::as_raw(self),
+                scheduledtoast.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn GetScheduledToastNotifications(
+        &self,
+    ) -> windows_core::Result<windows_collections::IVectorView<ScheduledToastNotification>> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetScheduledToastNotifications)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IToastNotifier_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Show: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Hide: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Setting: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut NotificationSetting,
+    ) -> windows_core::HRESULT,
+    pub AddToSchedule: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub RemoveFromSchedule: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GetScheduledToastNotifications: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IToggleButton,
     IToggleButton_Vtbl,
     0x686fbaa4_c866_568b_8f75_481d8d545291
@@ -19547,8 +20225,295 @@ impl windows_core::RuntimeType for IUriRuntimeClass {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
+impl IUriRuntimeClass {
+    pub fn AbsoluteUri(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).AbsoluteUri)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn DisplayUri(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).DisplayUri)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Domain(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Domain)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Extension(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Extension)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Fragment(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Fragment)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Host(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Host)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Password(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Password)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Path(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Path)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Query(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Query)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn QueryParsed(&self) -> windows_core::Result<WwwFormUrlDecoder> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).QueryParsed)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn RawUri(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).RawUri)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn SchemeName(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).SchemeName)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn UserName(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).UserName)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn Port(&self) -> windows_core::Result<i32> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Port)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Suspicious(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Suspicious)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Equals<P0>(&self, puri: P0) -> windows_core::Result<bool>
+    where
+        P0: windows_core::Param<Uri>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Equals)(
+                windows_core::Interface::as_raw(self),
+                puri.param().abi(),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn CombineUri(&self, relativeuri: &str) -> windows_core::Result<Uri> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CombineUri)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(relativeuri)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
 #[repr(C)]
 pub struct IUriRuntimeClass_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub AbsoluteUri: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub DisplayUri: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Domain: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Extension: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Fragment: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Host: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Password: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Path: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Query: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub QueryParsed: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub RawUri: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SchemeName: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub UserName: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Port: unsafe extern "system" fn(*mut core::ffi::c_void, *mut i32) -> windows_core::HRESULT,
+    pub Suspicious:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub Equals: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut bool,
+    ) -> windows_core::HRESULT,
+    pub CombineUri: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(IUser, IUser_Vtbl, 0xdf9a26c6_e746_4bcd_b5d4_120103c4209b);
+impl windows_core::RuntimeType for IUser {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IUser_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -20433,6 +21398,19 @@ pub struct IWindowVisibilityChangedEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    IWwwFormUrlDecoderRuntimeClass,
+    IWwwFormUrlDecoderRuntimeClass_Vtbl,
+    0xd45a0451_f225_4542_9296_0e1df5d254df
+);
+impl windows_core::RuntimeType for IWwwFormUrlDecoderRuntimeClass {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IWwwFormUrlDecoderRuntimeClass_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
     IXamlControlsResources,
     IXamlControlsResources_Vtbl,
     0x918ca043_f42c_5805_861b_62d6d1d0c162
@@ -20505,6 +21483,517 @@ impl windows_core::RuntimeType for IXamlRoot {
 }
 #[repr(C)]
 pub struct IXamlRoot_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlAttribute,
+    IXmlAttribute_Vtbl,
+    0xac144aa4_b4f1_4db6_b206_8a22c308db0a
+);
+impl windows_core::RuntimeType for IXmlAttribute {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlAttribute_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlCDataSection,
+    IXmlCDataSection_Vtbl,
+    0x4d04b46f_c8bd_45b4_8899_0400d7c2c60f
+);
+impl windows_core::RuntimeType for IXmlCDataSection {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlCDataSection_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlComment,
+    IXmlComment_Vtbl,
+    0xbca474d5_b61f_4611_9cac_2e92e3476d47
+);
+impl windows_core::RuntimeType for IXmlComment {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlComment_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlDocument,
+    IXmlDocument_Vtbl,
+    0xf7f3a506_1e87_42d6_bcfb_b8c809fa5494
+);
+impl windows_core::RuntimeType for IXmlDocument {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IXmlDocument {
+    pub fn Doctype(&self) -> windows_core::Result<XmlDocumentType> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Doctype)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Implementation(&self) -> windows_core::Result<XmlDomImplementation> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Implementation)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn DocumentElement(&self) -> windows_core::Result<XmlElement> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).DocumentElement)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateElement(&self, tagname: &str) -> windows_core::Result<XmlElement> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateElement)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(tagname)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateDocumentFragment(&self) -> windows_core::Result<XmlDocumentFragment> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateDocumentFragment)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateTextNode(&self, data: &str) -> windows_core::Result<XmlText> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateTextNode)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(data)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateComment(&self, data: &str) -> windows_core::Result<XmlComment> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateComment)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(data)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateProcessingInstruction(
+        &self,
+        target: &str,
+        data: &str,
+    ) -> windows_core::Result<XmlProcessingInstruction> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateProcessingInstruction)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(target)),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(data)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateAttribute(&self, name: &str) -> windows_core::Result<XmlAttribute> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateAttribute)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(name)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateEntityReference(&self, name: &str) -> windows_core::Result<XmlEntityReference> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateEntityReference)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(name)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn GetElementsByTagName(&self, tagname: &str) -> windows_core::Result<XmlNodeList> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetElementsByTagName)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(tagname)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateCDataSection(&self, data: &str) -> windows_core::Result<XmlCDataSection> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateCDataSection)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(data)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn DocumentUri(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).DocumentUri)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn CreateAttributeNS<P0>(
+        &self,
+        namespaceuri: P0,
+        qualifiedname: &str,
+    ) -> windows_core::Result<XmlAttribute>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateAttributeNS)(
+                windows_core::Interface::as_raw(self),
+                namespaceuri.param().abi(),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(qualifiedname)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CreateElementNS<P0>(
+        &self,
+        namespaceuri: P0,
+        qualifiedname: &str,
+    ) -> windows_core::Result<XmlElement>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CreateElementNS)(
+                windows_core::Interface::as_raw(self),
+                namespaceuri.param().abi(),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(qualifiedname)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn GetElementById(&self, elementid: &str) -> windows_core::Result<XmlElement> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetElementById)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(elementid)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn ImportNode<P0>(&self, node: P0, deep: bool) -> windows_core::Result<IXmlNode>
+    where
+        P0: windows_core::Param<IXmlNode>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ImportNode)(
+                windows_core::Interface::as_raw(self),
+                node.param().abi(),
+                deep,
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IXmlDocument_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Doctype: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Implementation: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub DocumentElement: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateElement: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateDocumentFragment: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateTextNode: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateComment: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateProcessingInstruction: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateAttribute: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateEntityReference: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GetElementsByTagName: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateCDataSection: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub DocumentUri: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateAttributeNS: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CreateElementNS: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GetElementById: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub ImportNode: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        bool,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IXmlDocumentFragment,
+    IXmlDocumentFragment_Vtbl,
+    0xe2ea6a96_0c21_44a5_8bc9_9e4a262708ec
+);
+impl windows_core::RuntimeType for IXmlDocumentFragment {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlDocumentFragment_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlDocumentType,
+    IXmlDocumentType_Vtbl,
+    0xf7342425_9781_4964_8e94_9b1c6dfc9bc7
+);
+impl windows_core::RuntimeType for IXmlDocumentType {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlDocumentType_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlDomImplementation,
+    IXmlDomImplementation_Vtbl,
+    0x6de58132_f11d_4fbb_8cc6_583cba93112f
+);
+impl windows_core::RuntimeType for IXmlDomImplementation {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlDomImplementation_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlElement,
+    IXmlElement_Vtbl,
+    0x2dfb8a1f_6b10_4ef8_9f83_efcce8faec37
+);
+impl windows_core::RuntimeType for IXmlElement {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlElement_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlEntityReference,
+    IXmlEntityReference_Vtbl,
+    0x2e2f47bc_c3d0_4ccf_bb86_0ab8c36a61cf
+);
+impl windows_core::RuntimeType for IXmlEntityReference {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlEntityReference_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlNode,
+    IXmlNode_Vtbl,
+    0x1c741d59_2122_47d5_a856_83f3d4214875
+);
+impl windows_core::RuntimeType for IXmlNode {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IXmlNode,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IXmlNode_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlNodeList,
+    IXmlNodeList_Vtbl,
+    0x8c60ad77_83a4_4ec1_9c54_7ba429e13da6
+);
+impl windows_core::RuntimeType for IXmlNodeList {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlNodeList_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlNodeSelector,
+    IXmlNodeSelector_Vtbl,
+    0x63dbba8b_d0db_4fe1_b745_f9433afdc25b
+);
+impl windows_core::RuntimeType for IXmlNodeSelector {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IXmlNodeSelector,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IXmlNodeSelector_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlNodeSerializer,
+    IXmlNodeSerializer_Vtbl,
+    0x5cc5b382_e6dd_4991_abef_06d8d2e7bd0c
+);
+impl windows_core::RuntimeType for IXmlNodeSerializer {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IXmlNodeSerializer,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IXmlNodeSerializer_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlProcessingInstruction,
+    IXmlProcessingInstruction_Vtbl,
+    0x2707fd1e_1e92_4ece_b6f4_26f069078ddc
+);
+impl windows_core::RuntimeType for IXmlProcessingInstruction {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IXmlProcessingInstruction_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IXmlText,
+    IXmlText_Vtbl,
+    0xf931a4cb_308d_4760_a1d5_43b67450ac7e
+);
+impl windows_core::RuntimeType for IXmlText {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IXmlText,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IXmlText_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 #[repr(transparent)]
@@ -21533,6 +23022,24 @@ unsafe impl Send for NoFocusCandidateFoundEventArgs {}
 unsafe impl Sync for NoFocusCandidateFoundEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NotificationSetting(pub i32);
+impl NotificationSetting {
+    pub const Enabled: Self = Self(0);
+    pub const DisabledForApplication: Self = Self(1);
+    pub const DisabledForUser: Self = Self(2);
+    pub const DisabledByGroupPolicy: Self = Self(3);
+    pub const DisabledByManifest: Self = Self(4);
+}
+impl windows_core::imp::TypeKind for NotificationSetting {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for NotificationSetting {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Windows.UI.Notifications.NotificationSetting;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OpticalMarginAlignment(pub i32);
 impl OpticalMarginAlignment {
     pub const None: Self = Self(0);
@@ -22027,6 +23534,35 @@ impl windows_core::RuntimeName for Projection {
 }
 unsafe impl Send for Projection {}
 unsafe impl Sync for Projection {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolActivatedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ProtocolActivatedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable,
+    IProtocolActivatedEventArgs
+);
+windows_core::imp::required_hierarchy!(ProtocolActivatedEventArgs, IActivatedEventArgs);
+impl windows_core::RuntimeType for ProtocolActivatedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IProtocolActivatedEventArgs>();
+}
+unsafe impl windows_core::Interface for ProtocolActivatedEventArgs {
+    type Vtable = <IProtocolActivatedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IProtocolActivatedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ProtocolActivatedEventArgs {
+    type Target = IProtocolActivatedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ProtocolActivatedEventArgs {
+    const NAME: &'static str = "Windows.ApplicationModel.Activation.ProtocolActivatedEventArgs";
+}
+unsafe impl Send for ProtocolActivatedEventArgs {}
+unsafe impl Sync for ProtocolActivatedEventArgs {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -22413,6 +23949,33 @@ impl windows_core::RuntimeName for ScalarTransition {
 }
 unsafe impl Send for ScalarTransition {}
 unsafe impl Sync for ScalarTransition {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduledToastNotification(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ScheduledToastNotification,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ScheduledToastNotification {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IScheduledToastNotification>();
+}
+unsafe impl windows_core::Interface for ScheduledToastNotification {
+    type Vtable = <IScheduledToastNotification as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IScheduledToastNotification as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ScheduledToastNotification {
+    type Target = IScheduledToastNotification;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ScheduledToastNotification {
+    const NAME: &'static str = "Windows.UI.Notifications.ScheduledToastNotification";
+}
+unsafe impl Send for ScheduledToastNotification {}
+unsafe impl Sync for ScheduledToastNotification {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ScrollBarVisibility(pub i32);
@@ -25172,6 +26735,313 @@ impl windows_core::RuntimeType for Thickness {
     );
 }
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ToastDismissalReason(pub i32);
+impl ToastDismissalReason {
+    pub const UserCanceled: Self = Self(0);
+    pub const ApplicationHidden: Self = Self(1);
+    pub const TimedOut: Self = Self(2);
+}
+impl windows_core::imp::TypeKind for ToastDismissalReason {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for ToastDismissalReason {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Windows.UI.Notifications.ToastDismissalReason;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastDismissedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastDismissedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ToastDismissedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastDismissedEventArgs>();
+}
+unsafe impl windows_core::Interface for ToastDismissedEventArgs {
+    type Vtable = <IToastDismissedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToastDismissedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastDismissedEventArgs {
+    type Target = IToastDismissedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastDismissedEventArgs {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastDismissedEventArgs";
+}
+unsafe impl Send for ToastDismissedEventArgs {}
+unsafe impl Sync for ToastDismissedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastFailedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastFailedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ToastFailedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastFailedEventArgs>();
+}
+unsafe impl windows_core::Interface for ToastFailedEventArgs {
+    type Vtable = <IToastFailedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToastFailedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastFailedEventArgs {
+    type Target = IToastFailedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastFailedEventArgs {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastFailedEventArgs";
+}
+unsafe impl Send for ToastFailedEventArgs {}
+unsafe impl Sync for ToastFailedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastNotification(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastNotification,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl ToastNotification {
+    pub fn CreateToastNotification<P0>(content: P0) -> windows_core::Result<Self>
+    where
+        P0: windows_core::Param<XmlDocument>,
+    {
+        Self::IToastNotificationFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateToastNotification)(
+                windows_core::Interface::as_raw(this),
+                content.param().abi(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn IToastNotificationFactory<
+        R,
+        F: FnOnce(&IToastNotificationFactory) -> windows_core::Result<R>,
+    >(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<
+            ToastNotification,
+            IToastNotificationFactory,
+        > = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for ToastNotification {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastNotification>();
+}
+unsafe impl windows_core::Interface for ToastNotification {
+    type Vtable = <IToastNotification as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToastNotification as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastNotification {
+    type Target = IToastNotification;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastNotification {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastNotification";
+}
+unsafe impl Send for ToastNotification {}
+unsafe impl Sync for ToastNotification {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastNotificationActivatedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastNotificationActivatedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable,
+    IToastNotificationActivatedEventArgs
+);
+windows_core::imp::required_hierarchy!(ToastNotificationActivatedEventArgs, IActivatedEventArgs);
+impl windows_core::RuntimeType for ToastNotificationActivatedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastNotificationActivatedEventArgs>();
+}
+unsafe impl windows_core::Interface for ToastNotificationActivatedEventArgs {
+    type Vtable = <IToastNotificationActivatedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IToastNotificationActivatedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastNotificationActivatedEventArgs {
+    type Target = IToastNotificationActivatedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastNotificationActivatedEventArgs {
+    const NAME: &'static str =
+        "Windows.ApplicationModel.Activation.ToastNotificationActivatedEventArgs";
+}
+unsafe impl Send for ToastNotificationActivatedEventArgs {}
+unsafe impl Sync for ToastNotificationActivatedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastNotificationHistory(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastNotificationHistory,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ToastNotificationHistory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastNotificationHistory>();
+}
+unsafe impl windows_core::Interface for ToastNotificationHistory {
+    type Vtable = <IToastNotificationHistory as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToastNotificationHistory as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastNotificationHistory {
+    type Target = IToastNotificationHistory;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastNotificationHistory {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastNotificationHistory";
+}
+pub struct ToastNotificationManager;
+impl ToastNotificationManager {
+    pub fn CreateToastNotifier() -> windows_core::Result<ToastNotifier> {
+        Self::IToastNotificationManagerStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateToastNotifier)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn CreateToastNotifierWithId(applicationid: &str) -> windows_core::Result<ToastNotifier> {
+        Self::IToastNotificationManagerStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateToastNotifierWithId)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(applicationid)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn GetTemplateContent(r#type: ToastTemplateType) -> windows_core::Result<XmlDocument> {
+        Self::IToastNotificationManagerStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).GetTemplateContent)(
+                windows_core::Interface::as_raw(this),
+                r#type,
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn IToastNotificationManagerStatics<
+        R,
+        F: FnOnce(&IToastNotificationManagerStatics) -> windows_core::Result<R>,
+    >(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<
+            ToastNotificationManager,
+            IToastNotificationManagerStatics,
+        > = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeName for ToastNotificationManager {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastNotificationManager";
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastNotificationManagerForUser(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastNotificationManagerForUser,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ToastNotificationManagerForUser {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastNotificationManagerForUser>();
+}
+unsafe impl windows_core::Interface for ToastNotificationManagerForUser {
+    type Vtable = <IToastNotificationManagerForUser as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IToastNotificationManagerForUser as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastNotificationManagerForUser {
+    type Target = IToastNotificationManagerForUser;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastNotificationManagerForUser {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastNotificationManagerForUser";
+}
+unsafe impl Send for ToastNotificationManagerForUser {}
+unsafe impl Sync for ToastNotificationManagerForUser {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToastNotifier(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToastNotifier,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ToastNotifier {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToastNotifier>();
+}
+unsafe impl windows_core::Interface for ToastNotifier {
+    type Vtable = <IToastNotifier as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToastNotifier as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToastNotifier {
+    type Target = IToastNotifier;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToastNotifier {
+    const NAME: &'static str = "Windows.UI.Notifications.ToastNotifier";
+}
+unsafe impl Send for ToastNotifier {}
+unsafe impl Sync for ToastNotifier {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ToastTemplateType(pub i32);
+impl ToastTemplateType {
+    pub const ToastImageAndText01: Self = Self(0);
+    pub const ToastImageAndText02: Self = Self(1);
+    pub const ToastImageAndText03: Self = Self(2);
+    pub const ToastImageAndText04: Self = Self(3);
+    pub const ToastText01: Self = Self(4);
+    pub const ToastText02: Self = Self(5);
+    pub const ToastText03: Self = Self(6);
+    pub const ToastText04: Self = Self(7);
+}
+impl windows_core::imp::TypeKind for ToastTemplateType {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for ToastTemplateType {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Windows.UI.Notifications.ToastTemplateType;i4)",
+    );
+}
+#[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToggleButton(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
@@ -25623,6 +27493,57 @@ unsafe impl Send for Uri {}
 unsafe impl Sync for Uri {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct User(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(User, windows_core::IUnknown, windows_core::IInspectable);
+impl windows_core::RuntimeType for User {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IUser>();
+}
+unsafe impl windows_core::Interface for User {
+    type Vtable = <IUser as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IUser as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for User {
+    type Target = IUser;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for User {
+    const NAME: &'static str = "Windows.System.User";
+}
+unsafe impl Send for User {}
+unsafe impl Sync for User {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValueSet(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ValueSet,
+    windows_core::IUnknown,
+    windows_core::IInspectable,
+    IPropertySet
+);
+impl windows_core::RuntimeType for ValueSet {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IPropertySet>();
+}
+unsafe impl windows_core::Interface for ValueSet {
+    type Vtable = <IPropertySet as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IPropertySet as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ValueSet {
+    type Target = IPropertySet;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ValueSet {
+    const NAME: &'static str = "Windows.Foundation.Collections.ValueSet";
+}
+unsafe impl Send for ValueSet {}
+unsafe impl Sync for ValueSet {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Vector3Transition(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
     Vector3Transition,
@@ -25898,6 +27819,34 @@ impl windows_core::RuntimeName for WindowVisibilityChangedEventArgs {
 unsafe impl Send for WindowVisibilityChangedEventArgs {}
 unsafe impl Sync for WindowVisibilityChangedEventArgs {}
 #[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WwwFormUrlDecoder(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    WwwFormUrlDecoder,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for WwwFormUrlDecoder {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IWwwFormUrlDecoderRuntimeClass>();
+}
+unsafe impl windows_core::Interface for WwwFormUrlDecoder {
+    type Vtable = <IWwwFormUrlDecoderRuntimeClass as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IWwwFormUrlDecoderRuntimeClass as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for WwwFormUrlDecoder {
+    type Target = IWwwFormUrlDecoderRuntimeClass;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for WwwFormUrlDecoder {
+    const NAME: &'static str = "Windows.Foundation.WwwFormUrlDecoder";
+}
+unsafe impl Send for WwwFormUrlDecoder {}
+unsafe impl Sync for WwwFormUrlDecoder {}
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct XYFocusKeyboardNavigationMode(pub i32);
 impl XYFocusKeyboardNavigationMode {
@@ -26073,6 +28022,332 @@ impl windows_core::RuntimeName for XamlRoot {
 }
 unsafe impl Send for XamlRoot {}
 unsafe impl Sync for XamlRoot {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlAttribute(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlAttribute,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlAttribute {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlAttribute>();
+}
+unsafe impl windows_core::Interface for XmlAttribute {
+    type Vtable = <IXmlAttribute as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlAttribute as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlAttribute {
+    type Target = IXmlAttribute;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlAttribute {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlAttribute";
+}
+unsafe impl Send for XmlAttribute {}
+unsafe impl Sync for XmlAttribute {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlCDataSection(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlCDataSection,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlCDataSection {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlCDataSection>();
+}
+unsafe impl windows_core::Interface for XmlCDataSection {
+    type Vtable = <IXmlCDataSection as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlCDataSection as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlCDataSection {
+    type Target = IXmlCDataSection;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlCDataSection {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlCDataSection";
+}
+unsafe impl Send for XmlCDataSection {}
+unsafe impl Sync for XmlCDataSection {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlComment(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlComment,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlComment {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlComment>();
+}
+unsafe impl windows_core::Interface for XmlComment {
+    type Vtable = <IXmlComment as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlComment as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlComment {
+    type Target = IXmlComment;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlComment {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlComment";
+}
+unsafe impl Send for XmlComment {}
+unsafe impl Sync for XmlComment {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlDocument(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlDocument,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(XmlDocument, IXmlNode, IXmlNodeSelector, IXmlNodeSerializer);
+impl windows_core::RuntimeType for XmlDocument {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlDocument>();
+}
+unsafe impl windows_core::Interface for XmlDocument {
+    type Vtable = <IXmlDocument as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlDocument as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlDocument {
+    type Target = IXmlDocument;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlDocument {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlDocument";
+}
+unsafe impl Send for XmlDocument {}
+unsafe impl Sync for XmlDocument {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlDocumentFragment(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlDocumentFragment,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlDocumentFragment {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlDocumentFragment>();
+}
+unsafe impl windows_core::Interface for XmlDocumentFragment {
+    type Vtable = <IXmlDocumentFragment as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlDocumentFragment as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlDocumentFragment {
+    type Target = IXmlDocumentFragment;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlDocumentFragment {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlDocumentFragment";
+}
+unsafe impl Send for XmlDocumentFragment {}
+unsafe impl Sync for XmlDocumentFragment {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlDocumentType(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlDocumentType,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlDocumentType {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlDocumentType>();
+}
+unsafe impl windows_core::Interface for XmlDocumentType {
+    type Vtable = <IXmlDocumentType as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlDocumentType as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlDocumentType {
+    type Target = IXmlDocumentType;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlDocumentType {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlDocumentType";
+}
+unsafe impl Send for XmlDocumentType {}
+unsafe impl Sync for XmlDocumentType {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlDomImplementation(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlDomImplementation,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlDomImplementation {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlDomImplementation>();
+}
+unsafe impl windows_core::Interface for XmlDomImplementation {
+    type Vtable = <IXmlDomImplementation as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlDomImplementation as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlDomImplementation {
+    type Target = IXmlDomImplementation;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlDomImplementation {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlDomImplementation";
+}
+unsafe impl Send for XmlDomImplementation {}
+unsafe impl Sync for XmlDomImplementation {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlElement(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlElement,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlElement {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlElement>();
+}
+unsafe impl windows_core::Interface for XmlElement {
+    type Vtable = <IXmlElement as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlElement as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlElement {
+    type Target = IXmlElement;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlElement {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlElement";
+}
+unsafe impl Send for XmlElement {}
+unsafe impl Sync for XmlElement {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlEntityReference(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlEntityReference,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlEntityReference {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlEntityReference>();
+}
+unsafe impl windows_core::Interface for XmlEntityReference {
+    type Vtable = <IXmlEntityReference as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlEntityReference as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlEntityReference {
+    type Target = IXmlEntityReference;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlEntityReference {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlEntityReference";
+}
+unsafe impl Send for XmlEntityReference {}
+unsafe impl Sync for XmlEntityReference {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlNodeList(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlNodeList,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlNodeList {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlNodeList>();
+}
+unsafe impl windows_core::Interface for XmlNodeList {
+    type Vtable = <IXmlNodeList as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlNodeList as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlNodeList {
+    type Target = IXmlNodeList;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlNodeList {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlNodeList";
+}
+unsafe impl Send for XmlNodeList {}
+unsafe impl Sync for XmlNodeList {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlProcessingInstruction(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlProcessingInstruction,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for XmlProcessingInstruction {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlProcessingInstruction>();
+}
+unsafe impl windows_core::Interface for XmlProcessingInstruction {
+    type Vtable = <IXmlProcessingInstruction as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlProcessingInstruction as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlProcessingInstruction {
+    type Target = IXmlProcessingInstruction;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlProcessingInstruction {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlProcessingInstruction";
+}
+unsafe impl Send for XmlProcessingInstruction {}
+unsafe impl Sync for XmlProcessingInstruction {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlText(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    XmlText,
+    windows_core::IUnknown,
+    windows_core::IInspectable,
+    IXmlText
+);
+impl windows_core::RuntimeType for XmlText {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IXmlText>();
+}
+unsafe impl windows_core::Interface for XmlText {
+    type Vtable = <IXmlText as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IXmlText as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for XmlText {
+    type Target = IXmlText;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for XmlText {
+    const NAME: &'static str = "Windows.Data.Xml.Dom.XmlText";
+}
+unsafe impl Send for XmlText {}
+unsafe impl Sync for XmlText {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ZoomMode(pub i32);

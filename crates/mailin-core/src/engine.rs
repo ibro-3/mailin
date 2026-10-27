@@ -181,6 +181,16 @@ impl Engine {
         });
     }
 
+    /// Retry a failed outbox entry (resets state to Queued).
+    pub fn retry_outbox(&self, account_id: AccountId, entry_id: i64) {
+        self.send(Command::RetryOutbox { account_id, entry_id });
+    }
+
+    /// Cancel (delete) an outbox entry.
+    pub fn cancel_outbox(&self, account_id: AccountId, entry_id: i64) {
+        self.send(Command::CancelOutbox { account_id, entry_id });
+    }
+
     /// Store a message in the outbox and wake the sender.
     pub fn queue_and_send(
         &self,
@@ -251,6 +261,14 @@ enum Command {
         account_id: AccountId,
         draft_key: String,
     },
+    RetryOutbox {
+        account_id: AccountId,
+        entry_id: i64,
+    },
+    CancelOutbox {
+        account_id: AccountId,
+        entry_id: i64,
+    },
     Shutdown,
 }
 
@@ -291,6 +309,12 @@ enum WorkerCommand {
     },
     DiscardDraft {
         draft_key: String,
+    },
+    RetryOutbox {
+        entry_id: i64,
+    },
+    CancelOutbox {
+        entry_id: i64,
     },
     Stop,
 }
@@ -380,6 +404,20 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
             } => {
                 let worker = ensure_worker(&mut workers, &state, account_id);
                 let _ = worker.send(WorkerCommand::DiscardDraft { draft_key });
+            }
+            Command::RetryOutbox {
+                account_id,
+                entry_id,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::RetryOutbox { entry_id });
+            }
+            Command::CancelOutbox {
+                account_id,
+                entry_id,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::CancelOutbox { entry_id });
             }
         }
     }
@@ -789,6 +827,12 @@ async fn handle_command(
         }
         WorkerCommand::DiscardDraft { draft_key } => {
             discard_draft(session, state, account, &draft_key).await?;
+        }
+        WorkerCommand::RetryOutbox { entry_id } => {
+            state.mailbox.retry_outbox(entry_id)?;
+        }
+        WorkerCommand::CancelOutbox { entry_id } => {
+            state.mailbox.cancel_outbox(entry_id)?;
         }
     }
     Ok(false)

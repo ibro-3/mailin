@@ -2,7 +2,7 @@
 Name=Mailin
 GenericName=Mail Client
 Comment=Native desktop email client
-Exec=mailin
+Exec=mailin %u
 Icon=dev.mailin.Mailin
 Terminal=false
 Type=Application
@@ -11,3 +11,4 @@ Keywords=email;mail;imap;smtp;
 StartupNotify=true
 X-GNOME-UsesNotifications=true
 X-GNOME-SingleWindow=true
+MimeType=x-scheme-handler/mailto;

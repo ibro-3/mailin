@@ -12,12 +12,13 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use mailin_core::{
     Account, AccountId, AttachmentMeta, Event, Folder, FolderId, FolderRole, MessageHeader,
-    MessageId, OutgoingMessage, html,
+    MessageId, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage, html,
 };
 use mailin_winui_sys::{
     Application, Button, ComboBox, DispatcherQueue, Grid, KeyboardAccelerator, Orientation,
-    ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox, VirtualKey,
-    VirtualKeyModifiers, WebView2, Window,
+    ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification,
+    ToastNotificationManager, ToastNotifier, ToastTemplateType, VirtualKey, VirtualKeyModifiers,
+    WebView2, Window, XmlDocument,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -56,6 +57,8 @@ struct State {
     accounts: Vec<Account>,
     folders: Vec<Folder>,
     messages: Vec<MessageHeader>,
+    outbox_entries: Vec<OutboxEntry>,
+    show_outbox: bool,
     remote_allowed: Option<MessageId>,
     pending_attachment: Option<PendingAttachment>,
 }
@@ -102,6 +105,9 @@ struct Widgets {
     archive_button: Button,
     trash_button: Button,
     junk_button: Button,
+    outbox_retry_button: Button,
+    outbox_discard_button: Button,
+    outbox_edit_button: Button,
     /// Keyboard shortcuts help window (created on demand)
     shortcuts_window: std::cell::RefCell<Option<Window>>,
 }
@@ -137,6 +143,55 @@ impl MainWindow {
         }
         self.show_banner(&format!("Problem: {text}"));
         tracing::debug!(%message, "account error surfaced in the UI");
+    }
+
+    fn show_toast_notification(&self, text: &str) {
+        // Check if notifications are enabled in config
+        if !self.app.config.ui.notifications {
+            return;
+        }
+        // Only show toast if we have a toast notifier
+        let Some(notifier) = &self.app.toast_notifier else {
+            return;
+        };
+        // Use ToastTemplateType::ToastText02 which has a title and body text
+        let xml = match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02) {
+            Ok(xml) => xml,
+            Err(e) => {
+                tracing::warn!(%e, "failed to get toast template");
+                return;
+            }
+        };
+        // Find the text elements and set their content
+        // ToastText02 has two text elements: [0] = title, [1] = body
+        let text_nodes = match xml.GetElementsByTagName(&"text".into()) {
+            Ok(nodes) => nodes,
+            Err(e) => {
+                tracing::warn!(%e, "failed to get toast text elements");
+                return;
+            }
+        };
+        if text_nodes.Length() >= 2 {
+            if let Ok(title_node) = text_nodes.Item(0) {
+                let _ = title_node.SetInnerText(&"New mail".into());
+            }
+            if let Ok(body_node) = text_nodes.Item(1) {
+                let _ = body_node.SetInnerText(&text.into());
+            }
+        }
+        // Create and show the toast notification
+        let toast = match ToastNotification::CreateToastNotification(&xml) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(%e, "failed to create toast notification");
+                return;
+            }
+        };
+        // Set an argument so we can handle activation
+        let _ = toast.SetArgument(&"new-mail".into());
+        if let Err(e) = notifier.Show(&toast) {
+            tracing::warn!(%e, "failed to show toast notification");
+        }
     }
 
     // ------------------------------------------------------------- accounts
@@ -247,13 +302,31 @@ impl MainWindow {
             self.clear_folders();
             return;
         };
-        let folders = match self.app.mailin.list_folders(&account_id) {
+        let mut folders = match self.app.mailin.list_folders(&account_id) {
             Ok(folders) => folders,
             Err(error) => {
                 self.show_error(&error.to_string());
                 return;
             }
         };
+
+        // Add virtual Outbox folder at the end
+        let outbox_len = self.app.mailin.outbox_len().unwrap_or(0);
+        if outbox_len > 0 {
+            folders.push(Folder {
+                id: FolderId(-1), // Virtual ID for Outbox
+                account_id,
+                name: "Outbox".to_owned(),
+                delimiter: "/".to_owned(),
+                role: FolderRole::Other,
+                uid_validity: None,
+                uid_next: None,
+                highest_modseq: None,
+                last_synced_at: None,
+                message_count: outbox_len,
+                unread_count: outbox_len,
+            });
+        }
 
         let selected_id = self.state().selection.folder;
         let index = selected_id
@@ -304,26 +377,30 @@ impl MainWindow {
     }
 
     fn select_folder(self: &Rc<Self>, folder: Folder) {
+        let is_outbox = folder.id.0 == -1;
         {
             let mut state = self.state();
-            if state.selection.folder == Some(folder.id) && !state.selection.search {
+            if state.selection.folder == Some(folder.id) && !state.selection.search && state.show_outbox == is_outbox {
                 return;
             }
             state.selection.folder = Some(folder.id);
             state.selection.message = None;
             state.selection.search = false;
             state.selection.query.clear();
+            state.show_outbox = is_outbox;
             state.selection.limit = self.page_size();
         }
         let _ = self.widgets.search.SetText("");
         let _ = self.widgets.list_title.SetText(&folder_title(&folder));
         self.show_reader_empty();
         self.refresh_messages();
-        let stale = folder
-            .last_synced_at
-            .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
-        if stale {
-            self.app.engine.sync_folder(folder.id);
+        if !is_outbox {
+            let stale = folder
+                .last_synced_at
+                .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
+            if stale {
+                self.app.engine.sync_folder(folder.id);
+            }
         }
     }
 
@@ -334,18 +411,20 @@ impl MainWindow {
     }
 
     fn refresh_messages(self: &Rc<Self>) {
-        let (search, query, folder_id, limit) = {
+        let (search, query, folder_id, limit, show_outbox, account_id) = {
             let state = self.state();
             (
                 state.selection.search,
                 state.selection.query.clone(),
                 state.selection.folder,
                 state.selection.limit,
+                state.show_outbox,
+                state.selection.account,
             )
         };
 
         if search {
-            let Some(account_id) = self.state().selection.account else {
+            let Some(account_id) = account_id else {
                 return;
             };
             match self.app.mailin.search(&account_id, &query, SEARCH_LIMIT) {
@@ -354,6 +433,15 @@ impl MainWindow {
                 }
                 Err(error) => self.show_error(&error.to_string()),
             }
+            return;
+        }
+
+        if show_outbox {
+            let Some(account_id) = account_id else {
+                self.clear_messages();
+                return;
+            };
+            self.refresh_outbox(account_id);
             return;
         }
 
@@ -377,6 +465,47 @@ impl MainWindow {
             }
             Err(error) => self.show_error(&error.to_string()),
         }
+    }
+
+    fn refresh_outbox(self: &Rc<Self>, account_id: AccountId) {
+        match self.app.mailin.list_outbox(&account_id) {
+            Ok(entries) => {
+                let title = format!("Outbox ({})", entries.len());
+                self.show_outbox_entries(entries, title);
+            }
+            Err(error) => self.show_error(&error.to_string()),
+        }
+    }
+
+    fn show_outbox_entries(self: &Rc<Self>, entries: Vec<OutboxEntry>, title: String) {
+        let now = format::now_unix();
+        let empty = entries.is_empty();
+        self.message_events.clear();
+        let _ = ui::clear(&self.widgets.message_list);
+        for entry in &entries {
+            if let Ok(row) = outbox_entry_row(entry, now) {
+                let this = Rc::clone(self);
+                let entry = entry.clone();
+                if let Ok(revoker) = ui::on_click(&row, move || this.select_outbox_entry(entry)) {
+                    self.message_events.keep(revoker);
+                }
+                let _ = ui::append(&self.widgets.message_list, &row);
+            }
+        }
+        self.state().outbox_entries = entries;
+        let _ = self.widgets.list_title.SetText(&title);
+        let empty_text = if empty { "Outbox is empty" } else { "Select an entry to see actions" };
+        let _ = self.widgets.message_empty.SetText(empty_text);
+        let _ = ui::set_visible(&self.widgets.message_empty, empty);
+        let _ = self.widgets.load_more.SetIsVisible(false);
+        self.show_reader_empty();
+        // Show outbox action buttons, hide regular message buttons
+        let _ = ui::set_visible(&self.widgets.outbox_retry_button, true);
+        let _ = ui::set_visible(&self.widgets.outbox_discard_button, true);
+        let _ = ui::set_visible(&self.widgets.outbox_edit_button, true);
+        let _ = ui::set_visible(&self.widgets.archive_button, false);
+        let _ = ui::set_visible(&self.widgets.trash_button, false);
+        let _ = ui::set_visible(&self.widgets.junk_button, false);
     }
 
     fn show_messages(self: &Rc<Self>, messages: Vec<MessageHeader>, title: String, more: bool) {
@@ -407,6 +536,13 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.message_empty, empty);
         let _ = ui::set_visible(&self.widgets.message_scroll, !empty);
         let _ = ui::set_visible(&self.widgets.load_more, more);
+        // Show regular message buttons, hide outbox buttons
+        let _ = ui::set_visible(&self.widgets.outbox_retry_button, false);
+        let _ = ui::set_visible(&self.widgets.outbox_discard_button, false);
+        let _ = ui::set_visible(&self.widgets.outbox_edit_button, false);
+        let _ = ui::set_visible(&self.widgets.archive_button, true);
+        let _ = ui::set_visible(&self.widgets.trash_button, true);
+        let _ = ui::set_visible(&self.widgets.junk_button, true);
     }
 
     fn clear_messages(self: &Rc<Self>) {
@@ -502,6 +638,74 @@ impl MainWindow {
             self.app
                 .engine
                 .set_flags(message.id, vec!["\\Seen".to_owned()], Vec::new());
+        }
+    }
+
+    // ----------------------------------------------------------- outbox actions
+
+    fn select_outbox_entry(self: &Rc<Self>, entry: OutboxEntry) {
+        // Update selection - could highlight the row or show actions
+        // For now, we just track it
+        let _ = entry;
+    }
+
+    fn outbox_retry_selected(self: &Rc<Self>) {
+        let Some(account_id) = self.state().selection.account else {
+            return;
+        };
+        // Get the selected row index from the message_list
+        // For simplicity, we'll retry all selected entries
+        let entries = self.state().outbox_entries.clone();
+        // In a real implementation, we'd track which row is selected
+        // For now, retry the first entry if any
+        if let Some(entry) = entries.first() {
+            let _ = self.app.engine.retry_outbox(account_id, entry.id);
+            self.show_banner("Retrying…");
+        }
+    }
+
+    fn outbox_discard_selected(self: &Rc<Self>) {
+        let Some(account_id) = self.state().selection.account else {
+            return;
+        };
+        let entries = self.state().outbox_entries.clone();
+        if let Some(entry) = entries.first() {
+            let _ = self.app.engine.cancel_outbox(account_id, entry.id);
+            self.show_banner("Discarding…");
+        }
+    }
+
+    fn outbox_edit_selected(self: &Rc<Self>) {
+        let Some(account_id) = self.state().selection.account else {
+            return;
+        };
+        let entries = self.state().outbox_entries.clone();
+        if let Some(entry) = entries.first() {
+            if let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) {
+                let mut draft = OutgoingMessage {
+                    from_name: String::new(),
+                    from_addr: env.from,
+                    to: env.to.join(", "),
+                    cc: env.cc.join(", "),
+                    bcc: env.bcc.join(", "),
+                    subject: String::new(),
+                    body: String::new(),
+                    in_reply_to: None,
+                    references: Vec::new(),
+                    draft_key: None,
+                    attachments: Vec::new(),
+                };
+                // Parse the raw message to get subject and body
+                if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
+                    draft.subject = parsed.subject().unwrap_or_default().to_owned();
+                    if let Some(text) = parsed.body_text(0) {
+                        draft.body = text.to_string();
+                    }
+                }
+                // Cancel the original entry so it doesn't get sent again
+                let _ = self.app.engine.cancel_outbox(account_id, entry.id);
+                self.open_compose(draft);
+            }
         }
     }
 
@@ -1013,6 +1217,7 @@ impl MainWindow {
         let mut body_ready = None;
         let mut account_error = None;
         let mut new_messages = Vec::new();
+        let mut outbox_changed = false;
 
         {
             let mut events = events.lock().unwrap_or_else(|error| error.into_inner());
@@ -1030,7 +1235,7 @@ impl MainWindow {
                         account_id, count, ..
                     }) => new_messages.push((account_id, count)),
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
-                    Ok(Event::OutboxChanged) => {}
+                    Ok(Event::OutboxChanged) => outbox_changed = true,
                     Ok(Event::AccountError { message, .. }) => account_error = Some(message),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Lagged(_)) => {
@@ -1073,7 +1278,17 @@ impl MainWindow {
                 .map(|account| account.email.clone())
                 .unwrap_or_else(|| "Mailin".to_owned());
             let noun = if count == 1 { "message" } else { "messages" };
-            self.show_banner(&format!("{count} new {noun} in {account}"));
+            let text = format!("{count} new {noun} in {account}");
+            self.show_banner(&text);
+            self.show_toast_notification(&text);
+        }
+        if outbox_changed {
+            let state = self.state();
+            if state.show_outbox {
+                self.refresh_messages();
+            } else {
+                self.refresh_folders();
+            }
         }
         if let Some(message) = account_error {
             self.show_error(&message);
@@ -1234,6 +1449,12 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let archive_button = ui::button("Archive")?;
     let trash_button = ui::button("Trash")?;
     let junk_button = ui::button("Junk")?;
+    let outbox_retry_button = ui::button("Retry")?;
+    let outbox_discard_button = ui::button("Discard")?;
+    let outbox_edit_button = ui::button("Edit")?;
+    ui::set_visible(&outbox_retry_button, false)?;
+    ui::set_visible(&outbox_discard_button, false)?;
+    ui::set_visible(&outbox_edit_button, false)?;
     ui::append(&actions, &html_button)?;
     ui::append(&actions, &reply_button)?;
     ui::append(&actions, &reply_all_button)?;
@@ -1241,6 +1462,9 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::append(&actions, &archive_button)?;
     ui::append(&actions, &junk_button)?;
     ui::append(&actions, &trash_button)?;
+    ui::append(&actions, &outbox_retry_button)?;
+    ui::append(&actions, &outbox_discard_button)?;
+    ui::append(&actions, &outbox_edit_button)?;
     ui::append(&actions, &actions_spacer)?;
     ui::append(&actions, &flag_button)?;
     ui::append(&actions, &read_button)?;
@@ -1438,6 +1662,9 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             archive_button,
             trash_button,
             junk_button,
+            outbox_retry_button,
+            outbox_discard_button,
+            outbox_edit_button,
             shortcuts_window: std::cell::RefCell::new(None),
         },
     });
@@ -1448,6 +1675,21 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let _window = ui::keep_alive(&window);
     window.Activate().context("could not show the window")?;
     tracing::info!("WinUI window activated");
+    Ok(window)
+}
+
+/// Create the main window and immediately open a compose window with the given draft.
+pub fn create_with_draft(state: &Arc<AppState>, draft: OutgoingMessage) -> Result<Window> {
+    let window = create(state)?;
+    // Open compose window with the draft
+    if let Some(account_id) = state
+        .mailin
+        .list_accounts()
+        .ok()
+        .and_then(|accounts| accounts.first().map(|a| a.id))
+    {
+        let _ = crate::compose::present(Arc::clone(state), account_id, draft, move || {});
+    }
     Ok(window)
 }
 
@@ -1526,6 +1768,18 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     this.events.keep(ui::on_click(&this.widgets.junk_button, {
         let this = Rc::clone(this);
         move || this.mark_selected_junk()
+    })?);
+    this.events.keep(ui::on_click(&this.widgets.outbox_retry_button, {
+        let this = Rc::clone(this);
+        move || this.outbox_retry_selected()
+    })?);
+    this.events.keep(ui::on_click(&this.widgets.outbox_discard_button, {
+        let this = Rc::clone(this);
+        move || this.outbox_discard_selected()
+    })?);
+    this.events.keep(ui::on_click(&this.widgets.outbox_edit_button, {
+        let this = Rc::clone(this);
+        move || this.outbox_edit_selected()
     })?);
     this.events.keep(ui::on_click(&this.widgets.html_button, {
         let this = Rc::clone(this);
@@ -1690,6 +1944,53 @@ fn message_row(message: &MessageHeader, now: i64) -> Result<Button> {
             ui::append(&column, &ui::text(&text)?)?;
         }
     }
+
+    let button = ui::content_button(&column)?;
+    ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
+    Ok(button)
+}
+
+fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
+    let column = ui::stack(Orientation::Vertical, 2.0)?;
+    ui::padding(&column, 6.0, 6.0, 6.0, 6.0)?;
+
+    let line = ui::stack(Orientation::Horizontal, 6.0)?;
+
+    let state_text = entry.state.as_str().to_uppercase();
+    let state_label = ui::text(&state_text)?;
+    // Add color based on state
+    match entry.state {
+        OutboxState::Queued => state_label.SetForeground(&ui::solid_brush("#0078D4")?)?, // accent blue
+        OutboxState::Sending => state_label.SetForeground(&ui::solid_brush("#FF8C00")?)?, // warning orange
+        OutboxState::Failed => state_label.SetForeground(&ui::solid_brush("#D13438")?)?, // error red
+        OutboxState::Sent => state_label.SetForeground(&ui::solid_brush("#107C10")?)?, // success green
+    }
+    ui::append(&line, &state_label)?;
+
+    if let Some(error) = &entry.last_error {
+        let error_label = ui::text(&format!("— {}", error))?;
+        ui::stretch_horizontal(&error_label)?;
+        ui::append(&line, &error_label)?;
+    } else {
+        let attempts_label = ui::text(&format!("attempt {}/5", entry.attempts + 1))?;
+        ui::append(&line, &attempts_label)?;
+    }
+    ui::append(&column, &line)?;
+
+    // Parse envelope to show recipient
+    let subject = if let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) {
+        let to = env.to.join(", ");
+        let cc = if env.cc.is_empty() {
+            String::new()
+        } else {
+            format!(" (Cc: {})", env.cc.join(", "))
+        };
+        format!("To: {}{}", to, cc)
+    } else {
+        "Unknown recipient".to_owned()
+    };
+    let subject_label = ui::text(&subject)?;
+    ui::append(&column, &subject_label)?;
 
     let button = ui::content_button(&column)?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;

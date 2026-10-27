@@ -14,7 +14,7 @@ use crate::account::{Account, AccountId};
 use crate::config::Paths;
 use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
-use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry};
+use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState};
 use crate::store::Store;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -292,6 +292,30 @@ impl Mailin {
 
     pub fn outbox_len(&self) -> Result<u32> {
         self.store.outbox_len()
+    }
+
+    pub fn list_outbox(&self, account: &AccountId) -> Result<Vec<OutboxEntry>> {
+        self.store.list_outbox(account)
+    }
+
+    pub fn retry_outbox(&self, entry_id: i64) -> Result<bool> {
+        let changed = self.store.set_outbox_state(entry_id, OutboxState::Queued, None)?;
+        if changed {
+            self.publish(Event::OutboxChanged);
+        }
+        Ok(changed)
+    }
+
+    pub fn cancel_outbox(&self, entry_id: i64) -> Result<bool> {
+        let changed = self.store.delete_outbox(entry_id)?;
+        if changed {
+            self.publish(Event::OutboxChanged);
+        }
+        Ok(changed)
+    }
+
+    pub fn outbox_entry(&self, entry_id: i64) -> Result<Option<OutboxEntry>> {
+        self.store.outbox_entry(entry_id)
     }
 }
 
