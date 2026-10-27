@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: read
+  id-token: write  # Needed for artifact attestation / OIDC signing
 
 env:
   CARGO_TERM_COLOR: always
@@ -41,6 +42,12 @@ jobs:
             packaging/flatpak/build-dir \
             mailin-${{ github.ref_name }}.flatpak \
             dev.mailin.Mailin
+
+      - name: Validate Flatpak
+        run: |
+          flatpak-builder-lint manifest packaging/flatpak/dev.mailin.Mailin.json
+          appstreamcli validate --no-net packaging/flatpak/dev.mailin.Mailin.metainfo.xml
+          desktop-file-validate packaging/flatpak/dev.mailin.Mailin.desktop
 
       - name: Upload Flatpak Artifact
         uses: actions/upload-artifact@v4
@@ -102,6 +109,28 @@ jobs:
         env:
           MAILIN_WINDOWSAPPSDK_BOOTSTRAP: ${{ env.MAILIN_WINDOWSAPPSDK_BOOTSTRAP }}
 
+      # ========================================================
+      # Code Signing (uncomment and configure for production)
+      # ========================================================
+      # - name: Sign Windows Binaries
+      #   if: env.SIGNTOOL_CERT_THUMBPRINT != ''
+      #   env:
+      #     SIGNTOOL_CERT_THUMBPRINT: ${{ secrets.SIGNTOOL_CERT_THUMBPRINT }}
+      #     SIGNTOOL_TIMESTAMP_URL: ${{ secrets.SIGNTOOL_TIMESTAMP_URL }}
+      #   run: |
+      #     $cert = "Cert:\CurrentUser\My\$env:SIGNTOOL_CERT_THUMBPRINT"
+      #     $files = Get-ChildItem target/dist/*.exe, target/dist/*.msix
+      #     foreach ($file in $files) {
+      #       signtool sign /sha1 $env:SIGNTOOL_CERT_THUMBPRINT /tr $env:SIGNTOOL_TIMESTAMP_URL /td sha256 /fd sha256 $file.FullName
+      #     }
+      # - name: Sign MSIX Package
+      #   if: env.SIGNTOOL_CERT_THUMBPRINT != ''
+      #   env:
+      #     SIGNTOOL_CERT_THUMBPRINT: ${{ secrets.SIGNTOOL_CERT_THUMBPRINT }}
+      #     SIGNTOOL_TIMESTAMP_URL: ${{ secrets.SIGNTOOL_TIMESTAMP_URL }}
+      #   run: |
+      #     signtool sign /sha1 $env:SIGNTOOL_CERT_THUMBPRINT /tr $env:SIGNTOOL_TIMESTAMP_URL /td sha256 /fd sha256 target/dist/*.msix
+
       - name: Generate SHA-256 Checksums
         run: |
           Get-ChildItem target/dist/*.zip, target/dist/*.msix, target/dist/*.exe | ForEach-Object {
@@ -129,11 +158,49 @@ jobs:
           retention-days: 30
 
   # ============================================================
+  # Artifact Attestation (Sigstore/cosign)
+  # ============================================================
+  attest:
+    name: Artifact Attestation
+    needs: [flatpak, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download Flatpak Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-flatpak
+          path: artifacts/flatpak
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-windows
+          path: artifacts/windows
+
+      - name: Generate SLSA Provenance
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+        with:
+          base64-subjects: "${{ hashFiles('artifacts/**/*') }}"
+          provenance-name: mailin-provenance.intoto.jsonl
+
+      - name: Upload Attestation
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailin-attestation
+          path: mailin-provenance.intoto.jsonl
+          retention-days: 90
+
+  # ============================================================
   # GitHub Release
   # ============================================================
   release:
     name: Create GitHub Release
-    needs: [flatpak, windows]
+    needs: [flatpak, windows, attest]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -149,8 +216,14 @@ jobs:
           name: mailin-windows
           path: artifacts/windows
 
+      - name: Download Attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-attestation
+          path: artifacts/attestation
+
       - name: List Artifacts
-        run: ls -la artifacts/flatpak/ artifacts/windows/
+        run: ls -la artifacts/flatpak/ artifacts/windows/ artifacts/attestation/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -166,5 +239,6 @@ jobs:
             artifacts/windows/mailin-*-x86_64.msix
             artifacts/windows/mailin-setup-*.exe
             artifacts/windows/SHA256SUMS
+            artifacts/attestation/mailin-provenance.intoto.jsonl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

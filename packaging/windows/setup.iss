@@ -7,6 +7,7 @@
 #define AppPublisher "Mailin Contributors"
 #define AppURL "https://github.com/mailin-app/mailin"
 #define AppExeName "mailin-winui.exe"
+#define AppIcon "Assets\Square44x44Logo.ico"
 
 [Setup]
 AppId={{1A2B3C4D-5E6F-7G8H-9I0J-KLMNOPQRSTUV}}
@@ -28,6 +29,7 @@ PrivilegesRequired=lowest
 SetupLogging=yes
 DisableDirPage=no
 DisableProgramGroupPage=yes
+SetupIconFile={#AppIcon}
 
 ; Architecture
 ArchitecturesInstallIn64BitMode=x64
