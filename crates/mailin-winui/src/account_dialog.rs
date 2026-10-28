@@ -13,6 +13,8 @@ use mailin_core::{
     ServerSettings,
 };
 use mailin_winui_sys::{ComboBox, Grid, PasswordBox, TextBlock, TextBox, Window};
+use secrecy::SecretString;
+use windows_core::Interface;
 
 use crate::app::AppState;
 use crate::ui;
@@ -90,6 +92,8 @@ impl ServerDraft {
             port,
             security: self.security,
             username: username.to_owned(),
+            auth_method: AuthMethod::Password,
+            oauth2: OAuth2Tokens::default(),
         })
     }
 }
@@ -187,10 +191,15 @@ pub fn present(
     ui::star_row(&root)?;
     ui::auto_row(&root)?;
 
+    let header = ui::stack(mailin_winui_sys::Orientation::Vertical, 2.0)?;
     let title = ui::heading(title_text, Some(24.0), Some(700))?;
     ui::margin(&title, 20.0, 16.0, 20.0, 4.0)?;
-    ui::set_row(&title, 0)?;
-    ui::append(&root, &title)?;
+    let subtitle = ui::text(subtitle_text)?;
+    ui::margin(&subtitle, 20.0, 0.0, 20.0, 8.0)?;
+    ui::append(&header, &title)?;
+    ui::append(&header, &subtitle)?;
+    ui::set_row(&header, 0)?;
+    ui::append(&root, &header)?;
 
     let form = ui::stack(mailin_winui_sys::Orientation::Vertical, 14.0)?;
     ui::margin(&form, 20.0, 8.0, 20.0, 16.0)?;
@@ -269,11 +278,7 @@ pub fn present(
 
     // Remove button for edit mode
     let remove = match mode {
-        AccountDialogMode::Edit => {
-            let btn = ui::button("Remove Account")?;
-            ui::add_css_class(&btn, "destructive-action")?;
-            Some(btn)
-        }
+        AccountDialogMode::Edit => Some(ui::destructive_button("Remove Account")?),
         AccountDialogMode::Add => None,
     };
 
@@ -330,7 +335,7 @@ pub fn present(
         ui::select_index(&smtp_security, security_index(account.smtp.security));
 
         // Disable email field in edit mode (account identity shouldn't change)
-        let _ = email.SetIsEnabled(false);
+        let _ = ui::set_enabled(&email, false);
     }
 
     revokers.keep(ui::on_selection_changed(&auth_method, {
@@ -355,13 +360,13 @@ pub fn present(
                 .lock()
                 .map(|mut slot| std::mem::replace(&mut *slot, provider))
                 .unwrap_or_default();
-            if let Ok(mut tokens) = oauth_tokens.lock() {
-                if tokens.provider != provider {
-                    tokens.access_token.clear();
-                    tokens.refresh_token.clear();
-                    tokens.expires_at = 0;
-                    tokens.provider = provider;
-                }
+            if let Ok(mut tokens) = oauth_tokens.lock()
+                && tokens.provider != provider
+            {
+                tokens.access_token.clear();
+                tokens.refresh_token.clear();
+                tokens.expires_at = 0;
+                tokens.provider = provider;
             }
             let current = ui::text_value(&oauth_client_id);
             if current.trim().is_empty() || current == previous.default_client_id() {
@@ -406,20 +411,29 @@ pub fn present(
             let oauth_tokens = Arc::clone(&oauth_tokens);
             std::thread::spawn(move || {
                 let result = pending.wait(std::time::Duration::from_secs(300));
-                let _ = window.DispatcherQueue().TryEnqueue(move || {
-                    match result {
-                        Ok(tokens) => {
+                // The dispatcher callback is `Fn`, so hand it owned copies
+                // instead of the `Result` itself.
+                let (tokens, failure) = match result {
+                    Ok(tokens) => (Some(tokens), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                let enqueue = window.DispatcherQueue().and_then(|queue| {
+                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+                        if let Some(tokens) = &tokens {
                             if let Ok(mut slot) = oauth_tokens.lock() {
-                                *slot = tokens;
+                                *slot = tokens.clone();
                             }
                             let _ = oauth_status.SetText("Signed in successfully.");
+                        } else if let Some(failure) = &failure {
+                            let _ = oauth_status.SetText(&format!("Sign-in failed: {failure}"));
                         }
-                        Err(error) => {
-                            let _ = oauth_status.SetText(&format!("Sign-in failed: {error}"));
-                        }
-                    }
-                    let _ = ui::set_visible(&oauth_status, true);
+                        let _ = ui::set_visible(&oauth_status, true);
+                    });
+                    queue.TryEnqueue(handler.to_ref())
                 });
+                if let Err(error) = enqueue {
+                    tracing::warn!(%error, "could not report the sign-in result on the UI thread");
+                }
             });
         }
     })?);
@@ -624,12 +638,12 @@ pub fn present(
             }
             // Only update password if user entered a new one. OAuth2 accounts
             // keep tokens in the account row and do not use the keyring.
-            let password_opt = if password.is_empty() || is_oauth {
+            let secret = if password.is_empty() || is_oauth {
                 None
             } else {
-                Some(password)
+                Some(SecretString::from(password))
             };
-            if let Err(failure) = app.mailin.save_account(&account, password_opt.as_ref()) {
+            if let Err(failure) = app.mailin.save_account(&account, secret.as_ref()) {
                 let _ = error.SetText(&failure.to_string());
                 let _ = ui::set_visible(&error, true);
                 return;
@@ -645,30 +659,28 @@ pub fn present(
         let window = window.clone();
         let app = Arc::clone(&app);
         let existing = existing_account_for_remove;
-        revokers.keep(ui::on_click(remove, move || {
-            if let Some(account) = &existing {
-                // Show confirmation dialog
-                let confirm_window = Window::new().unwrap();
-                confirm_window.SetTitle("Remove account?")?;
-                confirm_window
-                    .SetContent(&ui::stack(mailin_winui_sys::Orientation::Vertical, 12.0)?)?;
-
-                // We'll use a simple ContentDialog-like approach with a window
-                // For simplicity, just confirm and remove
-                let mailin = app.mailin.clone();
-                let account_id = account.id;
-                let window = window.clone();
-
-                // For now, just remove without confirmation dialog (can be improved later)
-                std::thread::spawn(move || {
-                    let _ = mailin.remove_account(&account_id);
-                    app.engine.sync_account(account_id);
-                    // Close both windows on UI thread
-                    let _ = window.DispatcherQueue().TryEnqueue(move || {
+        revokers.keep(ui::on_click(&remove, move || {
+            let Some(account) = &existing else { return };
+            let account_id = account.id;
+            let mailin = Arc::clone(&app.mailin);
+            let window = window.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = mailin.remove_account(&account_id) {
+                    tracing::warn!(%error, "could not remove the account");
+                    return;
+                }
+                // The store tells the main window to refresh; close the
+                // wizard on the UI thread.
+                let closed = window.DispatcherQueue().and_then(|queue| {
+                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
                         let _ = window.Close();
                     });
+                    queue.TryEnqueue(handler.to_ref())
                 });
-            }
+                if let Err(error) = closed {
+                    tracing::warn!(%error, "could not close the account wizard");
+                }
+            });
         })?);
     }
 

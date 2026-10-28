@@ -92,7 +92,10 @@ fn greenmail_speaks_imap_starttls() {
             break;
         }
     }
-    assert!(response.starts_with("a1 OK"), "STARTTLS failed: {response:?}");
+    assert!(
+        response.starts_with("a1 OK"),
+        "STARTTLS failed: {response:?}"
+    );
 
     // Note: In a real test, we'd upgrade to TLS here using native-tls or rustls.
     // For this smoke test, we just verify the server accepts STARTTLS.
@@ -137,8 +140,10 @@ fn greenmail_speaks_smtp_starttls() {
 #[test]
 #[ignore = "requires GreenMail with STARTTLS: cargo xtask it-up-starttls"]
 fn sync_send_and_fetch_body_round_trip_starttls() {
-    let (imap_host, imap_port) = host_and_port(&addr("MAILIN_IT_IMAP_STARTTLS_ADDR", "127.0.0.1:3143"));
-    let (smtp_host, smtp_port) = host_and_port(&addr("MAILIN_IT_SMTP_STARTTLS_ADDR", "127.0.0.1:3025"));
+    let (imap_host, imap_port) =
+        host_and_port(&addr("MAILIN_IT_IMAP_STARTTLS_ADDR", "127.0.0.1:3143"));
+    let (smtp_host, smtp_port) =
+        host_and_port(&addr("MAILIN_IT_SMTP_STARTTLS_ADDR", "127.0.0.1:3025"));
 
     let (store, mailin) = client();
     let account = Account::new(

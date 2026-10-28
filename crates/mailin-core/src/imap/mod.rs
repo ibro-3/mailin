@@ -415,20 +415,39 @@ impl ImapSession {
 
     /// Add and remove flags on the server. Both lists may be empty.
     pub async fn store_flags(&mut self, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        self.store_flags_many(&[uid], add, remove).await
+    }
+
+    /// Add and remove flags for many messages with at most two `UID STORE`
+    /// commands instead of one round-trip per message.
+    pub async fn store_flags_many(
+        &mut self,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
         if !add.is_empty() {
-            self.store_flags_command(uid, "+", add).await?;
+            self.store_flags_command(uids, "+", add).await?;
         }
         if !remove.is_empty() {
-            self.store_flags_command(uid, "-", remove).await?;
+            self.store_flags_command(uids, "-", remove).await?;
         }
         Ok(())
     }
 
-    async fn store_flags_command(&mut self, uid: u32, mode: &str, flags: &[String]) -> Result<()> {
+    async fn store_flags_command(
+        &mut self,
+        uids: &[u32],
+        mode: &str,
+        flags: &[String],
+    ) -> Result<()> {
         let query = format!("{mode}FLAGS.SILENT ({})", flags.join(" "));
         let mut stream = self
             .inner
-            .uid_store(uid.to_string(), &query)
+            .uid_store(uid_set(uids), &query)
             .await
             .map_err(|e| Error::Imap(format!("UID STORE failed: {e}")))?;
         while stream
@@ -469,10 +488,8 @@ impl ImapSession {
         if uids.is_empty() {
             return Ok(());
         }
-        for uid in uids {
-            self.store_flags_command(*uid, "+", &["\\Deleted".to_owned()])
-                .await?;
-        }
+        self.store_flags_command(uids, "+", &["\\Deleted".to_owned()])
+            .await?;
         if self.supports_uidplus {
             let mut stream = Box::pin(
                 self.inner

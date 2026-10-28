@@ -1594,8 +1594,11 @@ name = "mailin-winui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mail-parser",
  "mailin-core",
  "mailin-winui-sys",
+ "secrecy",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -299,7 +299,9 @@ impl Mailin {
     }
 
     pub fn retry_outbox(&self, entry_id: i64) -> Result<bool> {
-        let changed = self.store.set_outbox_state(entry_id, OutboxState::Queued, None)?;
+        let changed = self
+            .store
+            .set_outbox_state(entry_id, OutboxState::Queued, None)?;
         if changed {
             self.publish(Event::OutboxChanged);
         }

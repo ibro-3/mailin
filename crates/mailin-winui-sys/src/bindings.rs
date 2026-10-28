@@ -1430,6 +1430,462 @@ unsafe impl Send for ContentControl {}
 unsafe impl Sync for ContentControl {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialog(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialog,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(
+    ContentDialog,
+    ContentControl,
+    Control,
+    FrameworkElement,
+    UIElement,
+    DependencyObject
+);
+impl ContentDialog {
+    pub fn new() -> windows_core::Result<Self> {
+        Self::IContentDialogFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn TitleProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).TitleProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn TitleTemplateProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).TitleTemplateProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn FullSizeDesiredProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).FullSizeDesiredProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn PrimaryButtonTextProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).PrimaryButtonTextProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn SecondaryButtonTextProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).SecondaryButtonTextProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn CloseButtonTextProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CloseButtonTextProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn PrimaryButtonCommandProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).PrimaryButtonCommandProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn SecondaryButtonCommandProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).SecondaryButtonCommandProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn CloseButtonCommandProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CloseButtonCommandProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn PrimaryButtonCommandParameterProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).PrimaryButtonCommandParameterProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn SecondaryButtonCommandParameterProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).SecondaryButtonCommandParameterProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn CloseButtonCommandParameterProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CloseButtonCommandParameterProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn IsPrimaryButtonEnabledProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsPrimaryButtonEnabledProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn IsSecondaryButtonEnabledProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsSecondaryButtonEnabledProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn PrimaryButtonStyleProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).PrimaryButtonStyleProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn SecondaryButtonStyleProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).SecondaryButtonStyleProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn CloseButtonStyleProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CloseButtonStyleProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn DefaultButtonProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IContentDialogStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).DefaultButtonProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn IContentDialogFactory<R, F: FnOnce(&IContentDialogFactory) -> windows_core::Result<R>>(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<ContentDialog, IContentDialogFactory> =
+            windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+    fn IContentDialogStatics<R, F: FnOnce(&IContentDialogStatics) -> windows_core::Result<R>>(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<ContentDialog, IContentDialogStatics> =
+            windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for ContentDialog {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialog>();
+}
+unsafe impl windows_core::Interface for ContentDialog {
+    type Vtable = <IContentDialog as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IContentDialog as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialog {
+    type Target = IContentDialog;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialog {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialog";
+}
+unsafe impl Send for ContentDialog {}
+unsafe impl Sync for ContentDialog {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContentDialogButton(pub i32);
+impl ContentDialogButton {
+    pub const None: Self = Self(0);
+    pub const Primary: Self = Self(1);
+    pub const Secondary: Self = Self(2);
+    pub const Close: Self = Self(3);
+}
+impl windows_core::imp::TypeKind for ContentDialogButton {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for ContentDialogButton {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Microsoft.UI.Xaml.Controls.ContentDialogButton;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialogButtonClickDeferral(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialogButtonClickDeferral,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ContentDialogButtonClickDeferral {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialogButtonClickDeferral>();
+}
+unsafe impl windows_core::Interface for ContentDialogButtonClickDeferral {
+    type Vtable = <IContentDialogButtonClickDeferral as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IContentDialogButtonClickDeferral as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialogButtonClickDeferral {
+    type Target = IContentDialogButtonClickDeferral;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialogButtonClickDeferral {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialogButtonClickDeferral";
+}
+unsafe impl Send for ContentDialogButtonClickDeferral {}
+unsafe impl Sync for ContentDialogButtonClickDeferral {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialogButtonClickEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialogButtonClickEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ContentDialogButtonClickEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialogButtonClickEventArgs>();
+}
+unsafe impl windows_core::Interface for ContentDialogButtonClickEventArgs {
+    type Vtable = <IContentDialogButtonClickEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IContentDialogButtonClickEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialogButtonClickEventArgs {
+    type Target = IContentDialogButtonClickEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialogButtonClickEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialogButtonClickEventArgs";
+}
+unsafe impl Send for ContentDialogButtonClickEventArgs {}
+unsafe impl Sync for ContentDialogButtonClickEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialogClosedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialogClosedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ContentDialogClosedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialogClosedEventArgs>();
+}
+unsafe impl windows_core::Interface for ContentDialogClosedEventArgs {
+    type Vtable = <IContentDialogClosedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IContentDialogClosedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialogClosedEventArgs {
+    type Target = IContentDialogClosedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialogClosedEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialogClosedEventArgs";
+}
+unsafe impl Send for ContentDialogClosedEventArgs {}
+unsafe impl Sync for ContentDialogClosedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialogClosingDeferral(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialogClosingDeferral,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ContentDialogClosingDeferral {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialogClosingDeferral>();
+}
+unsafe impl windows_core::Interface for ContentDialogClosingDeferral {
+    type Vtable = <IContentDialogClosingDeferral as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IContentDialogClosingDeferral as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialogClosingDeferral {
+    type Target = IContentDialogClosingDeferral;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialogClosingDeferral {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialogClosingDeferral";
+}
+unsafe impl Send for ContentDialogClosingDeferral {}
+unsafe impl Sync for ContentDialogClosingDeferral {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialogClosingEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialogClosingEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ContentDialogClosingEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialogClosingEventArgs>();
+}
+unsafe impl windows_core::Interface for ContentDialogClosingEventArgs {
+    type Vtable = <IContentDialogClosingEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IContentDialogClosingEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialogClosingEventArgs {
+    type Target = IContentDialogClosingEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialogClosingEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialogClosingEventArgs";
+}
+unsafe impl Send for ContentDialogClosingEventArgs {}
+unsafe impl Sync for ContentDialogClosingEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentDialogOpenedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ContentDialogOpenedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for ContentDialogOpenedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IContentDialogOpenedEventArgs>();
+}
+unsafe impl windows_core::Interface for ContentDialogOpenedEventArgs {
+    type Vtable = <IContentDialogOpenedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IContentDialogOpenedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ContentDialogOpenedEventArgs {
+    type Target = IContentDialogOpenedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ContentDialogOpenedEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ContentDialogOpenedEventArgs";
+}
+unsafe impl Send for ContentDialogOpenedEventArgs {}
+unsafe impl Sync for ContentDialogOpenedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContentDialogPlacement(pub i32);
+impl ContentDialogPlacement {
+    pub const Popup: Self = Self(0);
+    pub const InPlace: Self = Self(1);
+}
+impl windows_core::imp::TypeKind for ContentDialogPlacement {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for ContentDialogPlacement {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Microsoft.UI.Xaml.Controls.ContentDialogPlacement;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ContentDialogResult(pub i32);
+impl ContentDialogResult {
+    pub const None: Self = Self(0);
+    pub const Primary: Self = Self(1);
+    pub const Secondary: Self = Self(2);
+}
+impl windows_core::imp::TypeKind for ContentDialogResult {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for ContentDialogResult {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Microsoft.UI.Xaml.Controls.ContentDialogResult;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextMenuEventArgs(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
     ContextMenuEventArgs,
@@ -5944,6 +6400,1092 @@ pub struct IContentControl_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IContentDialog,
+    IContentDialog_Vtbl,
+    0xac2145a3_4a32_5305_a81d_47509515bfce
+);
+impl windows_core::RuntimeType for IContentDialog {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IContentDialog {
+    pub fn Title(&self) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Title)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetTitle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetTitle)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn TitleTemplate(&self) -> windows_core::Result<DataTemplate> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).TitleTemplate)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetTitleTemplate<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DataTemplate>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetTitleTemplate)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn FullSizeDesired(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).FullSizeDesired)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetFullSizeDesired(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetFullSizeDesired)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn PrimaryButtonText(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).PrimaryButtonText)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn SetPrimaryButtonText(&self, value: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetPrimaryButtonText)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(value)),
+            )
+            .ok()
+        }
+    }
+    pub fn SecondaryButtonText(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).SecondaryButtonText)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn SetSecondaryButtonText(&self, value: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetSecondaryButtonText)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(value)),
+            )
+            .ok()
+        }
+    }
+    pub fn CloseButtonText(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CloseButtonText)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn SetCloseButtonText(&self, value: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCloseButtonText)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(value)),
+            )
+            .ok()
+        }
+    }
+    pub fn PrimaryButtonCommand(&self) -> windows_core::Result<ICommand> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).PrimaryButtonCommand)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetPrimaryButtonCommand<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ICommand>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetPrimaryButtonCommand)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn SecondaryButtonCommand(&self) -> windows_core::Result<ICommand> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).SecondaryButtonCommand)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetSecondaryButtonCommand<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ICommand>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetSecondaryButtonCommand)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn CloseButtonCommand(&self) -> windows_core::Result<ICommand> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CloseButtonCommand)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetCloseButtonCommand<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<ICommand>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCloseButtonCommand)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn PrimaryButtonCommandParameter(
+        &self,
+    ) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).PrimaryButtonCommandParameter)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetPrimaryButtonCommandParameter<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetPrimaryButtonCommandParameter)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn SecondaryButtonCommandParameter(
+        &self,
+    ) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).SecondaryButtonCommandParameter)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetSecondaryButtonCommandParameter<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetSecondaryButtonCommandParameter)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn CloseButtonCommandParameter(&self) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CloseButtonCommandParameter)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetCloseButtonCommandParameter<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCloseButtonCommandParameter)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn IsPrimaryButtonEnabled(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsPrimaryButtonEnabled)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetIsPrimaryButtonEnabled(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIsPrimaryButtonEnabled)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn IsSecondaryButtonEnabled(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsSecondaryButtonEnabled)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetIsSecondaryButtonEnabled(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIsSecondaryButtonEnabled)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn PrimaryButtonStyle(&self) -> windows_core::Result<Style> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).PrimaryButtonStyle)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetPrimaryButtonStyle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<Style>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetPrimaryButtonStyle)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn SecondaryButtonStyle(&self) -> windows_core::Result<Style> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).SecondaryButtonStyle)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetSecondaryButtonStyle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<Style>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetSecondaryButtonStyle)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn CloseButtonStyle(&self) -> windows_core::Result<Style> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CloseButtonStyle)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetCloseButtonStyle<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<Style>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCloseButtonStyle)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn DefaultButton(&self) -> windows_core::Result<ContentDialogButton> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).DefaultButton)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetDefaultButton(&self, value: ContentDialogButton) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetDefaultButton)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn Closing<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<ContentDialog>, windows_core::Ref<ContentDialogClosingEventArgs>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<ContentDialog, ContentDialogClosingEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<ContentDialog, ContentDialogClosingEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<ContentDialog, ContentDialogClosingEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Closing)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveClosing,
+            ))
+        }
+    }
+    pub fn Closed<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<ContentDialog>, windows_core::Ref<ContentDialogClosedEventArgs>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<ContentDialog, ContentDialogClosedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<ContentDialog, ContentDialogClosedEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<ContentDialog, ContentDialogClosedEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Closed)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveClosed,
+            ))
+        }
+    }
+    pub fn Opened<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<ContentDialog>, windows_core::Ref<ContentDialogOpenedEventArgs>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<ContentDialog, ContentDialogOpenedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<ContentDialog, ContentDialogOpenedEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<ContentDialog, ContentDialogOpenedEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Opened)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveOpened,
+            ))
+        }
+    }
+    pub fn PrimaryButtonClick<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<ContentDialog>,
+                windows_core::Ref<ContentDialogButtonClickEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<ContentDialog, ContentDialogButtonClickEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < ContentDialog , ContentDialogButtonClickEventArgs > , F >::new (& TypedEventHandlerBox::< ContentDialog , ContentDialogButtonClickEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).PrimaryButtonClick)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemovePrimaryButtonClick,
+            ))
+        }
+    }
+    pub fn SecondaryButtonClick<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<ContentDialog>,
+                windows_core::Ref<ContentDialogButtonClickEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<ContentDialog, ContentDialogButtonClickEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < ContentDialog , ContentDialogButtonClickEventArgs > , F >::new (& TypedEventHandlerBox::< ContentDialog , ContentDialogButtonClickEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).SecondaryButtonClick)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveSecondaryButtonClick,
+            ))
+        }
+    }
+    pub fn CloseButtonClick<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<ContentDialog>,
+                windows_core::Ref<ContentDialogButtonClickEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<ContentDialog, ContentDialogButtonClickEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < ContentDialog , ContentDialogButtonClickEventArgs > , F >::new (& TypedEventHandlerBox::< ContentDialog , ContentDialogButtonClickEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).CloseButtonClick)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveCloseButtonClick,
+            ))
+        }
+    }
+    pub fn Hide(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Hide)(windows_core::Interface::as_raw(self)).ok()
+        }
+    }
+    pub fn ShowAsync(
+        &self,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<ContentDialogResult>> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ShowAsync)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn ShowAsyncWithPlacement(
+        &self,
+        placement: ContentDialogPlacement,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<ContentDialogResult>> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ShowAsyncWithPlacement)(
+                windows_core::Interface::as_raw(self),
+                placement,
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IContentDialog_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Title: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetTitle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub TitleTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetTitleTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub FullSizeDesired:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetFullSizeDesired:
+        unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub PrimaryButtonText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetPrimaryButtonText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetSecondaryButtonText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetCloseButtonText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PrimaryButtonCommand: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetPrimaryButtonCommand: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonCommand: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetSecondaryButtonCommand: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonCommand: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetCloseButtonCommand: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PrimaryButtonCommandParameter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetPrimaryButtonCommandParameter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonCommandParameter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetSecondaryButtonCommandParameter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonCommandParameter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetCloseButtonCommandParameter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub IsPrimaryButtonEnabled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetIsPrimaryButtonEnabled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub IsSecondaryButtonEnabled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetIsSecondaryButtonEnabled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub PrimaryButtonStyle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetPrimaryButtonStyle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonStyle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetSecondaryButtonStyle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonStyle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetCloseButtonStyle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub DefaultButton: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut ContentDialogButton,
+    ) -> windows_core::HRESULT,
+    pub SetDefaultButton: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        ContentDialogButton,
+    ) -> windows_core::HRESULT,
+    pub Closing: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveClosing:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Closed: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveClosed:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Opened: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveOpened:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub PrimaryButtonClick: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemovePrimaryButtonClick:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub SecondaryButtonClick: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveSecondaryButtonClick:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub CloseButtonClick: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveCloseButtonClick:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Hide: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub ShowAsync: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub ShowAsyncWithPlacement: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        ContentDialogPlacement,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IContentDialogButtonClickDeferral,
+    IContentDialogButtonClickDeferral_Vtbl,
+    0xddca6d2e_a81a_5f61_8b87_e4b6ec5fa398
+);
+impl windows_core::RuntimeType for IContentDialogButtonClickDeferral {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IContentDialogButtonClickDeferral_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IContentDialogButtonClickEventArgs,
+    IContentDialogButtonClickEventArgs_Vtbl,
+    0xbae6261c_362f_5342_ba26_5f6990ef726c
+);
+impl windows_core::RuntimeType for IContentDialogButtonClickEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IContentDialogButtonClickEventArgs {
+    pub fn Cancel(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Cancel)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetCancel(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCancel)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn GetDeferral(&self) -> windows_core::Result<ContentDialogButtonClickDeferral> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetDeferral)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IContentDialogButtonClickEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Cancel:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetCancel: unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub GetDeferral: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IContentDialogClosedEventArgs,
+    IContentDialogClosedEventArgs_Vtbl,
+    0x9b84e681_1ab6_5485_88b2_d0d3c05b29f3
+);
+impl windows_core::RuntimeType for IContentDialogClosedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IContentDialogClosedEventArgs {
+    pub fn Result(&self) -> windows_core::Result<ContentDialogResult> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Result)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+}
+#[repr(C)]
+pub struct IContentDialogClosedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Result: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut ContentDialogResult,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IContentDialogClosingDeferral,
+    IContentDialogClosingDeferral_Vtbl,
+    0x9d74ecc1_67d3_5f02_9b30_56f3b2e8b0a6
+);
+impl windows_core::RuntimeType for IContentDialogClosingDeferral {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IContentDialogClosingDeferral_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IContentDialogClosingEventArgs,
+    IContentDialogClosingEventArgs_Vtbl,
+    0x12782103_3b80_511c_9128_12cb8cdac444
+);
+impl windows_core::RuntimeType for IContentDialogClosingEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IContentDialogClosingEventArgs {
+    pub fn Result(&self) -> windows_core::Result<ContentDialogResult> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Result)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Cancel(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Cancel)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetCancel(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCancel)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn GetDeferral(&self) -> windows_core::Result<ContentDialogClosingDeferral> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetDeferral)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IContentDialogClosingEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Result: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut ContentDialogResult,
+    ) -> windows_core::HRESULT,
+    pub Cancel:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetCancel: unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub GetDeferral: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IContentDialogFactory,
+    IContentDialogFactory_Vtbl,
+    0xa05b3ad7_c60e_545a_9ee4_f098220ed816
+);
+impl windows_core::RuntimeType for IContentDialogFactory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IContentDialogFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateInstance: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IContentDialogOpenedEventArgs,
+    IContentDialogOpenedEventArgs_Vtbl,
+    0xd1355ed8_64ed_5bbc_9411_5f4dbca7d93f
+);
+impl windows_core::RuntimeType for IContentDialogOpenedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IContentDialogOpenedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IContentDialogStatics,
+    IContentDialogStatics_Vtbl,
+    0x397b18dd_6964_5056_97c3_d69cd7716a4b
+);
+impl windows_core::RuntimeType for IContentDialogStatics {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IContentDialogStatics_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub TitleProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub TitleTemplateProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub FullSizeDesiredProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PrimaryButtonTextProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonTextProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonTextProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PrimaryButtonCommandProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonCommandProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonCommandProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PrimaryButtonCommandParameterProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    )
+        -> windows_core::HRESULT,
+    pub SecondaryButtonCommandParameterProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    )
+        -> windows_core::HRESULT,
+    pub CloseButtonCommandParameterProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    )
+        -> windows_core::HRESULT,
+    pub IsPrimaryButtonEnabledProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub IsSecondaryButtonEnabledProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PrimaryButtonStyleProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SecondaryButtonStyleProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CloseButtonStyleProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub DefaultButtonProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IContextMenuEventArgs,
     IContextMenuEventArgs_Vtbl,
     0x65637bb3_e279_5507_bd16_6f7ba6705f31
@@ -9842,8 +11384,189 @@ impl windows_core::RuntimeType for IKeyboardAccelerator {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
+impl IKeyboardAccelerator {
+    pub fn Key(&self) -> windows_core::Result<VirtualKey> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Key)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetKey(&self, value: VirtualKey) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetKey)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn Modifiers(&self) -> windows_core::Result<VirtualKeyModifiers> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Modifiers)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetModifiers(&self, value: VirtualKeyModifiers) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetModifiers)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn IsEnabled(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsEnabled)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetIsEnabled(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIsEnabled)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn ScopeOwner(&self) -> windows_core::Result<DependencyObject> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ScopeOwner)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetScopeOwner<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DependencyObject>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetScopeOwner)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn Invoked<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<KeyboardAccelerator>,
+                windows_core::Ref<KeyboardAcceleratorInvokedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<KeyboardAccelerator, KeyboardAcceleratorInvokedEventArgs> = {
+            let com =
+                windows_core::imp::DelegateBox::<
+                    TypedEventHandler<KeyboardAccelerator, KeyboardAcceleratorInvokedEventArgs>,
+                    F,
+                >::new(
+                    &TypedEventHandlerBox::<
+                        KeyboardAccelerator,
+                        KeyboardAcceleratorInvokedEventArgs,
+                        F,
+                    >::VTABLE,
+                    handler,
+                );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Invoked)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveInvoked,
+            ))
+        }
+    }
+}
 #[repr(C)]
 pub struct IKeyboardAccelerator_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Key:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut VirtualKey) -> windows_core::HRESULT,
+    pub SetKey:
+        unsafe extern "system" fn(*mut core::ffi::c_void, VirtualKey) -> windows_core::HRESULT,
+    pub Modifiers: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut VirtualKeyModifiers,
+    ) -> windows_core::HRESULT,
+    pub SetModifiers: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        VirtualKeyModifiers,
+    ) -> windows_core::HRESULT,
+    pub IsEnabled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetIsEnabled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub ScopeOwner: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetScopeOwner: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Invoked: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveInvoked:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IKeyboardAcceleratorFactory,
+    IKeyboardAcceleratorFactory_Vtbl,
+    0xca1d410a_af2a_51b9_a1de_6c0af9f3b598
+);
+impl windows_core::RuntimeType for IKeyboardAcceleratorFactory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IKeyboardAcceleratorFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateInstance: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IKeyboardAcceleratorInvokedEventArgs,
+    IKeyboardAcceleratorInvokedEventArgs_Vtbl,
+    0x62c9fdb0_b574_527d_97eb_5c7f674441e0
+);
+impl windows_core::RuntimeType for IKeyboardAcceleratorInvokedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IKeyboardAcceleratorInvokedEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -13029,6 +14752,24 @@ impl windows_core::RuntimeType for ISolidColorBrush {
 #[repr(C)]
 pub struct ISolidColorBrush_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    ISolidColorBrushFactory,
+    ISolidColorBrushFactory_Vtbl,
+    0x7b559384_4daa_54f4_91ef_33a23fd816ca
+);
+impl windows_core::RuntimeType for ISolidColorBrushFactory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ISolidColorBrushFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateInstanceWithColor: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        Color,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IStackPanel,
@@ -16669,8 +18410,446 @@ impl windows_core::RuntimeType for IToggleButton {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
+impl IToggleButton {
+    pub fn IsChecked(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsChecked)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+            .and_then(|r__: windows_reference::IReference<bool>| r__.Value())
+        }
+    }
+    pub fn SetIsChecked(&self, value: Option<bool>) -> windows_core::Result<()> {
+        let value__ = value.map(<windows_reference::IReference<bool> as From<_>>::from);
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIsChecked)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Param::param(value__.as_ref()).abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn Checked<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<windows_core::IInspectable>, windows_core::Ref<RoutedEventArgs>)
+            + 'static,
+    {
+        let handler: RoutedEventHandler = {
+            let com = windows_core::imp::DelegateBox::<RoutedEventHandler, F>::new(
+                &RoutedEventHandlerBox::<F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Checked)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveChecked,
+            ))
+        }
+    }
+    pub fn Unchecked<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<windows_core::IInspectable>, windows_core::Ref<RoutedEventArgs>)
+            + 'static,
+    {
+        let handler: RoutedEventHandler = {
+            let com = windows_core::imp::DelegateBox::<RoutedEventHandler, F>::new(
+                &RoutedEventHandlerBox::<F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Unchecked)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveUnchecked,
+            ))
+        }
+    }
+}
 #[repr(C)]
 pub struct IToggleButton_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub IsChecked: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetIsChecked: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    IsThreeState: usize,
+    SetIsThreeState: usize,
+    pub Checked: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveChecked:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Unchecked: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveUnchecked:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToggleButtonFactory,
+    IToggleButtonFactory_Vtbl,
+    0x519511bb_d35b_5e2d_966c_8369405a4408
+);
+impl windows_core::RuntimeType for IToggleButtonFactory {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToggleButtonFactory_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub CreateInstance: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToggleSwitch,
+    IToggleSwitch_Vtbl,
+    0x1b17eeb1_74bf_5a83_8161_a86f0fdcdf24
+);
+impl windows_core::RuntimeType for IToggleSwitch {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IToggleSwitch {
+    pub fn IsOn(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsOn)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetIsOn(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIsOn)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn Header(&self) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Header)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetHeader<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetHeader)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn HeaderTemplate(&self) -> windows_core::Result<DataTemplate> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).HeaderTemplate)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetHeaderTemplate<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DataTemplate>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetHeaderTemplate)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn OnContent(&self) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).OnContent)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetOnContent<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetOnContent)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn OnContentTemplate(&self) -> windows_core::Result<DataTemplate> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).OnContentTemplate)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetOnContentTemplate<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DataTemplate>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetOnContentTemplate)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn OffContent(&self) -> windows_core::Result<windows_core::IInspectable> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).OffContent)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetOffContent<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetOffContent)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn OffContentTemplate(&self) -> windows_core::Result<DataTemplate> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).OffContentTemplate)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetOffContentTemplate<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<DataTemplate>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetOffContentTemplate)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn TemplateSettings(&self) -> windows_core::Result<ToggleSwitchTemplateSettings> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).TemplateSettings)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Toggled<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<windows_core::IInspectable>, windows_core::Ref<RoutedEventArgs>)
+            + 'static,
+    {
+        let handler: RoutedEventHandler = {
+            let com = windows_core::imp::DelegateBox::<RoutedEventHandler, F>::new(
+                &RoutedEventHandlerBox::<F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Toggled)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveToggled,
+            ))
+        }
+    }
+}
+#[repr(C)]
+pub struct IToggleSwitch_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub IsOn: unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetIsOn: unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub Header: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetHeader: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub HeaderTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetHeaderTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OnContent: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetOnContent: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OnContentTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetOnContentTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OffContent: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetOffContent: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OffContentTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetOffContentTemplate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub TemplateSettings: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Toggled: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveToggled:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToggleSwitchStatics,
+    IToggleSwitchStatics_Vtbl,
+    0xc9c203d6_0619_504d_9ed8_5054fe3ca51e
+);
+impl windows_core::RuntimeType for IToggleSwitchStatics {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToggleSwitchStatics_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub IsOnProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub HeaderProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub HeaderTemplateProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OnContentProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OnContentTemplateProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OffContentProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OffContentTemplateProperty: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IToggleSwitchTemplateSettings,
+    IToggleSwitchTemplateSettings_Vtbl,
+    0x8f9640a3_aa4e_52da_a2c6_9167c800baba
+);
+impl windows_core::RuntimeType for IToggleSwitchTemplateSettings {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IToggleSwitchTemplateSettings_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -21925,9 +24104,39 @@ impl windows_core::RuntimeType for IXmlNodeList {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
+impl IXmlNodeList {
+    pub fn Length(&self) -> windows_core::Result<u32> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Length)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Item(&self, index: u32) -> windows_core::Result<IXmlNode> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Item)(
+                windows_core::Interface::as_raw(self),
+                index,
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
 #[repr(C)]
 pub struct IXmlNodeList_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
+    pub Length:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut u32) -> windows_core::HRESULT,
+    pub Item: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        u32,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IXmlNodeSelector,
@@ -21961,9 +24170,42 @@ windows_core::imp::interface_hierarchy!(
     windows_core::IUnknown,
     windows_core::IInspectable
 );
+impl IXmlNodeSerializer {
+    pub fn InnerText(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).InnerText)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn SetInnerText(&self, value: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetInnerText)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(value)),
+            )
+            .ok()
+        }
+    }
+}
 #[repr(C)]
 pub struct IXmlNodeSerializer_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
+    GetXml: usize,
+    pub InnerText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetInnerText: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IXmlProcessingInstruction,
@@ -22362,6 +24604,32 @@ windows_core::imp::interface_hierarchy!(
     windows_core::IInspectable
 );
 windows_core::imp::required_hierarchy!(KeyboardAccelerator, DependencyObject);
+impl KeyboardAccelerator {
+    pub fn new() -> windows_core::Result<Self> {
+        Self::IKeyboardAcceleratorFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn IKeyboardAcceleratorFactory<
+        R,
+        F: FnOnce(&IKeyboardAcceleratorFactory) -> windows_core::Result<R>,
+    >(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<
+            KeyboardAccelerator,
+            IKeyboardAcceleratorFactory,
+        > = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
 impl windows_core::RuntimeType for KeyboardAccelerator {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_class::<Self, IKeyboardAccelerator>();
@@ -22381,6 +24649,34 @@ impl windows_core::RuntimeName for KeyboardAccelerator {
 }
 unsafe impl Send for KeyboardAccelerator {}
 unsafe impl Sync for KeyboardAccelerator {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyboardAcceleratorInvokedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    KeyboardAcceleratorInvokedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for KeyboardAcceleratorInvokedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IKeyboardAcceleratorInvokedEventArgs>();
+}
+unsafe impl windows_core::Interface for KeyboardAcceleratorInvokedEventArgs {
+    type Vtable = <IKeyboardAcceleratorInvokedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <IKeyboardAcceleratorInvokedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for KeyboardAcceleratorInvokedEventArgs {
+    type Target = IKeyboardAcceleratorInvokedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for KeyboardAcceleratorInvokedEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs";
+}
+unsafe impl Send for KeyboardAcceleratorInvokedEventArgs {}
+unsafe impl Sync for KeyboardAcceleratorInvokedEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct KeyboardAcceleratorPlacementMode(pub i32);
@@ -25273,6 +27569,29 @@ windows_core::imp::interface_hierarchy!(
     windows_core::IInspectable
 );
 windows_core::imp::required_hierarchy!(SolidColorBrush, Brush, DependencyObject);
+impl SolidColorBrush {
+    pub fn CreateInstanceWithColor(color: Color) -> windows_core::Result<Self> {
+        Self::ISolidColorBrushFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstanceWithColor)(
+                windows_core::Interface::as_raw(this),
+                color,
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn ISolidColorBrushFactory<
+        R,
+        F: FnOnce(&ISolidColorBrushFactory) -> windows_core::Result<R>,
+    >(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<SolidColorBrush, ISolidColorBrushFactory> =
+            windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
 impl windows_core::RuntimeType for SolidColorBrush {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_class::<Self, ISolidColorBrush>();
@@ -27058,6 +29377,27 @@ windows_core::imp::required_hierarchy!(
     UIElement,
     DependencyObject
 );
+impl ToggleButton {
+    pub fn new() -> windows_core::Result<Self> {
+        Self::IToggleButtonFactory(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).CreateInstance)(
+                windows_core::Interface::as_raw(this),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn IToggleButtonFactory<R, F: FnOnce(&IToggleButtonFactory) -> windows_core::Result<R>>(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<ToggleButton, IToggleButtonFactory> =
+            windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
 impl windows_core::RuntimeType for ToggleButton {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_class::<Self, IToggleButton>();
@@ -27077,6 +29417,162 @@ impl windows_core::RuntimeName for ToggleButton {
 }
 unsafe impl Send for ToggleButton {}
 unsafe impl Sync for ToggleButton {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToggleSwitch(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToggleSwitch,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(
+    ToggleSwitch,
+    Control,
+    FrameworkElement,
+    UIElement,
+    DependencyObject
+);
+impl ToggleSwitch {
+    pub fn new() -> windows_core::Result<Self> {
+        Self::IActivationFactory(|f| f.ActivateInstance::<Self>())
+    }
+    fn IActivationFactory<
+        R,
+        F: FnOnce(&windows_core::imp::IGenericFactory) -> windows_core::Result<R>,
+    >(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<
+            ToggleSwitch,
+            windows_core::imp::IGenericFactory,
+        > = windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+    pub fn IsOnProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsOnProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn HeaderProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).HeaderProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn HeaderTemplateProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).HeaderTemplateProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn OnContentProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).OnContentProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn OnContentTemplateProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).OnContentTemplateProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn OffContentProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).OffContentProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    pub fn OffContentTemplateProperty() -> windows_core::Result<DependencyProperty> {
+        Self::IToggleSwitchStatics(|this| unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).OffContentTemplateProperty)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        })
+    }
+    fn IToggleSwitchStatics<R, F: FnOnce(&IToggleSwitchStatics) -> windows_core::Result<R>>(
+        callback: F,
+    ) -> windows_core::Result<R> {
+        static SHARED: windows_core::imp::FactoryCache<ToggleSwitch, IToggleSwitchStatics> =
+            windows_core::imp::FactoryCache::new();
+        SHARED.call(callback)
+    }
+}
+impl windows_core::RuntimeType for ToggleSwitch {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToggleSwitch>();
+}
+unsafe impl windows_core::Interface for ToggleSwitch {
+    type Vtable = <IToggleSwitch as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToggleSwitch as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToggleSwitch {
+    type Target = IToggleSwitch;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToggleSwitch {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.ToggleSwitch";
+}
+unsafe impl Send for ToggleSwitch {}
+unsafe impl Sync for ToggleSwitch {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToggleSwitchTemplateSettings(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    ToggleSwitchTemplateSettings,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(ToggleSwitchTemplateSettings, DependencyObject);
+impl windows_core::RuntimeType for ToggleSwitchTemplateSettings {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IToggleSwitchTemplateSettings>();
+}
+unsafe impl windows_core::Interface for ToggleSwitchTemplateSettings {
+    type Vtable = <IToggleSwitchTemplateSettings as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IToggleSwitchTemplateSettings as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for ToggleSwitchTemplateSettings {
+    type Target = IToggleSwitchTemplateSettings;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for ToggleSwitchTemplateSettings {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.Primitives.ToggleSwitchTemplateSettings";
+}
+unsafe impl Send for ToggleSwitchTemplateSettings {}
+unsafe impl Sync for ToggleSwitchTemplateSettings {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Transform(windows_core::IUnknown);
@@ -27584,6 +30080,240 @@ impl windows_core::imp::TypeKind for VerticalAlignment {
 impl windows_core::RuntimeType for VerticalAlignment {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::from_slice(b"enum(Microsoft.UI.Xaml.VerticalAlignment;i4)");
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VirtualKey(pub i32);
+impl VirtualKey {
+    pub const None: Self = Self(0);
+    pub const LeftButton: Self = Self(1);
+    pub const RightButton: Self = Self(2);
+    pub const Cancel: Self = Self(3);
+    pub const MiddleButton: Self = Self(4);
+    pub const XButton1: Self = Self(5);
+    pub const XButton2: Self = Self(6);
+    pub const Back: Self = Self(8);
+    pub const Tab: Self = Self(9);
+    pub const Clear: Self = Self(12);
+    pub const Enter: Self = Self(13);
+    pub const Shift: Self = Self(16);
+    pub const Control: Self = Self(17);
+    pub const Menu: Self = Self(18);
+    pub const Pause: Self = Self(19);
+    pub const CapitalLock: Self = Self(20);
+    pub const Kana: Self = Self(21);
+    pub const Hangul: Self = Self(21);
+    pub const ImeOn: Self = Self(22);
+    pub const Junja: Self = Self(23);
+    pub const Final: Self = Self(24);
+    pub const Hanja: Self = Self(25);
+    pub const Kanji: Self = Self(25);
+    pub const ImeOff: Self = Self(26);
+    pub const Escape: Self = Self(27);
+    pub const Convert: Self = Self(28);
+    pub const NonConvert: Self = Self(29);
+    pub const Accept: Self = Self(30);
+    pub const ModeChange: Self = Self(31);
+    pub const Space: Self = Self(32);
+    pub const PageUp: Self = Self(33);
+    pub const PageDown: Self = Self(34);
+    pub const End: Self = Self(35);
+    pub const Home: Self = Self(36);
+    pub const Left: Self = Self(37);
+    pub const Up: Self = Self(38);
+    pub const Right: Self = Self(39);
+    pub const Down: Self = Self(40);
+    pub const Select: Self = Self(41);
+    pub const Print: Self = Self(42);
+    pub const Execute: Self = Self(43);
+    pub const Snapshot: Self = Self(44);
+    pub const Insert: Self = Self(45);
+    pub const Delete: Self = Self(46);
+    pub const Help: Self = Self(47);
+    pub const Number0: Self = Self(48);
+    pub const Number1: Self = Self(49);
+    pub const Number2: Self = Self(50);
+    pub const Number3: Self = Self(51);
+    pub const Number4: Self = Self(52);
+    pub const Number5: Self = Self(53);
+    pub const Number6: Self = Self(54);
+    pub const Number7: Self = Self(55);
+    pub const Number8: Self = Self(56);
+    pub const Number9: Self = Self(57);
+    pub const A: Self = Self(65);
+    pub const B: Self = Self(66);
+    pub const C: Self = Self(67);
+    pub const D: Self = Self(68);
+    pub const E: Self = Self(69);
+    pub const F: Self = Self(70);
+    pub const G: Self = Self(71);
+    pub const H: Self = Self(72);
+    pub const I: Self = Self(73);
+    pub const J: Self = Self(74);
+    pub const K: Self = Self(75);
+    pub const L: Self = Self(76);
+    pub const M: Self = Self(77);
+    pub const N: Self = Self(78);
+    pub const O: Self = Self(79);
+    pub const P: Self = Self(80);
+    pub const Q: Self = Self(81);
+    pub const R: Self = Self(82);
+    pub const S: Self = Self(83);
+    pub const T: Self = Self(84);
+    pub const U: Self = Self(85);
+    pub const V: Self = Self(86);
+    pub const W: Self = Self(87);
+    pub const X: Self = Self(88);
+    pub const Y: Self = Self(89);
+    pub const Z: Self = Self(90);
+    pub const LeftWindows: Self = Self(91);
+    pub const RightWindows: Self = Self(92);
+    pub const Application: Self = Self(93);
+    pub const Sleep: Self = Self(95);
+    pub const NumberPad0: Self = Self(96);
+    pub const NumberPad1: Self = Self(97);
+    pub const NumberPad2: Self = Self(98);
+    pub const NumberPad3: Self = Self(99);
+    pub const NumberPad4: Self = Self(100);
+    pub const NumberPad5: Self = Self(101);
+    pub const NumberPad6: Self = Self(102);
+    pub const NumberPad7: Self = Self(103);
+    pub const NumberPad8: Self = Self(104);
+    pub const NumberPad9: Self = Self(105);
+    pub const Multiply: Self = Self(106);
+    pub const Add: Self = Self(107);
+    pub const Separator: Self = Self(108);
+    pub const Subtract: Self = Self(109);
+    pub const Decimal: Self = Self(110);
+    pub const Divide: Self = Self(111);
+    pub const F1: Self = Self(112);
+    pub const F2: Self = Self(113);
+    pub const F3: Self = Self(114);
+    pub const F4: Self = Self(115);
+    pub const F5: Self = Self(116);
+    pub const F6: Self = Self(117);
+    pub const F7: Self = Self(118);
+    pub const F8: Self = Self(119);
+    pub const F9: Self = Self(120);
+    pub const F10: Self = Self(121);
+    pub const F11: Self = Self(122);
+    pub const F12: Self = Self(123);
+    pub const F13: Self = Self(124);
+    pub const F14: Self = Self(125);
+    pub const F15: Self = Self(126);
+    pub const F16: Self = Self(127);
+    pub const F17: Self = Self(128);
+    pub const F18: Self = Self(129);
+    pub const F19: Self = Self(130);
+    pub const F20: Self = Self(131);
+    pub const F21: Self = Self(132);
+    pub const F22: Self = Self(133);
+    pub const F23: Self = Self(134);
+    pub const F24: Self = Self(135);
+    pub const NavigationView: Self = Self(136);
+    pub const NavigationMenu: Self = Self(137);
+    pub const NavigationUp: Self = Self(138);
+    pub const NavigationDown: Self = Self(139);
+    pub const NavigationLeft: Self = Self(140);
+    pub const NavigationRight: Self = Self(141);
+    pub const NavigationAccept: Self = Self(142);
+    pub const NavigationCancel: Self = Self(143);
+    pub const NumberKeyLock: Self = Self(144);
+    pub const Scroll: Self = Self(145);
+    pub const LeftShift: Self = Self(160);
+    pub const RightShift: Self = Self(161);
+    pub const LeftControl: Self = Self(162);
+    pub const RightControl: Self = Self(163);
+    pub const LeftMenu: Self = Self(164);
+    pub const RightMenu: Self = Self(165);
+    pub const GoBack: Self = Self(166);
+    pub const GoForward: Self = Self(167);
+    pub const Refresh: Self = Self(168);
+    pub const Stop: Self = Self(169);
+    pub const Search: Self = Self(170);
+    pub const Favorites: Self = Self(171);
+    pub const GoHome: Self = Self(172);
+    pub const GamepadA: Self = Self(195);
+    pub const GamepadB: Self = Self(196);
+    pub const GamepadX: Self = Self(197);
+    pub const GamepadY: Self = Self(198);
+    pub const GamepadRightShoulder: Self = Self(199);
+    pub const GamepadLeftShoulder: Self = Self(200);
+    pub const GamepadLeftTrigger: Self = Self(201);
+    pub const GamepadRightTrigger: Self = Self(202);
+    pub const GamepadDPadUp: Self = Self(203);
+    pub const GamepadDPadDown: Self = Self(204);
+    pub const GamepadDPadLeft: Self = Self(205);
+    pub const GamepadDPadRight: Self = Self(206);
+    pub const GamepadMenu: Self = Self(207);
+    pub const GamepadView: Self = Self(208);
+    pub const GamepadLeftThumbstickButton: Self = Self(209);
+    pub const GamepadRightThumbstickButton: Self = Self(210);
+    pub const GamepadLeftThumbstickUp: Self = Self(211);
+    pub const GamepadLeftThumbstickDown: Self = Self(212);
+    pub const GamepadLeftThumbstickRight: Self = Self(213);
+    pub const GamepadLeftThumbstickLeft: Self = Self(214);
+    pub const GamepadRightThumbstickUp: Self = Self(215);
+    pub const GamepadRightThumbstickDown: Self = Self(216);
+    pub const GamepadRightThumbstickRight: Self = Self(217);
+    pub const GamepadRightThumbstickLeft: Self = Self(218);
+}
+impl windows_core::imp::TypeKind for VirtualKey {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for VirtualKey {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"enum(Windows.System.VirtualKey;i4)");
+}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VirtualKeyModifiers(pub u32);
+impl VirtualKeyModifiers {
+    pub const None: Self = Self(0);
+    pub const Control: Self = Self(1);
+    pub const Menu: Self = Self(2);
+    pub const Shift: Self = Self(4);
+    pub const Windows: Self = Self(8);
+}
+impl windows_core::imp::TypeKind for VirtualKeyModifiers {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for VirtualKeyModifiers {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"enum(Windows.System.VirtualKeyModifiers;u4)");
+}
+impl VirtualKeyModifiers {
+    pub const fn contains(&self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+}
+impl core::ops::BitOr for VirtualKeyModifiers {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+impl core::ops::BitAnd for VirtualKeyModifiers {
+    type Output = Self;
+    fn bitand(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+}
+impl core::ops::BitOrAssign for VirtualKeyModifiers {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0.bitor_assign(other.0);
+    }
+}
+impl core::ops::BitAndAssign for VirtualKeyModifiers {
+    fn bitand_assign(&mut self, other: Self) {
+        self.0.bitand_assign(other.0);
+    }
+}
+impl core::ops::Not for VirtualKeyModifiers {
+    type Output = Self;
+    fn not(self) -> Self {
+        Self(self.0.not())
+    }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

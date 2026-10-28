@@ -114,6 +114,16 @@ impl Engine {
         });
     }
 
+    /// Add and remove IMAP flags for many messages at once, batching one
+    /// `UID STORE` per source folder instead of one round-trip per message.
+    pub fn bulk_set_flags(&self, message_ids: &[MessageId], add: Vec<String>, remove: Vec<String>) {
+        self.send(Command::BulkSetFlags {
+            message_ids: message_ids.to_vec(),
+            add,
+            remove,
+        });
+    }
+
     /// Move messages into a specific folder.
     pub fn move_messages(&self, message_ids: &[MessageId], target: FolderId) {
         self.send(Command::MoveMessages {
@@ -183,12 +193,18 @@ impl Engine {
 
     /// Retry a failed outbox entry (resets state to Queued).
     pub fn retry_outbox(&self, account_id: AccountId, entry_id: i64) {
-        self.send(Command::RetryOutbox { account_id, entry_id });
+        self.send(Command::RetryOutbox {
+            account_id,
+            entry_id,
+        });
     }
 
     /// Cancel (delete) an outbox entry.
     pub fn cancel_outbox(&self, account_id: AccountId, entry_id: i64) {
-        self.send(Command::CancelOutbox { account_id, entry_id });
+        self.send(Command::CancelOutbox {
+            account_id,
+            entry_id,
+        });
     }
 
     /// Store a message in the outbox and wake the sender.
@@ -248,6 +264,11 @@ enum Command {
         add: Vec<String>,
         remove: Vec<String>,
     },
+    BulkSetFlags {
+        message_ids: Vec<MessageId>,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
     MoveMessages {
         message_ids: Vec<MessageId>,
         target: MoveTarget,
@@ -296,6 +317,11 @@ enum WorkerCommand {
     RefreshBody(MessageId),
     SetFlags {
         message_id: MessageId,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    BulkSetFlags {
+        message_ids: Vec<MessageId>,
         add: Vec<String>,
         remove: Vec<String>,
     },
@@ -369,6 +395,26 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                         message_id,
                         add,
                         remove,
+                    });
+                }
+            }
+            Command::BulkSetFlags {
+                message_ids,
+                add,
+                remove,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::BulkSetFlags {
+                        message_ids,
+                        add: add.clone(),
+                        remove: remove.clone(),
                     });
                 }
             }
@@ -813,6 +859,13 @@ async fn handle_command(
         } => {
             set_flags(session, state, message_id, &add, &remove).await?;
         }
+        WorkerCommand::BulkSetFlags {
+            message_ids,
+            add,
+            remove,
+        } => {
+            bulk_set_flags(session, state, &message_ids, &add, &remove).await?;
+        }
         WorkerCommand::MoveMessages {
             message_ids,
             target,
@@ -912,6 +965,62 @@ async fn set_flags(
     state.mailbox.publish(Event::MessagesChanged {
         folder_id: folder.id,
     });
+    Ok(())
+}
+
+/// Apply flag changes to many messages at once. Messages are grouped by
+/// source folder so a bulk action costs one `SELECT` and at most two
+/// `UID STORE` commands per folder instead of a round-trip per message.
+async fn bulk_set_flags(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    message_ids: &[MessageId],
+    add: &[String],
+    remove: &[String],
+) -> Result<()> {
+    if message_ids.is_empty() || (add.is_empty() && remove.is_empty()) {
+        return Ok(());
+    }
+
+    let mut groups: HashMap<FolderId, Vec<_>> = HashMap::new();
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else {
+            continue;
+        };
+        groups.entry(message.folder_id).or_default().push(message);
+    }
+
+    for (folder_id, messages) in groups {
+        let Some(folder) = state.mailbox.folder(folder_id)? else {
+            continue;
+        };
+        let uids: Vec<u32> = messages.iter().map(|message| message.uid).collect();
+        session.select(&folder.name).await?;
+        session.store_flags_many(&uids, add, remove).await?;
+
+        let updates: Vec<(u32, Vec<String>)> = messages
+            .iter()
+            .map(|message| {
+                let mut flags = message.flags.clone();
+                for flag in add {
+                    if !flags
+                        .iter()
+                        .any(|current| current.eq_ignore_ascii_case(flag))
+                    {
+                        flags.push(flag.clone());
+                    }
+                }
+                flags.retain(|current| {
+                    !remove
+                        .iter()
+                        .any(|removed| current.eq_ignore_ascii_case(removed))
+                });
+                (message.uid, flags)
+            })
+            .collect();
+        state.mailbox.store().set_flags_many(folder_id, &updates)?;
+        state.mailbox.publish(Event::MessagesChanged { folder_id });
+    }
     Ok(())
 }
 

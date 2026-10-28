@@ -767,7 +767,8 @@ impl Store {
              ORDER BY created_at, id",
         )?;
         let rows = stmt.query_map(params![account.to_string()], map_outbox)?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Error::from)
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
     }
 }
 

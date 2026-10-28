@@ -1,138 +1,168 @@
 //! Preferences dialog for the WinUI front-end.
+//!
+//! The dialog is a `ContentDialog` over the main window: sections are composed
+//! from the shared `ui` helpers and the widgets are read back when the primary
+//! button saves the configuration to disk.
 
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use mailin_core::{Config, Paths, Theme};
-use mailin_winui_sys::{
-    ComboBox, ComboBoxItem, ContentDialog, StackPanel, TextBlock, ToggleSwitch, XamlRoot,
-};
-use windows_core::Result;
+use mailin_winui_sys::{ComboBox, ContentDialog, ContentDialogButton, StackPanel, ToggleSwitch};
+use windows_core::Interface;
 
-use crate::{AppState, ui};
+use crate::app::AppState;
+use crate::ui;
 
-/// Show the preferences dialog.
-pub fn show_preferences(state: &Arc<AppState>, xaml_root: &XamlRoot) -> Result<()> {
+/// The widgets whose values are written back into the configuration.
+#[derive(Clone)]
+struct GeneralRows {
+    theme: ComboBox,
+    html: ToggleSwitch,
+    remote_content: ToggleSwitch,
+    page_size: ComboBox,
+    mark_read: ToggleSwitch,
+    notifications: ToggleSwitch,
+}
+
+#[derive(Clone)]
+struct SyncRows {
+    poll_interval: ComboBox,
+    parallel_accounts: ComboBox,
+    body_sync: ComboBox,
+    retention_days: ComboBox,
+}
+
+/// Show the preferences dialog over `xaml_root` (the main window's root).
+///
+/// `events` keeps the dialog's button revokers alive for the lifetime of the
+/// main window; dropping them early would unregister the save handler while
+/// the dialog is still open.
+pub fn show_preferences(
+    state: &Arc<AppState>,
+    xaml_root: &mailin_winui_sys::XamlRoot,
+    events: &ui::Revokers,
+) -> Result<()> {
     let config = state.config.clone();
-    let paths = Paths::discover().expect("paths");
+    let paths = Paths::discover().context("could not locate the configuration directory")?;
 
-    // Create the dialog
-    let dialog = ContentDialog::new()?;
-    dialog.SetTitle("Preferences")?;
+    let dialog = ContentDialog::new().context("could not create the preferences dialog")?;
+    let title: windows_core::IInspectable = ui::text("Preferences")?.cast()?;
+    dialog
+        .SetTitle(&title)
+        .context("could not title the preferences dialog")?;
 
-    // Create main content panel
-    let main_panel = StackPanel::new()?;
-    main_panel.SetSpacing(16)?;
-    main_panel.SetMargin(ui::thickness(24, 24, 24, 24))?;
+    let main_panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 16.0)?;
+    ui::margin(&main_panel, 24.0, 16.0, 24.0, 16.0)?;
 
-    // General section
-    let general_panel = create_general_section(&config)?;
-    main_panel.Children()?.Append(&general_panel)?;
-
-    // Sync section
-    let sync_panel = create_sync_section(&config)?;
-    main_panel.Children()?.Append(&sync_panel)?;
-
-    // Accounts section
+    let (general_panel, general) = create_general_section(&config)?;
+    ui::append(&main_panel, &general_panel)?;
+    let (sync_panel, sync) = create_sync_section(&config)?;
+    ui::append(&main_panel, &sync_panel)?;
     let accounts_panel = create_accounts_section()?;
-    main_panel.Children()?.Append(&accounts_panel)?;
+    ui::append(&main_panel, &accounts_panel)?;
 
-    dialog.SetContent(&main_panel)?;
-    dialog.SetPrimaryButtonText("Close")?;
-    dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Primary)?;
-    dialog.SetXamlRoot(xaml_root)?;
+    ui::set_content(&dialog, &main_panel).context("could not attach the preferences content")?;
+    dialog
+        .SetPrimaryButtonText("Save")
+        .context("could not set the save button")?;
+    dialog
+        .SetCloseButtonText("Cancel")
+        .context("could not set the cancel button")?;
+    dialog
+        .SetDefaultButton(ContentDialogButton::Primary)
+        .context("could not select the default button")?;
+    let dialog_element: mailin_winui_sys::IUIElement = dialog.cast()?;
+    dialog_element
+        .SetXamlRoot(xaml_root)
+        .context("could not attach the dialog to the window")?;
 
-    // Show dialog and handle close
-    let config_clone = config.clone();
-    let paths_clone = paths.clone();
-    dialog.PrimaryButtonClick({
+    events.keep(dialog.PrimaryButtonClick({
         let dialog = dialog.clone();
+        let paths = paths.clone();
         move |_, _| {
-            save_config(&config_clone, &paths_clone);
+            let mut config = config.clone();
+            config.ui.theme = match ui::selected_index(&general.theme) {
+                1 => Theme::Light,
+                2 => Theme::Dark,
+                _ => Theme::System,
+            };
+            config.ui.html_enabled = is_on(&general.html);
+            config.ui.remote_content_enabled = is_on(&general.remote_content);
+            config.ui.page_size = match ui::selected_index(&general.page_size) {
+                0 => 50,
+                1 => 100,
+                2 => 200,
+                3 => 500,
+                _ => 1000,
+            };
+            config.ui.mark_read_on_open = is_on(&general.mark_read);
+            config.ui.notifications = is_on(&general.notifications);
+            config.sync.poll_interval_secs = match ui::selected_index(&sync.poll_interval) {
+                0 => 15,
+                1 => 30,
+                2 => 60,
+                3 => 120,
+                4 => 300,
+                5 => 600,
+                _ => 1800,
+            };
+            config.sync.max_parallel_accounts =
+                (ui::selected_index(&sync.parallel_accounts) + 1) as u8;
+            config.sync.body_sync = if ui::selected_index(&sync.body_sync) == 1 {
+                mailin_core::config::BodySyncPolicy::Eager
+            } else {
+                mailin_core::config::BodySyncPolicy::OnOpen
+            };
+            config.sync.retention_days = match ui::selected_index(&sync.retention_days) {
+                0 => 0,
+                1 => 30,
+                2 => 90,
+                3 => 180,
+                4 => 365,
+                5 => 730,
+                6 => 1095,
+                7 => 1825,
+                _ => 3650,
+            };
+            save_config(&config, &paths);
             let _ = dialog.Hide();
         }
-    })?;
+    })?);
 
-    dialog.ShowAsync()?;
+    let _ = dialog
+        .ShowAsync()
+        .context("could not show the preferences dialog")?;
     Ok(())
 }
 
-fn create_general_section(config: &Config) -> Result<StackPanel> {
-    let panel = StackPanel::new()?;
-    panel.SetSpacing(12)?;
+fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> {
+    let panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 12.0)?;
+    ui::append(&panel, &ui::heading("General", Some(18.0), Some(600))?)?;
 
-    // Section header
-    let header = TextBlock::new()?;
-    header.SetText("General")?;
-    header.SetStyle(ui::style("TitleTextBlockStyle"))?;
-    panel.Children()?.Append(&header)?;
+    let theme_index = match config.ui.theme {
+        Theme::System => 0,
+        Theme::Light => 1,
+        Theme::Dark => 2,
+    };
+    let theme = ui::combo(&["System", "Light", "Dark"], theme_index)?;
+    ui::append(&panel, &ui::field("Theme", &theme)?)?;
 
-    // Theme
-    let theme_panel = StackPanel::new()?;
-    theme_panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    theme_panel.SetSpacing(12)?;
-
-    let theme_label = TextBlock::new()?;
-    theme_label.SetText("Theme")?;
-    theme_label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    theme_label.SetWidth(200.0)?;
-    theme_panel.Children()?.Append(&theme_label)?;
-
-    let theme_combo = ComboBox::new()?;
-    theme_combo
-        .Items()?
-        .Append(&ComboBoxItem::new()?.SetContent("System")?)?;
-    theme_combo
-        .Items()?
-        .Append(&ComboBoxItem::new()?.SetContent("Light")?)?;
-    theme_combo
-        .Items()?
-        .Append(&ComboBoxItem::new()?.SetContent("Dark")?)?;
-    match config.ui.theme {
-        Theme::System => theme_combo.SetSelectedIndex(0)?,
-        Theme::Light => theme_combo.SetSelectedIndex(1)?,
-        Theme::Dark => theme_combo.SetSelectedIndex(2)?,
-    }
-    theme_combo.SetWidth(200.0)?;
-    theme_panel.Children()?.Append(&theme_combo)?;
-
-    panel.Children()?.Append(&theme_panel)?;
-
-    // HTML rendering
-    let html_panel = create_switch_row(
+    let (html_row, html) = ui::switch_row(
         "Render HTML messages",
         "Display HTML formatting when available",
         config.ui.html_enabled,
     )?;
-    panel.Children()?.Append(&html_panel)?;
+    ui::append(&panel, &html_row)?;
 
-    // Remote content
-    let remote_panel = create_switch_row(
+    let (remote_row, remote_content) = ui::switch_row(
         "Load remote content",
-        "Allow images and resources from the network (can be overridden per-account)",
+        "Allow images and resources from the network (can be overridden per account)",
         config.ui.remote_content_enabled,
     )?;
-    panel.Children()?.Append(&remote_panel)?;
+    ui::append(&panel, &remote_row)?;
 
-    // Page size
-    let page_size_panel = StackPanel::new()?;
-    page_size_panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    page_size_panel.SetSpacing(12)?;
-
-    let page_size_label = TextBlock::new()?;
-    page_size_label.SetText("Messages per page")?;
-    page_size_label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    page_size_label.SetWidth(200.0)?;
-    page_size_panel.Children()?.Append(&page_size_label)?;
-
-    // For simplicity, use a ComboBox for page size
-    let page_size_combo = ComboBox::new()?;
-    for size in [50, 100, 200, 500, 1000] {
-        page_size_combo
-            .Items()?
-            .Append(&ComboBoxItem::new()?.SetContent(size.to_string())?)?;
-    }
-    let current_page_size = config.ui.page_size;
-    let selected_index = match current_page_size {
+    let page_size_index = match config.ui.page_size {
         50 => 0,
         100 => 1,
         200 => 2,
@@ -140,144 +170,76 @@ fn create_general_section(config: &Config) -> Result<StackPanel> {
         1000 => 4,
         _ => 1,
     };
-    page_size_combo.SetSelectedIndex(selected_index)?;
-    page_size_combo.SetWidth(200.0)?;
-    page_size_panel.Children()?.Append(&page_size_combo)?;
+    let page_size = ui::combo(&["50", "100", "200", "500", "1000"], page_size_index)?;
+    ui::append(&panel, &ui::field("Messages per page", &page_size)?)?;
 
-    panel.Children()?.Append(&page_size_panel)?;
-
-    // Mark as read
-    let mark_read_panel = create_switch_row(
+    let (mark_read_row, mark_read) = ui::switch_row(
         "Mark as read on open",
         "Automatically mark messages read when opened",
         config.ui.mark_read_on_open,
     )?;
-    panel.Children()?.Append(&mark_read_panel)?;
+    ui::append(&panel, &mark_read_row)?;
 
-    // Notifications
-    let notifications_panel = create_switch_row(
+    let (notifications_row, notifications) = ui::switch_row(
         "Show new mail notifications",
         "Display desktop notifications for new messages",
         config.ui.notifications,
     )?;
-    panel.Children()?.Append(&notifications_panel)?;
+    ui::append(&panel, &notifications_row)?;
 
-    Ok(panel)
+    Ok((
+        panel,
+        GeneralRows {
+            theme,
+            html,
+            remote_content,
+            page_size,
+            mark_read,
+            notifications,
+        },
+    ))
 }
 
-fn create_sync_section(config: &Config) -> Result<StackPanel> {
-    let panel = StackPanel::new()?;
-    panel.SetSpacing(12)?;
+fn create_sync_section(config: &Config) -> Result<(StackPanel, SyncRows)> {
+    let panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 12.0)?;
+    ui::append(
+        &panel,
+        &ui::heading("Synchronization", Some(18.0), Some(600))?,
+    )?;
 
-    // Section header
-    let header = TextBlock::new()?;
-    header.SetText("Synchronization")?;
-    header.SetStyle(ui::style("TitleTextBlockStyle"))?;
-    panel.Children()?.Append(&header)?;
-
-    // Poll interval
-    let poll_panel = StackPanel::new()?;
-    poll_panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    poll_panel.SetSpacing(12)?;
-
-    let poll_label = TextBlock::new()?;
-    poll_label.SetText("Poll interval (seconds)")?;
-    poll_label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    poll_label.SetWidth(200.0)?;
-    poll_panel.Children()?.Append(&poll_label)?;
-
-    let poll_combo = ComboBox::new()?;
-    for interval in [15, 30, 60, 120, 300, 600, 1800] {
-        poll_combo
-            .Items()?
-            .Append(&ComboBoxItem::new()?.SetContent(interval.to_string())?)?;
-    }
-    let current_poll = config.sync.poll_interval_secs;
-    let selected_index = match current_poll {
+    let poll_index = match config.sync.poll_interval_secs {
         15 => 0,
         30 => 1,
         60 => 2,
         120 => 3,
         300 => 4,
         600 => 5,
-        1800 => 6,
-        _ => 2,
+        _ => 6,
     };
-    poll_combo.SetSelectedIndex(selected_index)?;
-    poll_combo.SetWidth(200.0)?;
-    poll_panel.Children()?.Append(&poll_combo)?;
+    let poll_interval = ui::combo(&["15", "30", "60", "120", "300", "600", "1800"], poll_index)?;
+    ui::append(
+        &panel,
+        &ui::field("Poll interval (seconds)", &poll_interval)?,
+    )?;
 
-    panel.Children()?.Append(&poll_panel)?;
+    let parallel_labels = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+    ];
+    let parallel_index = (config.sync.max_parallel_accounts.max(1) - 1).min(15) as usize;
+    let parallel_accounts = ui::combo(&parallel_labels, parallel_index)?;
+    ui::append(&panel, &ui::field("Parallel accounts", &parallel_accounts)?)?;
 
-    // Max parallel accounts
-    let parallel_panel = StackPanel::new()?;
-    parallel_panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    parallel_panel.SetSpacing(12)?;
+    let body_index = match config.sync.body_sync {
+        mailin_core::config::BodySyncPolicy::OnOpen => 0,
+        mailin_core::config::BodySyncPolicy::Eager => 1,
+    };
+    let body_sync = ui::combo(
+        &["On demand (when opened)", "Eager (background)"],
+        body_index,
+    )?;
+    ui::append(&panel, &ui::field("Body fetching", &body_sync)?)?;
 
-    let parallel_label = TextBlock::new()?;
-    parallel_label.SetText("Parallel accounts")?;
-    parallel_label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    parallel_label.SetWidth(200.0)?;
-    parallel_panel.Children()?.Append(&parallel_label)?;
-
-    let parallel_combo = ComboBox::new()?;
-    for i in 1..=16 {
-        parallel_combo
-            .Items()?
-            .Append(&ComboBoxItem::new()?.SetContent(i.to_string())?)?;
-    }
-    parallel_combo.SetSelectedIndex((config.sync.max_parallel_accounts as i32 - 1) as u32)?;
-    parallel_combo.SetWidth(200.0)?;
-    parallel_panel.Children()?.Append(&parallel_combo)?;
-
-    panel.Children()?.Append(&parallel_panel)?;
-
-    // Body sync policy
-    let body_panel = StackPanel::new()?;
-    body_panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    body_panel.SetSpacing(12)?;
-
-    let body_label = TextBlock::new()?;
-    body_label.SetText("Body fetching")?;
-    body_label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    body_label.SetWidth(200.0)?;
-    body_panel.Children()?.Append(&body_label)?;
-
-    let body_combo = ComboBox::new()?;
-    body_combo
-        .Items()?
-        .Append(&ComboBoxItem::new()?.SetContent("On demand (when opened)")?)?;
-    body_combo
-        .Items()?
-        .Append(&ComboBoxItem::new()?.SetContent("Eager (background)")?)?;
-    match config.sync.body_sync {
-        mailin_core::config::BodySyncPolicy::OnOpen => body_combo.SetSelectedIndex(0)?,
-        mailin_core::config::BodySyncPolicy::Eager => body_combo.SetSelectedIndex(1)?,
-    }
-    body_combo.SetWidth(300.0)?;
-    body_panel.Children()?.Append(&body_combo)?;
-
-    panel.Children()?.Append(&body_panel)?;
-
-    // Retention
-    let retention_panel = StackPanel::new()?;
-    retention_panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    retention_panel.SetSpacing(12)?;
-
-    let retention_label = TextBlock::new()?;
-    retention_label.SetText("Keep messages for (days, 0 = forever)")?;
-    retention_label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    retention_label.SetWidth(200.0)?;
-    retention_panel.Children()?.Append(&retention_label)?;
-
-    let retention_combo = ComboBox::new()?;
-    for days in [0, 30, 90, 180, 365, 730, 1095, 1825, 3650] {
-        retention_combo
-            .Items()?
-            .Append(&ComboBoxItem::new()?.SetContent(days.to_string())?)?;
-    }
-    let current_retention = config.sync.retention_days;
-    let selected_index = match current_retention {
+    let retention_index = match config.sync.retention_days {
         0 => 0,
         30 => 1,
         90 => 2,
@@ -286,75 +248,58 @@ fn create_sync_section(config: &Config) -> Result<StackPanel> {
         730 => 5,
         1095 => 6,
         1825 => 7,
-        3650 => 8,
-        _ => 0,
+        _ => 8,
     };
-    retention_combo.SetSelectedIndex(selected_index)?;
-    retention_combo.SetWidth(200.0)?;
-    retention_panel.Children()?.Append(&retention_combo)?;
+    let retention_days = ui::combo(
+        &[
+            "0 (forever)",
+            "30",
+            "90",
+            "180",
+            "365",
+            "730",
+            "1095",
+            "1825",
+            "3650",
+        ],
+        retention_index,
+    )?;
+    ui::append(
+        &panel,
+        &ui::field("Keep messages for (days)", &retention_days)?,
+    )?;
 
-    panel.Children()?.Append(&retention_panel)?;
-
-    Ok(panel)
+    Ok((
+        panel,
+        SyncRows {
+            poll_interval,
+            parallel_accounts,
+            body_sync,
+            retention_days,
+        },
+    ))
 }
 
 fn create_accounts_section() -> Result<StackPanel> {
-    let panel = StackPanel::new()?;
-    panel.SetSpacing(12)?;
-
-    let header = TextBlock::new()?;
-    header.SetText("Accounts")?;
-    header.SetStyle(ui::style("TitleTextBlockStyle"))?;
-    panel.Children()?.Append(&header)?;
-
-    let desc = TextBlock::new()?;
-    desc.SetText("Account-specific settings like remote content loading are managed in the account settings dialog.")?;
-    desc.SetTextWrapping(mailin_winui_sys::TextWrapping::WrapWholeWords)?;
-    desc.SetOpacity(0.7)?;
-    panel.Children()?.Append(&desc)?;
-
+    let panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 12.0)?;
+    ui::append(&panel, &ui::heading("Accounts", Some(18.0), Some(600))?)?;
+    let desc = ui::text(
+        "Account-specific settings like remote content loading are managed in the account wizard.",
+    )?;
+    ui::append(&panel, &desc)?;
     Ok(panel)
 }
 
-fn create_switch_row(title: &str, subtitle: &str, active: bool) -> Result<StackPanel> {
-    let panel = StackPanel::new()?;
-    panel.SetOrientation(mailin_winui_sys::Orientation::Horizontal)?;
-    panel.SetSpacing(12)?;
-
-    let text_panel = StackPanel::new()?;
-    text_panel.SetSpacing(2)?;
-
-    let title_block = TextBlock::new()?;
-    title_block.SetText(title)?;
-    title_block.SetFontWeight(mailin_winui_sys::FontWeights::SemiBold?)?;
-    text_panel.Children()?.Append(&title_block)?;
-
-    let subtitle_block = TextBlock::new()?;
-    subtitle_block.SetText(subtitle)?;
-    subtitle_block.SetOpacity(0.7)?;
-    subtitle_block.SetFontSize(12.0)?;
-    text_panel.Children()?.Append(&subtitle_block)?;
-
-    panel.Children()?.Append(&text_panel)?;
-
-    let switch = ToggleSwitch::new()?;
-    switch.SetIsOn(active)?;
-    switch.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
-    panel.Children()?.Append(&switch)?;
-
-    Ok(panel)
+fn is_on(switch: &ToggleSwitch) -> bool {
+    switch.IsOn().unwrap_or_default()
 }
 
 fn save_config(config: &Config, paths: &Paths) {
-    if let Err(e) = config.validate() {
-        eprintln!("Config validation failed: {e}");
+    if let Err(error) = config.validate() {
+        tracing::warn!(%error, "refusing to save an invalid configuration");
         return;
     }
-
-    if let Err(e) = config.save(paths) {
-        eprintln!("Failed to save config: {e}");
+    if let Err(error) = config.save(paths) {
+        tracing::warn!(%error, "could not save the configuration");
     }
-
-    // Note: Theme change requires app restart in WinUI for now
-    // crate::apply_theme(config.ui.theme); // Would need to implement
 }

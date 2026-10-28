@@ -235,5 +235,85 @@ fn sync_send_and_fetch_body_round_trip() {
         "the \\Seen flag was not applied"
     );
 
+    // A second message so bulk flagging has more than one target.
+    let raw_two = format!(
+        "From: Ada <{ADDRESS}>\r\n\
+         To: Ada <{ADDRESS}>\r\n\
+         Subject: {SUBJECT} two\r\n\
+         Date: Tue, 1 Jul 2025 10:31:00 +0000\r\n\
+         Message-ID: <integration-{}-two@mailin.test>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         second message\r\n",
+        std::process::id()
+    );
+    let outbox_two = engine
+        .queue_and_send(
+            account.id,
+            raw_two.into_bytes(),
+            OutgoingEnvelope {
+                from: ADDRESS.to_owned(),
+                to: vec![ADDRESS.to_owned()],
+                ..OutgoingEnvelope::default()
+            },
+        )
+        .expect("queue second message");
+    if !wait_until(Duration::from_secs(60), || {
+        store.outbox_len().unwrap_or(1) == 0
+    }) {
+        let entry = store.outbox_entry(outbox_two).expect("read outbox entry");
+        panic!("the second message was not accepted by SMTP: {entry:?}");
+    }
+    engine.sync_account(account.id);
+    let second = {
+        let mut found = None;
+        let appeared = wait_until(Duration::from_secs(60), || {
+            found = find_inbox(&mailin, &account.id)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|message| message.subject == format!("{SUBJECT} two"));
+            found.is_some()
+        });
+        assert!(appeared, "the second message did not show up in the inbox");
+        found.expect("second message")
+    };
+
+    engine.bulk_set_flags(
+        &[message.id, second.id],
+        vec!["\\Flagged".to_owned()],
+        Vec::new(),
+    );
+    for id in [message.id, second.id] {
+        assert!(
+            wait_until(Duration::from_secs(60), || {
+                mailin
+                    .message(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|message| message.is_flagged())
+            }),
+            "the \\Flagged flag was not applied in bulk"
+        );
+    }
+
+    engine.bulk_set_flags(
+        &[message.id, second.id],
+        Vec::new(),
+        vec!["\\Flagged".to_owned()],
+    );
+    for id in [message.id, second.id] {
+        assert!(
+            wait_until(Duration::from_secs(60), || {
+                mailin
+                    .message(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|message| !message.is_flagged())
+            }),
+            "the \\Flagged flag was not removed in bulk"
+        );
+    }
+
     engine.stop();
 }

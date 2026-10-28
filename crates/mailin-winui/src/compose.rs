@@ -243,10 +243,10 @@ pub fn present(
                 Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
                     Ok(_) => {
                         sent.store(true, Ordering::Relaxed);
-                        if let Ok(key) = draft_key.lock() {
-                            if !key.is_empty() {
-                                app.engine.discard_draft(account.id, key.clone());
-                            }
+                        if let Ok(key) = draft_key.lock()
+                            && !key.is_empty()
+                        {
+                            app.engine.discard_draft(account.id, key.clone());
                         }
                         on_sent();
                         let _ = window.Close();

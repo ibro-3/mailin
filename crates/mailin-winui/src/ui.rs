@@ -15,9 +15,9 @@ use anyhow::{Context, Result};
 use mailin_winui_sys::{
     Button, ColumnDefinition, ComboBox, ComboBoxItem, FontWeight, FrameworkElement, Grid,
     GridLength, GridUnitType, HorizontalAlignment, IButtonBase, IContentControl, IControl,
-    IItemsControl, IPanel, ISelector, ITextBox, IUIElement, Orientation, RowDefinition,
-    ScrollBarVisibility, ScrollViewer, StackPanel, TextBlock, TextBox, TextWrapping, Thickness,
-    VerticalAlignment, Visibility, Window, XamlReader,
+    IItemsControl, IPanel, ISelector, ITextBox, IUIElement, KeyboardAccelerator, Orientation,
+    RowDefinition, ScrollBarVisibility, ScrollViewer, SolidColorBrush, StackPanel, TextBlock,
+    TextBox, TextWrapping, Thickness, VerticalAlignment, Visibility, Window, XamlReader, XamlRoot,
 };
 use windows_core::{EventRevoker, Interface};
 
@@ -123,6 +123,16 @@ pub fn set_button_label(button: &Button, label: &str) -> Result<()> {
     let content = text(label)?;
     content.SetTextWrapping(TextWrapping::NoWrap)?;
     set_content(button, &content)
+}
+
+/// A text button tinted with the platform destructive colour, used for
+/// actions like removing an account.
+pub fn destructive_button(label: &str) -> Result<Button> {
+    let button = button(label)?;
+    let content: IContentControl = button.cast()?;
+    let content: TextBlock = content.Content()?.cast()?;
+    set_foreground(&content, &solid_brush("#C42B1C")?)?;
+    Ok(button)
 }
 
 /// Attach a click handler. The closure runs on the UI thread; the button's
@@ -422,4 +432,68 @@ pub fn text_value(textbox: &impl Interface) -> String {
 /// Read the current password of a password box.
 pub fn password_value(password: &mailin_winui_sys::PasswordBox) -> String {
     password.Password().unwrap_or_default()
+}
+
+/// A labelled toggle row: title and subtitle on the left, the switch on the
+/// right. Returns both the row (to append to a panel) and the switch (to read
+/// the value back when saving).
+pub fn switch_row(
+    title: &str,
+    subtitle: &str,
+    active: bool,
+) -> Result<(StackPanel, mailin_winui_sys::ToggleSwitch)> {
+    let row = stack(Orientation::Horizontal, 12.0)?;
+    let labels = stack(Orientation::Vertical, 2.0)?;
+    let title_block = text(title)?;
+    title_block.SetFontWeight(FontWeight { weight: 600 })?;
+    let subtitle_block = text(subtitle)?;
+    let subtitle_element: IUIElement = subtitle_block.cast()?;
+    subtitle_element.SetOpacity(0.7)?;
+    append(&labels, &title_block)?;
+    append(&labels, &subtitle_block)?;
+    stretch_horizontal(&labels)?;
+    append(&row, &labels)?;
+
+    let toggle = mailin_winui_sys::ToggleSwitch::new().context("could not create a toggle")?;
+    toggle.SetIsOn(active)?;
+    let toggle_element: FrameworkElement = toggle.cast()?;
+    toggle_element.SetVerticalAlignment(VerticalAlignment::Center)?;
+    append(&row, &toggle)?;
+    Ok((row, toggle))
+}
+
+/// A solid colour brush parsed from a `#RRGGBB` hex string, used for state
+/// colours such as the outbox entry status.
+pub fn solid_brush(hex: &str) -> Result<SolidColorBrush> {
+    load(&format!(
+        "<SolidColorBrush xmlns=\"{XMLNS}\" Color=\"{hex}\" />"
+    ))
+}
+
+/// Colour a text block. Pair with [`solid_brush`].
+pub fn set_foreground(block: &TextBlock, brush: &SolidColorBrush) -> Result<()> {
+    block.SetForeground(brush)?;
+    Ok(())
+}
+
+/// The XAML root of an open window. Dialogs (`ContentDialog`) need it before
+/// they can be shown; it exists once the window's content is attached.
+pub fn window_xaml_root(window: &Window) -> Result<XamlRoot> {
+    // `XamlRoot` lives on `IUIElement`, which is what `Content()` returns
+    // through the `UIElement` deref chain.
+    let content: mailin_winui_sys::UIElement = window.Content()?;
+    content
+        .XamlRoot()
+        .map_err(|error| anyhow::anyhow!("the window has no XAML root yet: {error}"))
+}
+
+/// Attach a keyboard accelerator to an element. Attach it to the window's
+/// content root so the shortcut works wherever focus is inside the window.
+pub fn add_keyboard_accelerator(
+    element: &impl Interface,
+    accelerator: &KeyboardAccelerator,
+) -> Result<()> {
+    let element: IUIElement = element.cast()?;
+    element.KeyboardAccelerators()?.Append(accelerator)?;
+    Ok(())
 }

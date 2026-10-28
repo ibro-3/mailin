@@ -5,6 +5,7 @@
 //! channel on the UI thread and refreshes the panes that changed. Widgets are
 //! composed from Rust; there is no XAML compiler in a plain Cargo build.
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,18 +16,20 @@ use mailin_core::{
     MessageId, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage, html,
 };
 use mailin_winui_sys::{
-    Application, Button, ComboBox, DispatcherQueue, Grid, KeyboardAccelerator, Orientation,
-    ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification,
-    ToastNotificationManager, ToastNotifier, ToastTemplateType, VirtualKey, VirtualKeyModifiers,
-    WebView2, Window, XmlDocument,
+    Application, Button, CheckBox, ComboBox, DispatcherQueue, FrameworkElement, Grid, GridUnitType,
+    IToggleButton, IXmlNodeSerializer, KeyboardAccelerator, Orientation, ResourceDictionary,
+    ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification, ToastNotificationManager,
+    ToastTemplateType, VerticalAlignment, VirtualKey, VirtualKeyModifiers, WebView2, Window,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
+use windows_core::{EventRevoker, Interface};
 
 use crate::account_dialog;
 use crate::app::AppState;
 use crate::compose;
 use crate::format;
+use crate::move_dialog;
 use crate::platform;
 use crate::ui;
 
@@ -57,6 +60,9 @@ struct State {
     accounts: Vec<Account>,
     folders: Vec<Folder>,
     messages: Vec<MessageHeader>,
+    /// Rows ticked for bulk actions. Always a subset of `messages`, so the
+    /// count shown in the bulk bar matches what is on screen.
+    selected: BTreeSet<MessageId>,
     outbox_entries: Vec<OutboxEntry>,
     show_outbox: bool,
     remote_allowed: Option<MessageId>,
@@ -69,6 +75,7 @@ struct Widgets {
     banner: TextBlock,
     account_combo: ComboBox,
     add_account: Button,
+    edit_account: Button,
     compose: Button,
     sync: Button,
     search: TextBox,
@@ -79,6 +86,9 @@ struct Widgets {
     folder_list: StackPanel,
     folder_empty: TextBlock,
     list_title: TextBlock,
+    bulk_bar: StackPanel,
+    bulk_count: TextBlock,
+    bulk_actions: ComboBox,
     message_scroll: ScrollViewer,
     message_list: StackPanel,
     message_empty: TextBlock,
@@ -122,6 +132,9 @@ pub struct MainWindow {
     folder_events: ui::Revokers,
     message_events: ui::Revokers,
     attachment_events: ui::Revokers,
+    /// The row checkboxes, parallel to `State::messages`, used to tick or
+    /// untick the whole list at once (Ctrl+A, Escape, bulk actions).
+    checkboxes: std::cell::RefCell<Vec<CheckBox>>,
     widgets: Widgets,
 }
 
@@ -154,43 +167,39 @@ impl MainWindow {
         let Some(notifier) = &self.app.toast_notifier else {
             return;
         };
-        // Use ToastTemplateType::ToastText02 which has a title and body text
-        let xml = match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02) {
+        // ToastText02 has two text elements: [0] = title, [1] = body.
+        let xml = match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)
+        {
             Ok(xml) => xml,
-            Err(e) => {
-                tracing::warn!(%e, "failed to get toast template");
+            Err(error) => {
+                tracing::warn!(%error, "failed to get the toast template");
                 return;
             }
         };
-        // Find the text elements and set their content
-        // ToastText02 has two text elements: [0] = title, [1] = body
-        let text_nodes = match xml.GetElementsByTagName(&"text".into()) {
+        let text_nodes = match xml.GetElementsByTagName("text") {
             Ok(nodes) => nodes,
-            Err(e) => {
-                tracing::warn!(%e, "failed to get toast text elements");
+            Err(error) => {
+                tracing::warn!(%error, "failed to get the toast text elements");
                 return;
             }
         };
-        if text_nodes.Length() >= 2 {
-            if let Ok(title_node) = text_nodes.Item(0) {
-                let _ = title_node.SetInnerText(&"New mail".into());
-            }
-            if let Ok(body_node) = text_nodes.Item(1) {
-                let _ = body_node.SetInnerText(&text.into());
-            }
+        let set_text = |index: u32, value: &str| -> windows_core::Result<()> {
+            let node: IXmlNodeSerializer = text_nodes.Item(index)?.cast()?;
+            node.SetInnerText(value)
+        };
+        if text_nodes.Length().unwrap_or_default() >= 2 {
+            let _ = set_text(0, "New mail");
+            let _ = set_text(1, text);
         }
-        // Create and show the toast notification
         let toast = match ToastNotification::CreateToastNotification(&xml) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(%e, "failed to create toast notification");
+            Ok(toast) => toast,
+            Err(error) => {
+                tracing::warn!(%error, "failed to create the toast notification");
                 return;
             }
         };
-        // Set an argument so we can handle activation
-        let _ = toast.SetArgument(&"new-mail".into());
-        if let Err(e) = notifier.Show(&toast) {
-            tracing::warn!(%e, "failed to show toast notification");
+        if let Err(error) = notifier.Show(&toast) {
+            tracing::warn!(%error, "failed to show the toast notification");
         }
     }
 
@@ -380,7 +389,10 @@ impl MainWindow {
         let is_outbox = folder.id.0 == -1;
         {
             let mut state = self.state();
-            if state.selection.folder == Some(folder.id) && !state.selection.search && state.show_outbox == is_outbox {
+            if state.selection.folder == Some(folder.id)
+                && !state.selection.search
+                && state.show_outbox == is_outbox
+            {
                 return;
             }
             state.selection.folder = Some(folder.id);
@@ -482,11 +494,15 @@ impl MainWindow {
         let empty = entries.is_empty();
         self.message_events.clear();
         let _ = ui::clear(&self.widgets.message_list);
+        // Outbox rows are not messages; drop any message selection behind them.
+        self.reset_bulk_selection();
         for entry in &entries {
             if let Ok(row) = outbox_entry_row(entry, now) {
                 let this = Rc::clone(self);
                 let entry = entry.clone();
-                if let Ok(revoker) = ui::on_click(&row, move || this.select_outbox_entry(entry)) {
+                if let Ok(revoker) =
+                    ui::on_click(&row, move || this.select_outbox_entry(entry.clone()))
+                {
                     self.message_events.keep(revoker);
                 }
                 let _ = ui::append(&self.widgets.message_list, &row);
@@ -494,10 +510,14 @@ impl MainWindow {
         }
         self.state().outbox_entries = entries;
         let _ = self.widgets.list_title.SetText(&title);
-        let empty_text = if empty { "Outbox is empty" } else { "Select an entry to see actions" };
+        let empty_text = if empty {
+            "Outbox is empty"
+        } else {
+            "Select an entry to see actions"
+        };
         let _ = self.widgets.message_empty.SetText(empty_text);
         let _ = ui::set_visible(&self.widgets.message_empty, empty);
-        let _ = self.widgets.load_more.SetIsVisible(false);
+        let _ = ui::set_visible(&self.widgets.load_more, false);
         self.show_reader_empty();
         // Show outbox action buttons, hide regular message buttons
         let _ = ui::set_visible(&self.widgets.outbox_retry_button, true);
@@ -513,14 +533,39 @@ impl MainWindow {
         let empty = messages.is_empty();
         self.message_events.clear();
         let _ = ui::clear(&self.widgets.message_list);
+        self.checkboxes.borrow_mut().clear();
+        // The ticked set never outlives the rows that are on screen.
+        let visible: BTreeSet<MessageId> = messages.iter().map(|message| message.id).collect();
+        let selected = {
+            let mut state = self.state();
+            state.selected.retain(|id| visible.contains(id));
+            state.selected.clone()
+        };
         for message in &messages {
-            if let Ok(row) = message_row(message, now) {
+            let ticked = selected.contains(&message.id);
+            if let Ok((row, button, checkbox)) = message_row(message, now, ticked) {
                 let this = Rc::clone(self);
-                let message = message.clone();
-                if let Ok(revoker) = ui::on_click(&row, move || this.open_message(message.clone()))
+                let open = message.clone();
+                if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
                 {
                     self.message_events.keep(revoker);
                 }
+                let id = message.id;
+                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                    if let Ok(revoker) = toggle.Checked({
+                        let this = Rc::clone(self);
+                        move |_, _| this.set_selected(id, true)
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                    if let Ok(revoker) = toggle.Unchecked({
+                        let this = Rc::clone(self);
+                        move |_, _| this.set_selected(id, false)
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                }
+                self.checkboxes.borrow_mut().push(checkbox);
                 let _ = ui::append(&self.widgets.message_list, &row);
             }
         }
@@ -543,11 +588,13 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.archive_button, true);
         let _ = ui::set_visible(&self.widgets.trash_button, true);
         let _ = ui::set_visible(&self.widgets.junk_button, true);
+        self.update_bulk_bar();
     }
 
     fn clear_messages(self: &Rc<Self>) {
         self.message_events.clear();
         let _ = ui::clear(&self.widgets.message_list);
+        self.reset_bulk_selection();
         {
             let mut state = self.state();
             state.messages.clear();
@@ -659,7 +706,7 @@ impl MainWindow {
         // In a real implementation, we'd track which row is selected
         // For now, retry the first entry if any
         if let Some(entry) = entries.first() {
-            let _ = self.app.engine.retry_outbox(account_id, entry.id);
+            self.app.engine.retry_outbox(account_id, entry.id);
             self.show_banner("Retrying…");
         }
     }
@@ -670,7 +717,7 @@ impl MainWindow {
         };
         let entries = self.state().outbox_entries.clone();
         if let Some(entry) = entries.first() {
-            let _ = self.app.engine.cancel_outbox(account_id, entry.id);
+            self.app.engine.cancel_outbox(account_id, entry.id);
             self.show_banner("Discarding…");
         }
     }
@@ -680,32 +727,32 @@ impl MainWindow {
             return;
         };
         let entries = self.state().outbox_entries.clone();
-        if let Some(entry) = entries.first() {
-            if let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) {
-                let mut draft = OutgoingMessage {
-                    from_name: String::new(),
-                    from_addr: env.from,
-                    to: env.to.join(", "),
-                    cc: env.cc.join(", "),
-                    bcc: env.bcc.join(", "),
-                    subject: String::new(),
-                    body: String::new(),
-                    in_reply_to: None,
-                    references: Vec::new(),
-                    draft_key: None,
-                    attachments: Vec::new(),
-                };
-                // Parse the raw message to get subject and body
-                if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
-                    draft.subject = parsed.subject().unwrap_or_default().to_owned();
-                    if let Some(text) = parsed.body_text(0) {
-                        draft.body = text.to_string();
-                    }
+        if let Some(entry) = entries.first()
+            && let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json)
+        {
+            let mut draft = OutgoingMessage {
+                from_name: String::new(),
+                from_addr: env.from,
+                to: env.to.join(", "),
+                cc: env.cc.join(", "),
+                bcc: env.bcc.join(", "),
+                subject: String::new(),
+                body: String::new(),
+                in_reply_to: None,
+                references: Vec::new(),
+                draft_key: None,
+                attachments: Vec::new(),
+            };
+            // Parse the raw message to get subject and body
+            if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
+                draft.subject = parsed.subject().unwrap_or_default().to_owned();
+                if let Some(text) = parsed.body_text(0) {
+                    draft.body = text.to_string();
                 }
-                // Cancel the original entry so it doesn't get sent again
-                let _ = self.app.engine.cancel_outbox(account_id, entry.id);
-                self.open_compose(draft);
             }
+            // Cancel the original entry so it doesn't get sent again
+            self.app.engine.cancel_outbox(account_id, entry.id);
+            self.open_compose(draft);
         }
     }
 
@@ -1032,6 +1079,198 @@ impl MainWindow {
         self.show_banner("Marking as Junk…");
     }
 
+    // --------------------------------------------------------- bulk actions
+
+    /// Record or drop a row's tick and refresh the bulk bar.
+    ///
+    /// Called from the row checkbox handlers; the state lock is released
+    /// before the bar is updated because `update_bulk_bar` re-locks it.
+    fn set_selected(&self, id: MessageId, selected: bool) {
+        {
+            let mut state = self.state();
+            if selected {
+                state.selected.insert(id);
+            } else {
+                state.selected.remove(&id);
+            }
+        }
+        self.update_bulk_bar();
+    }
+
+    /// Show or hide the bulk action bar for the current selection.
+    fn update_bulk_bar(&self) {
+        let count = self.state().selected.len();
+        let _ = self
+            .widgets
+            .bulk_count
+            .SetText(&format!("{count} selected"));
+        let visible = count > 0;
+        let _ = ui::set_visible(&self.widgets.bulk_bar, visible);
+        if !visible {
+            // Park the dropdown on its placeholder so the next selection
+            // starts from a clean slate. Re-entry sees index 0 and returns.
+            ui::select_index(&self.widgets.bulk_actions, 0);
+        }
+    }
+
+    /// The ids of the ticked rows, in list order.
+    fn selected_ids(&self) -> Vec<MessageId> {
+        let state = self.state();
+        state
+            .messages
+            .iter()
+            .filter(|message| state.selected.contains(&message.id))
+            .map(|message| message.id)
+            .collect()
+    }
+
+    fn bulk_mark_seen(&self, seen: bool) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        if seen {
+            self.app
+                .engine
+                .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+        } else {
+            self.app
+                .engine
+                .bulk_set_flags(&ids, Vec::new(), vec!["\\Seen".to_owned()]);
+        }
+    }
+
+    fn bulk_mark_flagged(&self, flagged: bool) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        if flagged {
+            self.app
+                .engine
+                .bulk_set_flags(&ids, vec!["\\Flagged".to_owned()], Vec::new());
+        } else {
+            self.app
+                .engine
+                .bulk_set_flags(&ids, Vec::new(), vec!["\\Flagged".to_owned()]);
+        }
+    }
+
+    fn bulk_archive(&self) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.app.engine.archive_messages(&ids);
+        self.show_banner("Archiving…");
+        self.clear_bulk_selection();
+    }
+
+    fn bulk_delete(&self) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        self.app.engine.delete_messages(&ids);
+        self.show_banner("Moving to Trash…");
+        self.clear_bulk_selection();
+    }
+
+    /// Ask for a destination folder and move every ticked row there.
+    fn bulk_move(self: &Rc<Self>) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let folders = self.state().folders.clone();
+        let exclude = self.state().selection.folder;
+        let xaml_root = match ui::window_xaml_root(&self.widgets.window) {
+            Ok(root) => root,
+            Err(error) => {
+                tracing::error!(%error, "could not get the window's XAML root");
+                return;
+            }
+        };
+        let app = Arc::clone(&self.app);
+        let this = Rc::downgrade(self);
+        let picked = move |target: FolderId| {
+            app.engine.move_messages(&ids, target);
+            if let Some(this) = this.upgrade() {
+                this.show_banner("Moving…");
+                this.clear_bulk_selection();
+            }
+        };
+        if let Err(error) = move_dialog::show(&xaml_root, &self.events, &folders, exclude, picked) {
+            self.show_error(&format!("Could not open the folder picker: {error:#}"));
+        }
+    }
+
+    /// Dispatch the action chosen in the bulk bar's dropdown.
+    ///
+    /// The dropdown is parked on its placeholder first; that fires
+    /// `SelectionChanged` again, but the re-entrant call reads index 0 and
+    /// returns immediately.
+    fn run_bulk_action(self: &Rc<Self>) {
+        let index = ui::selected_index(&self.widgets.bulk_actions);
+        if index == 0 {
+            return;
+        }
+        ui::select_index(&self.widgets.bulk_actions, 0);
+        match index {
+            1 => self.bulk_mark_seen(true),
+            2 => self.bulk_mark_seen(false),
+            3 => self.bulk_mark_flagged(true),
+            4 => self.bulk_mark_flagged(false),
+            5 => self.bulk_move(),
+            6 => self.bulk_archive(),
+            7 => self.bulk_delete(),
+            8 => self.clear_bulk_selection(),
+            _ => {}
+        }
+    }
+
+    /// Tick every row currently in the list (Ctrl+A).
+    fn select_all(&self) {
+        let ids: BTreeSet<MessageId> = {
+            let state = self.state();
+            // The outbox pane shows entries, not messages; its stale message
+            // list must not be ticked.
+            if state.show_outbox {
+                return;
+            }
+            state.messages.iter().map(|message| message.id).collect()
+        };
+        self.state().selected = ids;
+        let checkboxes = self.checkboxes.borrow().clone();
+        for checkbox in &checkboxes {
+            if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                let _ = toggle.SetIsChecked(Some(true));
+            }
+        }
+        self.update_bulk_bar();
+    }
+
+    /// Untick every row while keeping the rows themselves on screen
+    /// (Escape, "Clear selection", and after archive/delete/move).
+    fn clear_bulk_selection(&self) {
+        self.state().selected.clear();
+        let checkboxes = self.checkboxes.borrow().clone();
+        for checkbox in &checkboxes {
+            if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                let _ = toggle.SetIsChecked(Some(false));
+            }
+        }
+        self.update_bulk_bar();
+    }
+
+    /// Forget the selection entirely, including the checkbox widgets; used
+    /// when the list is replaced or the view switches to the outbox.
+    fn reset_bulk_selection(&self) {
+        self.state().selected.clear();
+        self.checkboxes.borrow_mut().clear();
+        self.update_bulk_bar();
+    }
+
     // --------------------------------------------------------------- compose
 
     fn compose_reply(self: &Rc<Self>, all: bool) {
@@ -1115,7 +1354,7 @@ impl MainWindow {
     }
 
     fn edit_account(self: &Rc<Self>) {
-        let this = Rc::clone(this);
+        let this = Rc::clone(self);
         let account = self.state().selection.account;
         let Some(account_id) = account else { return };
         let Some(account) = self
@@ -1141,70 +1380,79 @@ impl MainWindow {
         }
     }
 
+    /// Remove the selected account in the background.
+    ///
+    /// The account wizard's *Remove Account* button is today's removal path;
+    /// this direct entry point is kept for parity with the GTK account menu.
+    #[allow(dead_code)]
     fn remove_account(self: &Rc<Self>) {
-        let account = self.state().selection.account;
-        let Some(account_id) = account else { return };
+        let Some(account_id) = self.state().selection.account else {
+            return;
+        };
         let Some(account) = self
             .state()
             .accounts
             .iter()
-            .find(|a| a.id == account_id)
+            .find(|account| account.id == account_id)
             .cloned()
         else {
             return;
         };
-        let mailin = self.app.mailin.clone();
-        let this = Rc::clone(this);
+        // Deleting the account publishes `AccountsChanged`, which the event
+        // pump turns into a pane refresh on the UI thread.
+        let mailin = Arc::clone(&self.app.mailin);
         std::thread::spawn(move || {
-            if let Err(e) = mailin.remove_account(&account.id) {
-                eprintln!("Failed to remove account: {e}");
-            } else {
-                this.refresh_accounts();
+            if let Err(error) = mailin.remove_account(&account.id) {
+                tracing::warn!(%error, "could not remove the account");
             }
         });
     }
 
     /// Show the keyboard shortcuts help window.
     fn show_shortcuts_help(self: &Rc<Self>) {
-        // Check if window already exists
+        // Re-activate the help window when it is already open.
         if let Some(existing) = self.widgets.shortcuts_window.borrow().as_ref() {
             let _ = existing.Activate();
             return;
         }
 
-        let parent = self.widgets.window.clone();
-
-        // Build the shortcuts window using XAML
-        let shortcuts_window = match Self::build_shortcuts_window(&parent) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!("Failed to create shortcuts window: {e:#}");
+        let shortcuts_window = match build_shortcuts_window() {
+            Ok(window) => window,
+            Err(error) => {
+                tracing::error!(%error, "could not create the shortcuts window");
                 return;
             }
         };
 
-        // Store reference
         *self.widgets.shortcuts_window.borrow_mut() = Some(shortcuts_window.clone());
 
-        // Clean up reference when closed
+        // Drop the cached reference once the window closes so the next F1
+        // opens a fresh one.
         let this = Rc::clone(self);
-        let _ = shortcuts_window.Closed(move |_, _| {
+        match shortcuts_window.Closed(move |_, _| {
             *this.widgets.shortcuts_window.borrow_mut() = None;
-        });
+        }) {
+            Ok(revoker) => self.events.keep(revoker),
+            Err(error) => {
+                tracing::warn!(%error, "could not watch the shortcuts window for closing")
+            }
+        }
 
         let _ = shortcuts_window.Activate();
     }
 
     fn show_preferences(self: &Rc<Self>) {
-        let xaml_root = match self.widgets.window.XamlRoot() {
+        let xaml_root = match ui::window_xaml_root(&self.widgets.window) {
             Ok(root) => root,
-            Err(e) => {
-                tracing::error!("Failed to get XamlRoot: {e:#}");
+            Err(error) => {
+                tracing::error!(%error, "could not get the window's XAML root");
                 return;
             }
         };
-        if let Err(e) = crate::preferences::show_preferences(&self.app, &xaml_root) {
-            tracing::error!("Failed to show preferences: {e:#}");
+        if let Err(error) =
+            crate::preferences::show_preferences(&self.app, &xaml_root, &self.events)
+        {
+            tracing::error!(%error, "could not show the preferences dialog");
         }
     }
 
@@ -1323,6 +1571,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let account_combo = ui::combo(&[], 0)?;
     ui::min_width(&account_combo, 220.0)?;
     let add_account = ui::button("Add account")?;
+    let edit_account = ui::button("Edit account")?;
     let compose = ui::button("Compose")?;
     let sync = ui::button("Sync")?;
     let spacer = ui::text("")?;
@@ -1333,6 +1582,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::append(&toolbar, &title)?;
     ui::append(&toolbar, &account_combo)?;
     ui::append(&toolbar, &add_account)?;
+    ui::append(&toolbar, &edit_account)?;
     ui::append(&toolbar, &compose)?;
     ui::append(&toolbar, &sync)?;
     ui::append(&toolbar, &spacer)?;
@@ -1389,6 +1639,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     // ------------------------------------------------------ message list
     let list_pane = Grid::new().context("could not create the message pane")?;
     ui::auto_row(&list_pane)?;
+    ui::auto_row(&list_pane)?; // bulk bar; collapses while nothing is ticked
     ui::star_row(&list_pane)?;
     ui::auto_row(&list_pane)?;
     ui::margin(&list_pane, 6.0, 8.0, 6.0, 8.0)?;
@@ -1396,17 +1647,44 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::margin(&list_title, 6.0, 0.0, 6.0, 4.0)?;
     ui::set_row(&list_title, 0)?;
     ui::append(&list_pane, &list_title)?;
+    // The bulk bar sits above the list and stays hidden until a row is
+    // ticked. One dropdown keeps it a single row tall even in a narrow pane.
+    let bulk_bar = ui::stack(Orientation::Horizontal, 6.0)?;
+    ui::margin(&bulk_bar, 6.0, 2.0, 6.0, 4.0)?;
+    let bulk_count = ui::text("0 selected")?;
+    ui::append(&bulk_bar, &bulk_count)?;
+    let bulk_spacer = ui::text("")?;
+    ui::stretch_horizontal(&bulk_spacer)?;
+    ui::append(&bulk_bar, &bulk_spacer)?;
+    let bulk_actions = ui::combo(
+        &[
+            "Choose an action…",
+            "Mark as read",
+            "Mark as unread",
+            "Star",
+            "Unstar",
+            "Move to folder…",
+            "Archive",
+            "Move to Trash",
+            "Clear selection",
+        ],
+        0,
+    )?;
+    ui::append(&bulk_bar, &bulk_actions)?;
+    ui::set_visible(&bulk_bar, false)?;
+    ui::set_row(&bulk_bar, 1)?;
+    ui::append(&list_pane, &bulk_bar)?;
     let message_list = ui::stack(Orientation::Vertical, 2.0)?;
     let message_scroll = ui::scroll(&message_list)?;
-    ui::set_row(&message_scroll, 1)?;
+    ui::set_row(&message_scroll, 2)?;
     ui::append(&list_pane, &message_scroll)?;
     let message_empty = ui::text("This folder is empty, or has not been synchronized yet.")?;
     ui::margin(&message_empty, 6.0, 12.0, 6.0, 6.0)?;
-    ui::set_row(&message_empty, 1)?;
+    ui::set_row(&message_empty, 2)?;
     ui::append(&list_pane, &message_empty)?;
     let load_more = ui::button("Load more")?;
     ui::set_visible(&load_more, false)?;
-    ui::set_row(&load_more, 2)?;
+    ui::set_row(&load_more, 3)?;
     ui::append(&list_pane, &load_more)?;
     ui::set_column(&list_pane, 1)?;
     ui::append(&mail, &list_pane)?;
@@ -1513,97 +1791,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     window.SetTitle("Mailin")?;
     window.SetContent(&root)?;
 
-    // Keyboard accelerators for accessibility
-    let accelerators = window
-        .KeyboardAccelerators()
-        .context("could not get keyboard accelerators collection")?;
-    // Ctrl+F: Search
-    let search_accel = KeyboardAccelerator::new().context("could not create search accelerator")?;
-    search_accel.SetKey(VirtualKey::F)?;
-    search_accel.SetModifiers(VirtualKeyModifiers::Control)?;
-    search_accel.Invoked({
-        let this = Rc::downgrade(&this);
-        move |_, _| {
-            if let Some(this) = this.upgrade() {
-                this.run_search();
-            }
-        }
-    })?;
-    accelerators.Append(&search_accel)?;
-
-    // F5: Sync
-    let sync_accel = KeyboardAccelerator::new().context("could not create sync accelerator")?;
-    sync_accel.SetKey(VirtualKey::F5)?;
-    sync_accel.Invoked({
-        let this = Rc::downgrade(&this);
-        move |_, _| {
-            if let Some(this) = this.upgrade() {
-                this.sync_now();
-            }
-        }
-    })?;
-    accelerators.Append(&sync_accel)?;
-
-    // Ctrl+Shift+A: Add account
-    let add_accel =
-        KeyboardAccelerator::new().context("could not create add account accelerator")?;
-    add_accel.SetKey(VirtualKey::A)?;
-    add_accel.SetModifiers(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift)?;
-    add_accel.Invoked({
-        let this = Rc::downgrade(&this);
-        move |_, _| {
-            if let Some(this) = this.upgrade() {
-                this.add_account();
-            }
-        }
-    })?;
-    accelerators.Append(&add_accel)?;
-
-    // Ctrl+Enter: Send (handled in composer)
-    // Note: This will be added in the compose window
-
-    // F1 / Ctrl+/: Show keyboard shortcuts help
-    let help_accel = KeyboardAccelerator::new().context("could not create help accelerator")?;
-    help_accel.SetKey(VirtualKey::F1)?;
-    help_accel.Invoked({
-        let this = Rc::downgrade(&this);
-        move |_, _| {
-            if let Some(this) = this.upgrade() {
-                this.show_shortcuts_help();
-            }
-        }
-    })?;
-    accelerators.Append(&help_accel)?;
-
-    // Ctrl+/ (Ctrl+OemQuestion): Alternative shortcut for help
-    let help_accel2 = KeyboardAccelerator::new().context("could not create help accelerator 2")?;
-    help_accel2.SetKey(VirtualKey::OemQuestion)?;
-    help_accel2.SetModifiers(VirtualKeyModifiers::Control)?;
-    help_accel2.Invoked({
-        let this = Rc::downgrade(&this);
-        move |_, _| {
-            if let Some(this) = this.upgrade() {
-                this.show_shortcuts_help();
-            }
-        }
-    })?;
-    accelerators.Append(&help_accel2)?;
-
-    // Ctrl+,: Show preferences
-    let prefs_accel =
-        KeyboardAccelerator::new().context("could not create preferences accelerator")?;
-    prefs_accel.SetKey(VirtualKey::OemComma)?;
-    prefs_accel.SetModifiers(VirtualKeyModifiers::Control)?;
-    prefs_accel.Invoked({
-        let this = Rc::downgrade(&this);
-        move |_, _| {
-            if let Some(this) = this.upgrade() {
-                this.show_preferences();
-            }
-        }
-    })?;
-    accelerators.Append(&prefs_accel)?;
-
     let this = Rc::new(MainWindow {
         app: Arc::clone(state),
         state: Mutex::new(State {
@@ -1620,12 +1807,14 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         folder_events: ui::Revokers::default(),
         message_events: ui::Revokers::default(),
         attachment_events: ui::Revokers::default(),
+        checkboxes: std::cell::RefCell::new(Vec::new()),
         widgets: Widgets {
             window: window.clone(),
             title,
             banner,
             account_combo,
             add_account,
+            edit_account,
             compose,
             sync,
             search,
@@ -1636,6 +1825,9 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             folder_list,
             folder_empty,
             list_title,
+            bulk_bar,
+            bulk_count,
+            bulk_actions,
             message_scroll,
             message_list,
             message_empty,
@@ -1669,6 +1861,99 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         },
     });
 
+    // Keyboard accelerators, attached to the content root so they fire
+    // wherever the focus is inside the window.
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::F,
+        Some(VirtualKeyModifiers::Control),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.run_search();
+                }
+            }
+        },
+    )?);
+    this.events
+        .keep(add_accelerator(&root, VirtualKey::F5, None, {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.sync_now();
+                }
+            }
+        })?);
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::A,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.add_account();
+                }
+            }
+        },
+    )?);
+    this.events
+        .keep(add_accelerator(&root, VirtualKey::F1, None, {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.show_shortcuts_help();
+                }
+            }
+        })?);
+    // Bulk-selection shortcuts live on the message list itself rather than
+    // the window: scoping them to the pane keeps Ctrl+A working as
+    // "select all text" inside the search box and keeps Escape available to
+    // dialogs and other panes.
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::A,
+        Some(VirtualKeyModifiers::Control),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.select_all();
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::Escape,
+        None,
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.clear_bulk_selection();
+                }
+            }
+        },
+    )?);
+    // This projection exposes no OEM punctuation keys (no `OemComma`/
+    // `OemQuestion`), so preferences uses a letter chord instead of the
+    // Windows-native `Ctrl+,`.
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::P,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.show_preferences();
+                }
+            }
+        },
+    )?);
+
     connect(&this)?;
     this.refresh_accounts();
 
@@ -1679,6 +1964,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
 }
 
 /// Create the main window and immediately open a compose window with the given draft.
+///
+/// Kept for the (not yet wired) protocol-activation path: `mailto:` and toast
+/// activations arrive through `AppInstance`, not `IApplicationOverrides`.
+#[allow(dead_code)]
 pub fn create_with_draft(state: &Arc<AppState>, draft: OutgoingMessage) -> Result<Window> {
     let window = create(state)?;
     // Open compose window with the draft
@@ -1691,6 +1980,29 @@ pub fn create_with_draft(state: &Arc<AppState>, draft: OutgoingMessage) -> Resul
         let _ = crate::compose::present(Arc::clone(state), account_id, draft, move || {});
     }
     Ok(window)
+}
+
+/// Register a keyboard accelerator on an element of the window.
+///
+/// Attach it to the window's content root for app-wide shortcuts, or to a
+/// pane to keep a shortcut scoped to that pane's focus. The returned revoker
+/// must be kept alive for as long as the shortcut should work; callers store
+/// it alongside their other window event revokers.
+fn add_accelerator(
+    element: &impl Interface,
+    key: VirtualKey,
+    modifiers: Option<VirtualKeyModifiers>,
+    handler: impl Fn() + 'static,
+) -> Result<EventRevoker> {
+    let accelerator =
+        KeyboardAccelerator::new().context("could not create a keyboard accelerator")?;
+    accelerator.SetKey(key)?;
+    if let Some(modifiers) = modifiers {
+        accelerator.SetModifiers(modifiers)?;
+    }
+    let revoker = accelerator.Invoked(move |_, _| handler())?;
+    ui::add_keyboard_accelerator(element, &accelerator)?;
+    Ok(revoker)
 }
 
 /// Wire events, actions and the core event pump.
@@ -1720,6 +2032,10 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
         let this = Rc::clone(this);
         move || this.add_account()
     })?);
+    this.events.keep(ui::on_click(&this.widgets.edit_account, {
+        let this = Rc::clone(this);
+        move || this.edit_account()
+    })?);
     this.events.keep(ui::on_click(&this.widgets.welcome_add, {
         let this = Rc::clone(this);
         move || this.add_account()
@@ -1736,6 +2052,11 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
         let this = Rc::clone(this);
         move || this.run_search()
     })?);
+    this.events
+        .keep(ui::on_selection_changed(&this.widgets.bulk_actions, {
+            let this = Rc::clone(this);
+            move || this.run_bulk_action()
+        })?);
     this.events.keep(ui::on_text_changed(&this.widgets.search, {
         let this = Rc::clone(this);
         move || {
@@ -1769,18 +2090,21 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
         let this = Rc::clone(this);
         move || this.mark_selected_junk()
     })?);
-    this.events.keep(ui::on_click(&this.widgets.outbox_retry_button, {
-        let this = Rc::clone(this);
-        move || this.outbox_retry_selected()
-    })?);
-    this.events.keep(ui::on_click(&this.widgets.outbox_discard_button, {
-        let this = Rc::clone(this);
-        move || this.outbox_discard_selected()
-    })?);
-    this.events.keep(ui::on_click(&this.widgets.outbox_edit_button, {
-        let this = Rc::clone(this);
-        move || this.outbox_edit_selected()
-    })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.outbox_retry_button, {
+            let this = Rc::clone(this);
+            move || this.outbox_retry_selected()
+        })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.outbox_discard_button, {
+            let this = Rc::clone(this);
+            move || this.outbox_discard_selected()
+        })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.outbox_edit_button, {
+            let this = Rc::clone(this);
+            move || this.outbox_edit_selected()
+        })?);
     this.events.keep(ui::on_click(&this.widgets.html_button, {
         let this = Rc::clone(this);
         move || {
@@ -1878,7 +2202,7 @@ fn role_marker(role: FolderRole) -> &'static str {
     }
 }
 
-fn folder_title(folder: &Folder) -> String {
+pub(crate) fn folder_title(folder: &Folder) -> String {
     let leaf = if folder.delimiter.is_empty() {
         folder.name.as_str()
     } else {
@@ -1910,7 +2234,15 @@ fn folder_row(folder: &Folder) -> Result<Button> {
     Ok(button)
 }
 
-fn message_row(message: &MessageHeader, now: i64) -> Result<Button> {
+/// Build one message row: a selection checkbox beside the content button.
+///
+/// Returns the row grid, the content button (single click opens the message)
+/// and the checkbox, so the caller can wire the selection handlers.
+fn message_row(
+    message: &MessageHeader,
+    now: i64,
+    selected: bool,
+) -> Result<(Grid, Button, CheckBox)> {
     let seen = message.is_seen();
     let column = ui::stack(Orientation::Vertical, 2.0)?;
     ui::padding(&column, 6.0, 6.0, 6.0, 6.0)?;
@@ -1947,7 +2279,23 @@ fn message_row(message: &MessageHeader, now: i64) -> Result<Button> {
 
     let button = ui::content_button(&column)?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
-    Ok(button)
+
+    // The checkbox is a sibling of the content button rather than its child:
+    // ticking a box must not also open the message.
+    let checkbox = CheckBox::new().context("could not create a selection checkbox")?;
+    let toggle: IToggleButton = checkbox.cast()?;
+    toggle.SetIsChecked(Some(selected))?;
+    let checkbox_element: FrameworkElement = checkbox.cast()?;
+    checkbox_element.SetVerticalAlignment(VerticalAlignment::Center)?;
+
+    let row = Grid::new().context("could not create a message row")?;
+    ui::add_column(&row, GridUnitType::Auto, 0.0)?;
+    ui::star_column(&row)?;
+    ui::set_column(&checkbox, 0)?;
+    ui::append(&row, &checkbox)?;
+    ui::set_column(&button, 1)?;
+    ui::append(&row, &button)?;
+    Ok((row, button, checkbox))
 }
 
 fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
@@ -1998,7 +2346,7 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
 }
 
 /// Build the keyboard shortcuts help window using XAML.
-fn build_shortcuts_window(parent: &Window) -> Result<Window> {
+fn build_shortcuts_window() -> Result<Window> {
     // Create a dialog-style window for shortcuts
     let shortcuts_window = Window::new().context("could not create shortcuts window")?;
     shortcuts_window.SetTitle("Keyboard Shortcuts")?;
@@ -2052,7 +2400,7 @@ fn build_shortcuts_window(parent: &Window) -> Result<Window> {
                         <ColumnDefinition Width="24"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="Ctrl+," FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+P" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
                     <TextBlock Grid.Column="2" Text="Preferences"/>
                 </Grid>
                 <Grid>
@@ -2079,6 +2427,33 @@ fn build_shortcuts_window(parent: &Window) -> Result<Window> {
                         <ColumnDefinition Width="24"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Space" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Tick or untick the focused message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+A" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Select all messages"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Esc" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Clear the selection"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Enter" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
                     <TextBlock Grid.Column="2" Text="Open selected message"/>
                 </Grid>
@@ -2088,7 +2463,7 @@ fn build_shortcuts_window(parent: &Window) -> Result<Window> {
                         <ColumnDefinition Width="24"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="F1 / Ctrl+?" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="0" Text="F1" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
                     <TextBlock Grid.Column="2" Text="Show this help"/>
                 </Grid>
             </StackPanel>
@@ -2096,9 +2471,11 @@ fn build_shortcuts_window(parent: &Window) -> Result<Window> {
         "#,
     )?;
 
+    // A WinUI window sizes itself to its content; give the content a floor so
+    // the shortcut list does not collapse.
+    ui::min_width(&content, 420.0)?;
+    ui::min_height(&content, 320.0)?;
     shortcuts_window.SetContent(&content)?;
-    shortcuts_window.SetWidth(400.0)?;
-    shortcuts_window.SetHeight(400.0)?;
 
     Ok(shortcuts_window)
 }

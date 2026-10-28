@@ -23,10 +23,8 @@ pub fn present(
     account_id: AccountId,
     draft: OutgoingMessage,
     on_sent: impl Fn() + 'static,
-) {
-    let Some(account) = app.mailin.account(&account_id).ok().flatten() else {
-        return;
-    };
+) -> Option<adw::Window> {
+    let account = app.mailin.account(&account_id).ok().flatten()?;
     let draft = OutgoingMessage {
         from_name: account.display_name.clone(),
         from_addr: account.email.clone(),
@@ -336,6 +334,7 @@ pub fn present(
 
     to_row.grab_focus();
     window.present();
+    Some(window)
 }
 
 fn rebuild_attachments(

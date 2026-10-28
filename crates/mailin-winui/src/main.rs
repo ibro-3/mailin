@@ -17,6 +17,8 @@ mod compose;
 #[cfg(windows)]
 mod format;
 #[cfg(windows)]
+mod move_dialog;
+#[cfg(windows)]
 mod platform;
 #[cfg(windows)]
 mod preferences;

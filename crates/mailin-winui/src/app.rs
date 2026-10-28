@@ -14,12 +14,11 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
-use mailin_core::{Config, Engine, Mailin, OutgoingMessage, Paths};
+use mailin_core::{Config, Engine, Mailin, Paths};
 use mailin_winui_sys::{
-    Application, ApplicationInitializationCallback, DispatcherQueue, DispatcherShutdownMode,
-    IApplication3, IApplicationOverrides, IApplicationOverrides_Impl, LaunchActivatedEventArgs,
-    ProtocolActivatedEventArgs, ToastNotification, ToastNotificationActivatedEventArgs,
-    ToastNotificationManager, ToastNotifier, ToastTemplateType, XmlDocument,
+    Application, ApplicationInitializationCallback, DispatcherShutdownMode, IApplication3,
+    IApplicationOverrides, IApplicationOverrides_Impl, LaunchActivatedEventArgs,
+    ToastNotificationManager, ToastNotifier,
 };
 use windows_core::{HRESULT, Interface, Ref, implement};
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -70,40 +69,6 @@ struct MailinApplication {
 impl IApplicationOverrides_Impl for MailinApplication_Impl {
     fn OnLaunched(&self, _args: Ref<LaunchActivatedEventArgs>) -> windows_core::Result<()> {
         window::create(&self.state).map_err(to_windows_error)?;
-        Ok(())
-    }
-
-    fn OnActivated(
-        &self,
-        args: Ref<mailin_winui_sys::IActivatedEventArgs>,
-    ) -> windows_core::Result<()> {
-        // Handle toast notification activation
-        if let Ok(toast_args) = args.cast::<ToastNotificationActivatedEventArgs>() {
-            if let Ok(argument) = toast_args.Argument() {
-                tracing::info!(%argument, "toast notification activated");
-                let _ = window::create(&self.state);
-            }
-            return Ok(());
-        }
-
-        // Handle mailto: protocol activation
-        if let Ok(protocol_args) = args.cast::<ProtocolActivatedEventArgs>() {
-            if let Ok(uri) = protocol_args.Uri() {
-                if let Ok(uri_str) = uri.AbsoluteUri() {
-                    tracing::info!(%uri_str, "mailto: protocol activated");
-                    if let Some(draft) = parse_mailto_uri(&uri_str) {
-                        let state = Arc::clone(&self.state);
-                        // Use the dispatcher queue to run on UI thread
-                        if let Ok(queue) = DispatcherQueue::GetForCurrentThread() {
-                            let _ = queue.TryEnqueue(move || {
-                                let _ = window::create_with_draft(&state, draft);
-                            });
-                        }
-                    }
-                }
-            }
-            return Ok(());
-        }
         Ok(())
     }
 }
@@ -192,46 +157,4 @@ fn to_windows_error(error: anyhow::Error) -> windows_core::Error {
         HRESULT(0x8000_4005u32 as i32), // E_FAIL
         format!("{error:#}"),
     )
-}
-
-/// Parse a mailto: URI into an OutgoingMessage draft.
-/// Supports: mailto:addr?subject=...&body=...&cc=...&bcc=...
-fn parse_mailto_uri(uri: &str) -> Option<OutgoingMessage> {
-    let uri = uri.strip_prefix("mailto:")?;
-    let (addr_part, query_part) = uri.split_once('?').unwrap_or((uri, ""));
-    let to = percent_decode(addr_part).ok()?;
-    let mut draft = OutgoingMessage {
-        to,
-        ..OutgoingMessage::default()
-    };
-    for pair in query_part.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        let value = percent_decode(value).ok()?;
-        match key {
-            "subject" => draft.subject = value,
-            "body" => draft.body = value,
-            "cc" => draft.cc = value,
-            "bcc" => draft.bcc = value,
-            _ => {}
-        }
-    }
-    Some(draft)
-}
-
-fn percent_decode(input: &str) -> Option<String> {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex1 = chars.next()?;
-            let hex2 = chars.next()?;
-            let byte = u8::from_str_radix(&format!("{hex1}{hex2}"), 16).ok()?;
-            result.push(byte as char);
-        } else if c == '+' {
-            result.push(' ');
-        } else {
-            result.push(c);
-        }
-    }
-    Some(result)
 }

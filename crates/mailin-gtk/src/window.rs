@@ -68,6 +68,14 @@ struct Widgets {
     junk_button: gtk::Button,
     trash_button: gtk::Button,
     message_menu_button: gtk::MenuButton,
+    bulk_bar: gtk::Revealer,
+    bulk_count: gtk::Label,
+    bulk_read: gtk::Button,
+    bulk_unread: gtk::Button,
+    bulk_flag: gtk::Button,
+    bulk_unflag: gtk::Button,
+    bulk_move: gtk::Button,
+    bulk_clear: gtk::Button,
     message_list: gtk::ListBox,
     message_empty: adw::StatusPage,
     list_stack: gtk::Stack,
@@ -134,6 +142,9 @@ pub struct MainWindow {
     /// Message for which the user explicitly allowed remote content.
     remote_allowed: Cell<Option<MessageId>>,
     pending_attachment: Rc<RefCell<Option<PendingAttachment>>>,
+    /// Draft edit window per message, so selecting the same draft row again
+    /// focuses the open composer instead of spawning a second one.
+    last_draft: RefCell<Option<(MessageId, glib::WeakRef<gtk::Window>)>>,
     widgets: Widgets,
 }
 
@@ -250,8 +261,43 @@ impl MainWindow {
         list_header.append(&trash_button);
         list_header.append(&message_menu_button);
 
+        // Bulk action bar: revealed while rows are selected in the list.
+        let bulk_count = gtk::Label::new(Some("0 selected"));
+        bulk_count.add_css_class("dim-label");
+        let bulk_read = icon_button("mail-mark-read-symbolic", "Mark selected as read");
+        let bulk_unread = icon_button("mail-mark-unread-symbolic", "Mark selected as unread");
+        let bulk_flag = icon_button("starred-symbolic", "Star selected");
+        let bulk_unflag = icon_button("non-starred-symbolic", "Unstar selected");
+        let bulk_move = gtk::Button::with_label("Move…");
+        bulk_move.add_css_class("flat");
+        bulk_move.set_tooltip_text(Some("Move selected messages to a folder (Ctrl+M)"));
+        let bulk_clear = icon_button("edit-clear-symbolic", "Clear selection (Escape)");
+        let bulk_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        bulk_row.set_margin_top(4);
+        bulk_row.set_margin_bottom(4);
+        bulk_row.set_margin_start(14);
+        bulk_row.set_margin_end(8);
+        bulk_row.append(&bulk_count);
+        let bulk_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        bulk_spacer.set_hexpand(true);
+        bulk_row.append(&bulk_spacer);
+        bulk_row.append(&bulk_read);
+        bulk_row.append(&bulk_unread);
+        bulk_row.append(&bulk_flag);
+        bulk_row.append(&bulk_unflag);
+        bulk_row.append(&bulk_move);
+        bulk_row.append(&bulk_clear);
+        let bulk_bar = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .child(&bulk_row)
+            .build();
+
         let message_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Multiple)
+            // Clicks must select first and activate on the second press so
+            // that GTK's Ctrl/Shift+click toggle and extend handling applies.
+            .activate_on_single_click(false)
             .build();
         message_list.add_css_class("navigation-sidebar");
         let message_scroller = gtk::ScrolledWindow::builder()
@@ -279,6 +325,7 @@ impl MainWindow {
         let list_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
         list_pane.set_size_request(300, -1);
         list_pane.append(&list_header);
+        list_pane.append(&bulk_bar);
         list_pane.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         list_pane.append(&list_stack);
         list_pane.append(&load_more);
@@ -461,6 +508,7 @@ impl MainWindow {
             html_mode: Cell::new(html_mode),
             remote_allowed: Cell::new(None),
             pending_attachment: Rc::new(RefCell::new(None)),
+            last_draft: RefCell::new(None),
             widgets: Widgets {
                 window,
                 title,
@@ -479,6 +527,14 @@ impl MainWindow {
                 junk_button,
                 trash_button,
                 message_menu_button,
+                bulk_bar,
+                bulk_count,
+                bulk_read,
+                bulk_unread,
+                bulk_flag,
+                bulk_unflag,
+                bulk_move,
+                bulk_clear,
                 message_list,
                 message_empty,
                 list_stack,
@@ -650,9 +706,35 @@ impl MainWindow {
             move |_| this.delete_selected(false)
         });
 
+        this.widgets.bulk_read.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.mark_selected_seen(true)
+        });
+        this.widgets.bulk_unread.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.mark_selected_seen(false)
+        });
+        this.widgets.bulk_flag.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.mark_selected_flagged(true)
+        });
+        this.widgets.bulk_unflag.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.mark_selected_flagged(false)
+        });
+        this.widgets.bulk_move.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| Self::move_selected(&this)
+        });
+        this.widgets.bulk_clear.connect_clicked({
+            let list_box = this.widgets.message_list.clone();
+            move |_| list_box.unselect_all()
+        });
+
         let message_menu = gio::Menu::new();
         message_menu.append(Some("Archive"), Some("win.archive"));
         message_menu.append(Some("Move to Trash"), Some("win.delete"));
+        message_menu.append(Some("Move to Folder…"), Some("win.move"));
         message_menu.append(Some("Mark as Junk"), Some("win.junk"));
         message_menu.append(Some("Not Junk"), Some("win.not-junk"));
         let outbox_section = gio::Menu::new();
@@ -715,28 +797,67 @@ impl MainWindow {
             }
         });
 
-        // Keyboard navigation for message list (Up/Down arrows)
+        // Selection changes drive the bulk bar and the reader: once the
+        // selection settles on exactly one row, that message is shown.
+        this.widgets.message_list.connect_selected_rows_changed({
+            let this = Rc::clone(this);
+            move |list_box| {
+                if this.programmatic.get() {
+                    return;
+                }
+                this.update_bulk_bar();
+                if list_box.selected_rows().len() != 1 {
+                    return;
+                }
+                let message = list_box.selected_rows().first().and_then(|row| {
+                    usize::try_from(row.index())
+                        .ok()
+                        .and_then(|index| this.messages.borrow().get(index).cloned())
+                });
+                if let Some(message) = message {
+                    this.open_message(&message);
+                }
+            }
+        });
+
+        // Extra keys for the message list. Native GTK already provides
+        // Up/Down, Shift+Up/Down (extend), Ctrl+A (select all) and
+        // Ctrl+Space (toggle row); Escape, plain Space and starting the
+        // navigation from an empty selection are handled here.
         let list_key_controller = gtk::EventControllerKey::new();
         list_key_controller.connect_key_pressed({
             let list_box = this.widgets.message_list.clone();
-            move |_, keyval, _, _| {
-                if keyval == Key::Up || keyval == Key::Down {
-                    if let Some(selected) = list_box.selected_row() {
-                        let idx = selected.index();
-                        let len = list_box.observe_children().n_items();
-                        let new_idx = if keyval == Key::Up {
-                            if idx > 0 { idx - 1 } else { idx }
+            move |_, keyval, _, state| {
+                if keyval == Key::Escape {
+                    list_box.unselect_all();
+                    glib::Propagation::Stop
+                } else if keyval == Key::space && !state.contains(ModifierType::CONTROL_MASK) {
+                    if let Some(row) = list_box.selected_row() {
+                        if row.is_selected() {
+                            list_box.unselect_row(&row);
                         } else {
-                            let len_i32 = i32::try_from(len).unwrap_or(i32::MAX);
-                            if idx + 1 < len_i32 { idx + 1 } else { idx }
-                        };
-                        if let Some(row) = list_box.row_at_index(new_idx) {
                             list_box.select_row(Some(&row));
                         }
-                    } else if let Some(first) = list_box.row_at_index(0) {
-                        list_box.select_row(Some(&first));
                     }
                     glib::Propagation::Stop
+                } else if list_box.selected_row().is_none() {
+                    // Nothing selected yet: start browsing instead of letting
+                    // focus escape the list.
+                    let row = match keyval {
+                        Key::Down => list_box.row_at_index(0),
+                        Key::Up => list_box
+                            .observe_children()
+                            .n_items()
+                            .checked_sub(1)
+                            .and_then(|last| list_box.row_at_index(i32::try_from(last).ok()?)),
+                        _ => None,
+                    };
+                    if let Some(row) = row {
+                        list_box.select_row(Some(&row));
+                        glib::Propagation::Stop
+                    } else {
+                        glib::Propagation::Proceed
+                    }
                 } else {
                     glib::Propagation::Proceed
                 }
@@ -783,7 +904,9 @@ impl MainWindow {
 
         this.widgets.compose_button.connect_clicked({
             let this = Rc::clone(this);
-            move |_| Self::open_compose(&this, OutgoingMessage::default())
+            move |_| {
+                let _ = Self::open_compose(&this, OutgoingMessage::default());
+            }
         });
 
         this.widgets.reply_button.connect_clicked({
@@ -847,6 +970,13 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&add_action);
 
+        let move_action = gio::SimpleAction::new("move", None);
+        move_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| Self::move_selected(&this)
+        });
+        this.widgets.window.add_action(&move_action);
+
         if let Some(application) = this.widgets.window.application() {
             application.set_accels_for_action("win.search", &["<Control>f"]);
             application.set_accels_for_action("win.sync", &["F5"]);
@@ -861,12 +991,15 @@ impl MainWindow {
             application.set_accels_for_action("win.delete-permanent", &["<Control>Delete"]);
             application.set_accels_for_action("win.junk", &["<Control><Shift>j"]);
             application.set_accels_for_action("win.not-junk", &["<Control><Shift>k"]);
+            application.set_accels_for_action("win.move", &["<Control>m"]);
         }
 
         let compose_action = gio::SimpleAction::new("compose", None);
         compose_action.connect_activate({
             let this = Rc::clone(this);
-            move |_, _| Self::open_compose(&this, OutgoingMessage::default())
+            move |_, _| {
+                let _ = Self::open_compose(&this, OutgoingMessage::default());
+            }
         });
         this.widgets.window.add_action(&compose_action);
 
@@ -1108,7 +1241,10 @@ impl MainWindow {
         let is_outbox = folder.id.0 == -1;
         {
             let mut selection = self.selection.borrow_mut();
-            if selection.folder == Some(folder.id) && !selection.search && selection.show_outbox == is_outbox {
+            if selection.folder == Some(folder.id)
+                && !selection.search
+                && selection.show_outbox == is_outbox
+            {
                 return;
             }
             selection.folder = Some(folder.id);
@@ -1214,7 +1350,9 @@ impl MainWindow {
         self.programmatic.set(true);
         clear_list(&self.widgets.message_list);
         for entry in &entries {
-            self.widgets.message_list.append(&outbox_entry_row(entry, now));
+            self.widgets
+                .message_list
+                .append(&outbox_entry_row(entry, now));
         }
         self.programmatic.set(false);
 
@@ -1225,12 +1363,19 @@ impl MainWindow {
         self.widgets.load_more.set_visible(false);
         self.show_reader_empty();
 
-        // Store entries for selection tracking
+        // Store entries for selection tracking.
         self.selection.borrow_mut().outbox_entries = entries;
+        // Outbox rows are not messages: drop the stale mapping so the
+        // selection helpers can never address the wrong rows.
+        self.messages.borrow_mut().clear();
+        self.update_bulk_bar();
     }
 
     fn show_messages(&self, messages: Vec<MessageHeader>, title: String, more: bool) {
         let selected = self.selection.borrow().message;
+        // Keep the whole selection alive across refreshes so a background
+        // sync does not collapse a multi-selection back to one row.
+        let previous = self.selected_message_ids();
         let now = format::now_unix();
         let empty = messages.is_empty();
 
@@ -1239,11 +1384,12 @@ impl MainWindow {
         for message in &messages {
             self.widgets.message_list.append(&message_row(message, now));
         }
-        if let Some(id) = selected {
-            if let Some(index) = messages.iter().position(|message| message.id == id) {
-                if let Some(row) = self.widgets.message_list.row_at_index(index as i32) {
-                    self.widgets.message_list.select_row(Some(&row));
-                }
+        for (index, message) in messages.iter().enumerate() {
+            if Some(message.id) != selected && !previous.contains(&message.id) {
+                continue;
+            }
+            if let Some(row) = self.widgets.message_list.row_at_index(index as i32) {
+                self.widgets.message_list.select_row(Some(&row));
             }
         }
         self.programmatic.set(false);
@@ -1266,6 +1412,7 @@ impl MainWindow {
             .list_stack
             .set_visible_child_name(if empty { "empty" } else { "list" });
         self.widgets.load_more.set_visible(more);
+        self.update_bulk_bar();
     }
 
     fn clear_messages(&self) {
@@ -1277,6 +1424,7 @@ impl MainWindow {
         self.widgets.list_stack.set_visible_child_name("empty");
         self.widgets.load_more.set_visible(false);
         self.show_reader_empty();
+        self.update_bulk_bar();
     }
 
     fn request_more(&self) {
@@ -1343,6 +1491,16 @@ impl MainWindow {
                 .find(|folder| folder.id == message.folder_id)
                 .is_some_and(|folder| folder.role == FolderRole::Drafts);
         if is_draft {
+            // The selection signal and row activation both reach this
+            // method: focus an already-open composer instead of spawning a
+            // second window for the same draft.
+            if let Some((draft_id, window)) = self.last_draft.borrow().as_ref()
+                && *draft_id == message.id
+                && let Some(window) = window.upgrade()
+            {
+                window.present();
+                return;
+            }
             let body = self
                 .app
                 .mailin
@@ -1351,7 +1509,15 @@ impl MainWindow {
                 .flatten()
                 .and_then(|(text, _)| text);
             let draft = mailin_core::compose::draft_from_header(message, body.as_deref());
-            Self::open_compose(self, draft);
+            if let Some(window) = Self::open_compose(self, draft) {
+                *self.last_draft.borrow_mut() = Some((message.id, window));
+            }
+            return;
+        }
+
+        // The row that is already open must not re-run the open side
+        // effects: both row activation and selection changes call this.
+        if self.selection.borrow().message == Some(message.id) {
             return;
         }
 
@@ -1653,6 +1819,22 @@ impl MainWindow {
         self.widgets.toast.add_toast(adw::Toast::new(text));
     }
 
+    /// Show or hide the bulk action bar for the current selection.
+    fn update_bulk_bar(&self) {
+        if self.programmatic.get() {
+            return;
+        }
+        let count = if self.selection.borrow().show_outbox {
+            0
+        } else {
+            self.widgets.message_list.selected_rows().len()
+        };
+        self.widgets
+            .bulk_count
+            .set_text(&format!("{count} selected"));
+        self.widgets.bulk_bar.set_reveal_child(count > 0);
+    }
+
     fn archive_selected(&self) {
         let ids = self.selected_message_ids();
         if ids.is_empty() {
@@ -1771,7 +1953,7 @@ impl MainWindow {
                 }
                 // Need to mark the original entry as cancelled so it doesn't get sent again
                 this.app.engine.cancel_outbox(account_id, id);
-                Self::open_compose(this, draft);
+                let _ = Self::open_compose(this, draft);
             }
         }
     }
@@ -1789,34 +1971,66 @@ impl MainWindow {
             .collect()
     }
 
-    fn toggle_seen(&self) {
-        let Some(message) = self.selected_message() else {
+    fn mark_selected_seen(&self, seen: bool) {
+        let ids = self.selected_message_ids();
+        if ids.is_empty() {
             return;
-        };
-        if message.is_seen() {
+        }
+        if seen {
             self.app
                 .engine
-                .set_flags(message.id, Vec::new(), vec!["\\Seen".to_owned()]);
+                .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
         } else {
             self.app
                 .engine
-                .set_flags(message.id, vec!["\\Seen".to_owned()], Vec::new());
+                .bulk_set_flags(&ids, Vec::new(), vec!["\\Seen".to_owned()]);
         }
     }
 
-    fn toggle_flagged(&self, flagged: bool) {
-        let Some(message) = self.selected_message() else {
+    fn mark_selected_flagged(&self, flagged: bool) {
+        let ids = self.selected_message_ids();
+        if ids.is_empty() {
             return;
-        };
+        }
         if flagged {
             self.app
                 .engine
-                .set_flags(message.id, vec!["\\Flagged".to_owned()], Vec::new());
+                .bulk_set_flags(&ids, vec!["\\Flagged".to_owned()], Vec::new());
         } else {
             self.app
                 .engine
-                .set_flags(message.id, Vec::new(), vec!["\\Flagged".to_owned()]);
+                .bulk_set_flags(&ids, Vec::new(), vec!["\\Flagged".to_owned()]);
         }
+    }
+
+    fn toggle_seen(&self) {
+        // The reader button reflects the open message; apply its direction
+        // to every selected message.
+        let Some(message) = self.selected_message() else {
+            return;
+        };
+        self.mark_selected_seen(!message.is_seen());
+    }
+
+    fn toggle_flagged(&self, flagged: bool) {
+        self.mark_selected_flagged(flagged);
+    }
+
+    /// Ask for a destination folder and move the selection there.
+    fn move_selected(this: &Rc<Self>) {
+        let ids = this.selected_message_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let current = this.selection.borrow().folder;
+        let folders = this.folders.borrow().clone();
+        crate::move_dialog::show(&this.widgets.window, &folders, current, {
+            let this = Rc::clone(this);
+            move |folder_id| {
+                this.app.engine.move_messages(&ids, folder_id);
+                this.toast("Moving…");
+            }
+        });
     }
 
     // --------------------------------------------------------------- compose
@@ -1845,7 +2059,7 @@ impl MainWindow {
         } else {
             compose::reply(&account, &message, body.as_deref())
         };
-        Self::open_compose(this, draft);
+        let _ = Self::open_compose(this, draft);
     }
 
     fn compose_forward(this: &Rc<Self>) {
@@ -1867,15 +2081,15 @@ impl MainWindow {
             .and_then(|(text, _)| text)
             .or_else(|| message.snippet.clone());
         let draft = compose::forward(&account, &message, body.as_deref());
-        Self::open_compose(this, draft);
+        let _ = Self::open_compose(this, draft);
     }
 
-    fn open_compose(this: &Rc<Self>, draft: OutgoingMessage) {
+    fn open_compose(this: &Rc<Self>, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
         let Some(account_id) = this.selection.borrow().account else {
             this.widgets
                 .toast
                 .add_toast(adw::Toast::new("Add an account before composing mail"));
-            return;
+            return None;
         };
         let parent = this.widgets.window.clone().upcast::<gtk::Window>();
         let toast = this.widgets.toast.clone();
@@ -1887,7 +2101,8 @@ impl MainWindow {
             move || {
                 toast.add_toast(adw::Toast::new("Message queued in the outbox"));
             },
-        );
+        )
+        .map(|window| window.upcast::<gtk::Window>().downgrade())
     }
 
     /// Public method to open compose window with a draft (for mailto: links).
@@ -1899,12 +2114,12 @@ impl MainWindow {
         // For simplicity, we'll use a workaround: create a dummy Rc that
         // doesn't actually own the window but just calls the method.
         // The real solution would be to restructure open_compose to take &Self.
-        
+
         // Instead, let's just call open_compose directly with a workaround
         // We can't easily get an Rc<Self> from &Self, so let's use a different approach.
         // Store the draft in the selection and trigger compose via the existing mechanism.
         // Actually, the simplest fix: make open_compose take &Self instead of &Rc<Self>
-        
+
         // For now, let's use a different approach: just call the internal logic directly
         let Some(account_id) = self.selection.borrow().account else {
             self.widgets
@@ -2269,6 +2484,12 @@ fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWind
         ("<Control><Shift>E", "Archive selected messages"),
         ("<Control><Shift>J", "Mark selected messages as Junk"),
         ("<Control><Shift>K", "Mark selected messages as not Junk"),
+        ("<Control>M", "Move selected messages to a folder"),
+        ("<Control>A", "Select all messages"),
+        ("Escape", "Clear message selection"),
+        ("<Control>space", "Toggle selection of the current message"),
+        ("Shift+Down", "Extend selection downwards"),
+        ("Shift+Up", "Extend selection upwards"),
         ("Up", "Navigate message list (up)"),
         ("Down", "Navigate message list (down)"),
         ("Return", "Open selected message"),
@@ -2300,7 +2521,7 @@ fn clear_box(container: &gtk::Box) {
     }
 }
 
-fn role_icon(role: FolderRole) -> &'static str {
+pub(crate) fn role_icon(role: FolderRole) -> &'static str {
     match role {
         FolderRole::Inbox => "mail-unread-symbolic",
         FolderRole::Sent => "mail-sent-symbolic",
@@ -2312,7 +2533,7 @@ fn role_icon(role: FolderRole) -> &'static str {
     }
 }
 
-fn folder_title(folder: &Folder) -> String {
+pub(crate) fn folder_title(folder: &Folder) -> String {
     let leaf = if folder.delimiter.is_empty() {
         folder.name.as_str()
     } else {
