@@ -43,6 +43,7 @@ toml.workspace = true
 tracing.workspace = true
 ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 uuid.workspace = true
+regex = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

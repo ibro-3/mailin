@@ -23,6 +23,8 @@ mod platform;
 #[cfg(windows)]
 mod preferences;
 #[cfg(windows)]
+mod design_tokens;
+#[cfg(windows)]
 mod ui;
 #[cfg(windows)]
 mod window;

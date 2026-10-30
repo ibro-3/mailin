@@ -172,6 +172,31 @@ impl OutgoingMessage {
     }
 }
 
+/// RFC 3676 signature separator line.
+pub const SIGNATURE_SEPARATOR: &str = "-- ";
+
+/// The account signature as an isolated block, or an empty string when the
+/// signature is blank. The `-- ` separator is part of the block.
+pub fn signature_block(signature: &str) -> String {
+    let signature = signature.trim();
+    if signature.is_empty() {
+        String::new()
+    } else {
+        format!("{SIGNATURE_SEPARATOR}\n{signature}")
+    }
+}
+
+/// Place the signature above a prefilled body (reply quotation or forwarded
+/// headers), separated by one blank line. A blank signature leaves `body`
+/// untouched.
+pub fn with_signature_prefix(signature: &str, body: &str) -> String {
+    let block = signature_block(signature);
+    if block.is_empty() {
+        return body.to_owned();
+    }
+    format!("{block}\n\n{}", body.trim_start_matches('\n'))
+}
+
 /// Rebuild a composer draft from a stored Drafts-folder message. The Message-ID
 /// becomes the draft key so the next save replaces the same server message.
 pub fn draft_from_header(header: &MessageHeader, body: Option<&str>) -> OutgoingMessage {
@@ -196,6 +221,34 @@ pub fn new_draft_key(from_addr: &str) -> String {
         .split_once('@')
         .map_or("mailin.local", |(_, domain)| domain);
     format!("{}@{}", uuid::Uuid::new_v4(), domain)
+}
+
+/// Substitute `{{variable}}` placeholders in a template string.
+/// Variables are provided as a HashMap. Unknown variables are left as-is.
+pub fn apply_template(template: &str, vars: &std::collections::HashMap<&str, &str>) -> String {
+    let mut result = template.to_owned();
+    for (key, value) in vars {
+        let placeholder = format!("{{{{{key}}}}}");
+        result = result.replace(&placeholder, value);
+    }
+    result
+}
+
+/// Create an OutgoingMessage from a Template with variable substitution.
+pub fn template_draft(template: &crate::model::Template, vars: &std::collections::HashMap<&str, &str>) -> OutgoingMessage {
+    OutgoingMessage {
+        from_name: String::new(),
+        from_addr: String::new(),
+        to: String::new(),
+        cc: String::new(),
+        bcc: String::new(),
+        subject: apply_template(&template.subject, vars),
+        body: apply_template(&template.body, vars),
+        in_reply_to: None,
+        references: Vec::new(),
+        draft_key: Some(new_draft_key("template")),
+        attachments: Vec::new(),
+    }
 }
 
 /// Parse an address list into bare addresses. Front-ends use this to build
@@ -667,5 +720,80 @@ mod tests {
         assert_eq!(draft.subject, "Unfinished");
         assert_eq!(draft.body, "Half written");
         assert_eq!(draft.draft_key.as_deref(), Some("draft-key@example.com"));
+    }
+
+    #[test]
+    fn blank_signatures_change_nothing() {
+        assert_eq!(signature_block(""), "");
+        assert_eq!(signature_block("  \n\n"), "");
+        let quote = "\n\nOn Monday, Grace wrote:\n> hi";
+        assert_eq!(with_signature_prefix("", quote), quote);
+    }
+
+    #[test]
+    fn signature_block_starts_with_the_rfc_separator() {
+        assert_eq!(
+            signature_block("Ada\nhttps://example.com\n"),
+            "-- \nAda\nhttps://example.com"
+        );
+    }
+
+    #[test]
+    fn signature_sits_above_the_quotation() {
+        let reply = with_signature_prefix("Ada", "\n\nOn Monday, Grace wrote:\n> hi");
+        assert_eq!(reply, "-- \nAda\n\nOn Monday, Grace wrote:\n> hi");
+        let forwarded = with_signature_prefix(
+            "Ada",
+            "\n\n---------- Forwarded message ----------\nFrom: Grace",
+        );
+        assert!(forwarded.starts_with("-- \nAda\n\n---------- Forwarded message ----------"));
+    }
+
+    #[test]
+    fn apply_template_substitutes_variables() {
+        let template = "Hello {{name}}, your order {{order_id}} is ready.";
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("name", "Ada");
+        vars.insert("order_id", "12345");
+        let result = apply_template(template, &vars);
+        assert_eq!(result, "Hello Ada, your order 12345 is ready.");
+    }
+
+    #[test]
+    fn apply_template_leaves_unknown_variables() {
+        let template = "Hello {{name}}, your order {{order_id}} is ready.";
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("name", "Ada");
+        let result = apply_template(template, &vars);
+        assert_eq!(result, "Hello Ada, your order {{order_id}} is ready.");
+    }
+
+    #[test]
+    fn apply_template_handles_empty_vars() {
+        let template = "Hello {{name}}!";
+        let vars = std::collections::HashMap::new();
+        let result = apply_template(template, &vars);
+        assert_eq!(result, "Hello {{name}}!");
+    }
+
+    #[test]
+    fn template_draft_creates_outgoing_message() {
+        use crate::account::AccountId;
+        use crate::model::Template;
+        let template = Template {
+            id: 1,
+            account_id: AccountId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            name: "Test Template".into(),
+            subject: "Hello {{name}}".into(),
+            body: "Dear {{name}},\n\nBody text.".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("name", "World");
+        let draft = template_draft(&template, &vars);
+        assert_eq!(draft.subject, "Hello World");
+        assert_eq!(draft.body, "Dear World,\n\nBody text.");
+        assert!(draft.draft_key.is_some());
     }
 }

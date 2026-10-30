@@ -13,13 +13,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use mailin_winui_sys::{
-    Button, ColumnDefinition, ComboBox, ComboBoxItem, FontWeight, FrameworkElement, Grid,
-    GridLength, GridUnitType, HorizontalAlignment, IButtonBase, IContentControl, IControl,
-    IItemsControl, IPanel, ISelector, ITextBox, IUIElement, KeyboardAccelerator, Orientation,
-    RowDefinition, ScrollBarVisibility, ScrollViewer, SolidColorBrush, StackPanel, TextBlock,
-    TextBox, TextWrapping, Thickness, VerticalAlignment, Visibility, Window, XamlReader, XamlRoot,
+    AutomationProperties, Button, ColumnDefinition, ComboBox, ComboBoxItem, FontWeight,
+    FrameworkElement, Grid, GridLength, GridUnitType, HorizontalAlignment, IButtonBase,
+    IContentControl, IControl, IItemsControl, IPanel, ISelector, ITextBox, IUIElement,
+    KeyboardAccelerator, Orientation, RowDefinition, ScrollBarVisibility, ScrollViewer,
+    SolidColorBrush, StackPanel, TextBlock, TextBox, TextWrapping, Thickness,
+    VerticalAlignment, Visibility, Window, XamlReader, XamlRoot,
 };
 use windows_core::{EventRevoker, Interface};
+
+use crate::design_tokens;
 
 /// The default namespace used by every runtime XAML fragment.
 const XMLNS: &str = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
@@ -84,8 +87,13 @@ pub fn text(value: &str) -> Result<TextBlock> {
 }
 
 /// A heading-sized text block. `weight` follows the OpenType scale (400, 600,
-/// 700); the XAML accessibility tree still sees it as ordinary text.
-pub fn heading(value: &str, size: Option<f64>, weight: Option<u16>) -> Result<TextBlock> {
+/// 700); `heading_level` sets the accessibility heading level (Level1-Level9).
+pub fn heading(
+    value: &str,
+    size: Option<f64>,
+    weight: Option<u16>,
+    heading_level: Option<i32>,
+) -> Result<TextBlock> {
     let block = text(value)?;
     if let Some(size) = size {
         block.SetFontSize(size)?;
@@ -93,11 +101,81 @@ pub fn heading(value: &str, size: Option<f64>, weight: Option<u16>) -> Result<Te
     if let Some(weight) = weight {
         block.SetFontWeight(FontWeight { weight })?;
     }
+    if let Some(level) = heading_level {
+        AutomationProperties::SetHeadingLevel(&block, mailin_winui_sys::AutomationHeadingLevel(level))?;
+    }
     Ok(block)
 }
 
+/// Heading 1 — page title (24pt, bold, Level1)
+pub fn heading1(value: &str) -> Result<TextBlock> {
+    let tokens = design_tokens::tokens();
+    heading(
+        value,
+        Some(tokens.typography.h1_size),
+        Some(tokens.typography.weight_bold),
+        Some(1),
+    )
+}
+
+/// Heading 2 — page section (20pt, semibold, Level2)
+pub fn heading2(value: &str) -> Result<TextBlock> {
+    let tokens = design_tokens::tokens();
+    heading(
+        value,
+        Some(tokens.typography.h2_size),
+        Some(tokens.typography.weight_semibold),
+        Some(2),
+    )
+}
+
+/// Heading 3 — dialog section (18pt, semibold, Level3)
+pub fn heading3(value: &str) -> Result<TextBlock> {
+    let tokens = design_tokens::tokens();
+    heading(
+        value,
+        Some(tokens.typography.h3_size),
+        Some(tokens.typography.weight_semibold),
+        Some(3),
+    )
+}
+
+/// Subheading — list section (16pt, semibold, Level4)
+pub fn subheading(value: &str) -> Result<TextBlock> {
+    let tokens = design_tokens::tokens();
+    heading(
+        value,
+        Some(tokens.typography.subheading_size),
+        Some(tokens.typography.weight_semibold),
+        Some(4),
+    )
+}
+
+/// Caption / small label (12pt, semibold)
+pub fn caption(value: &str) -> Result<TextBlock> {
+    let tokens = design_tokens::tokens();
+    heading(
+        value,
+        Some(tokens.typography.caption_size),
+        Some(tokens.typography.weight_semibold),
+        None,
+    )
+}
+
+/// Body text (14pt, normal)
+pub fn body_text(value: &str) -> Result<TextBlock> {
+    let tokens = design_tokens::tokens();
+    heading(value, Some(tokens.typography.body_size), None, None)
+}
+
 /// A button whose content is a text block, so the label wraps and can be styled.
-pub fn button(label: &str) -> Result<Button> {
+/// `accessible_name` sets the AutomationProperties.Name (for icon-only buttons).
+/// `accessible_description` sets the AutomationProperties.HelpText.
+pub fn button(
+    label: &str,
+    accessible_name: Option<&str>,
+    accessible_description: Option<&str>,
+) -> Result<Button> {
     let button = Button::new().context("could not create a button")?;
     let content = text(label)?;
     content.SetTextWrapping(TextWrapping::NoWrap)?;
@@ -105,16 +183,34 @@ pub fn button(label: &str) -> Result<Button> {
     let control: IControl = button.cast()?;
     control.SetHorizontalContentAlignment(HorizontalAlignment::Left)?;
     control.SetVerticalContentAlignment(VerticalAlignment::Center)?;
+    if let Some(name) = accessible_name {
+        AutomationProperties::SetName(&button, name)?;
+    }
+    if let Some(desc) = accessible_description {
+        AutomationProperties::SetHelpText(&button, desc)?;
+    }
     Ok(button)
 }
 
 /// A button whose content is an arbitrary element, used for rich list rows.
-pub fn content_button(content: &impl Interface) -> Result<Button> {
+/// `accessible_name` sets the AutomationProperties.Name (required for icon-only buttons).
+/// `accessible_description` sets the AutomationProperties.HelpText.
+pub fn content_button(
+    content: &impl Interface,
+    accessible_name: Option<&str>,
+    accessible_description: Option<&str>,
+) -> Result<Button> {
     let button = Button::new().context("could not create a button")?;
     set_content(&button, content)?;
     let control: IControl = button.cast()?;
     control.SetHorizontalContentAlignment(HorizontalAlignment::Stretch)?;
     control.SetVerticalContentAlignment(VerticalAlignment::Center)?;
+    if let Some(name) = accessible_name {
+        AutomationProperties::SetName(&button, name)?;
+    }
+    if let Some(desc) = accessible_description {
+        AutomationProperties::SetHelpText(&button, desc)?;
+    }
     Ok(button)
 }
 
@@ -127,11 +223,18 @@ pub fn set_button_label(button: &Button, label: &str) -> Result<()> {
 
 /// A text button tinted with the platform destructive colour, used for
 /// actions like removing an account.
-pub fn destructive_button(label: &str) -> Result<Button> {
-    let button = button(label)?;
+/// `accessible_name` sets the AutomationProperties.Name.
+/// `accessible_description` sets the AutomationProperties.HelpText.
+pub fn destructive_button(
+    label: &str,
+    accessible_name: Option<&str>,
+    accessible_description: Option<&str>,
+) -> Result<Button> {
+    let button = button(label, accessible_name, accessible_description)?;
     let content: IContentControl = button.cast()?;
     let content: TextBlock = content.Content()?.cast()?;
-    set_foreground(&content, &solid_brush("#C42B1C")?)?;
+    let brush = design_tokens::tokens().destructive_brush()?;
+    set_foreground(&content, &brush)?;
     Ok(button)
 }
 
@@ -163,6 +266,36 @@ pub fn stack(orientation: Orientation, spacing: f64) -> Result<StackPanel> {
     panel.SetOrientation(orientation)?;
     panel.SetSpacing(spacing)?;
     Ok(panel)
+}
+
+/// Create a vertical stack with default extra-small spacing (4).
+pub fn stack_xs(orientation: Orientation) -> Result<StackPanel> {
+    let tokens = design_tokens::tokens();
+    stack(orientation, tokens.spacing.xs)
+}
+
+/// Create a vertical stack with default small spacing (8).
+pub fn stack_sm(orientation: Orientation) -> Result<StackPanel> {
+    let tokens = design_tokens::tokens();
+    stack(orientation, tokens.spacing.sm)
+}
+
+/// Create a vertical stack with default medium spacing (12).
+pub fn stack_md(orientation: Orientation) -> Result<StackPanel> {
+    let tokens = design_tokens::tokens();
+    stack(orientation, tokens.spacing.md)
+}
+
+/// Create a vertical stack with default large spacing (16).
+pub fn stack_lg(orientation: Orientation) -> Result<StackPanel> {
+    let tokens = design_tokens::tokens();
+    stack(orientation, tokens.spacing.lg)
+}
+
+/// Create a vertical stack with default extra-large spacing (24).
+pub fn stack_xl(orientation: Orientation) -> Result<StackPanel> {
+    let tokens = design_tokens::tokens();
+    stack(orientation, tokens.spacing.xl)
 }
 
 /// Append an element to a panel.
@@ -227,7 +360,8 @@ pub fn scroll(content: &impl Interface) -> Result<ScrollViewer> {
 }
 
 /// Create a combo box and fill it with text items.
-pub fn combo(labels: &[&str], selected: usize) -> Result<ComboBox> {
+/// `accessible_name` sets the AutomationProperties.Name.
+pub fn combo(labels: &[&str], selected: usize, accessible_name: Option<&str>) -> Result<ComboBox> {
     let combo = ComboBox::new().context("could not create a combo box")?;
     let items: IItemsControl = combo.cast()?;
     let items = items.Items().context("could not read combo box items")?;
@@ -241,6 +375,9 @@ pub fn combo(labels: &[&str], selected: usize) -> Result<ComboBox> {
         let selector: ISelector = combo.cast()?;
         let index = selected.min(labels.len() - 1);
         selector.SetSelectedIndex(index as i32)?;
+    }
+    if let Some(name) = accessible_name {
+        AutomationProperties::SetName(&combo, name)?;
     }
     Ok(combo)
 }
@@ -319,6 +456,23 @@ pub fn pixel_column(grid: &Grid, width: f64) -> Result<()> {
     add_column(grid, GridUnitType::Pixel, width)
 }
 
+/// Star-sized column with minimum width (responsive).
+/// Uses GridUnitType::Star with a MinWidth constraint.
+pub fn star_column_min(grid: &Grid, min_width: f64, max_width: f64) -> Result<()> {
+    let column: ColumnDefinition = load(&format!("<ColumnDefinition xmlns=\"{XMLNS}\" MinWidth=\"{min_width}\" />"))?;
+    if max_width > 0.0 {
+        column.SetMaxWidth(max_width)?;
+    }
+    column.SetWidth(GridLength {
+        value: 1.0,
+        grid_unit_type: GridUnitType::Star,
+    })?;
+    grid.ColumnDefinitions()
+        .context("could not read grid columns")?
+        .Append(&column)?;
+    Ok(())
+}
+
 /// Show or hide an element without removing it from its parent.
 pub fn set_visible(element: &impl Interface, visible: bool) -> Result<()> {
     let element: IUIElement = element.cast()?;
@@ -353,6 +507,51 @@ pub fn margin(
         bottom,
     })?;
     Ok(())
+}
+
+/// Set margin using design token spacing (all sides same).
+pub fn margin_all(element: &impl Interface, spacing: f64) -> Result<()> {
+    margin(element, spacing, spacing, spacing, spacing)
+}
+
+/// Set margin using design token extra-small (4).
+pub fn margin_xs(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    margin_all(element, tokens.spacing.xs)
+}
+
+/// Set margin using design token small (8).
+pub fn margin_sm(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    margin_all(element, tokens.spacing.sm)
+}
+
+/// Set margin using design token medium (12).
+pub fn margin_md(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    margin_all(element, tokens.spacing.md)
+}
+
+/// Set margin using design token large (16).
+pub fn margin_lg(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    margin_all(element, tokens.spacing.lg)
+}
+
+/// Set margin using design token extra-large (24).
+pub fn margin_xl(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    margin_all(element, tokens.spacing.xl)
+}
+
+/// Set horizontal margin (left/right) using design token.
+pub fn margin_horizontal(element: &impl Interface, spacing: f64) -> Result<()> {
+    margin(element, spacing, 0.0, spacing, 0.0)
+}
+
+/// Set vertical margin (top/bottom) using design token.
+pub fn margin_vertical(element: &impl Interface, spacing: f64) -> Result<()> {
+    margin(element, 0.0, spacing, 0.0, spacing)
 }
 
 /// Give a framework element a minimum width.
@@ -394,11 +593,50 @@ pub fn padding(
     Ok(())
 }
 
+/// Set padding using design token spacing (all sides same).
+pub fn padding_all(element: &impl Interface, spacing: f64) -> Result<()> {
+    padding(element, spacing, spacing, spacing, spacing)
+}
+
+/// Set padding using design token extra-small (4).
+pub fn padding_xs(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    padding_all(element, tokens.spacing.xs)
+}
+
+/// Set padding using design token small (8).
+pub fn padding_sm(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    padding_all(element, tokens.spacing.sm)
+}
+
+/// Set padding using design token medium (12).
+pub fn padding_md(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    padding_all(element, tokens.spacing.md)
+}
+
+/// Set padding using design token large (16).
+pub fn padding_lg(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    padding_all(element, tokens.spacing.lg)
+}
+
+/// Set padding using design token extra-large (24).
+pub fn padding_xl(element: &impl Interface) -> Result<()> {
+    let tokens = design_tokens::tokens();
+    padding_all(element, tokens.spacing.xl)
+}
+
 /// Create a text box with a placeholder. The caller decides whether it accepts
 /// newlines with [`TextBox::SetAcceptsReturn`].
-pub fn text_box(placeholder: &str) -> Result<mailin_winui_sys::TextBox> {
+/// `accessible_name` sets the AutomationProperties.Name.
+pub fn text_box(placeholder: &str, accessible_name: Option<&str>) -> Result<mailin_winui_sys::TextBox> {
     let textbox = mailin_winui_sys::TextBox::new().context("could not create a text box")?;
     textbox.SetPlaceholderText(placeholder)?;
+    if let Some(name) = accessible_name {
+        AutomationProperties::SetName(&textbox, name)?;
+    }
     Ok(textbox)
 }
 
@@ -412,12 +650,18 @@ pub fn password_box(placeholder: &str) -> Result<mailin_winui_sys::PasswordBox> 
 }
 
 /// Stack a small caption above a control, the form layout used by the account
-/// wizard and the composer.
+/// wizard and the composer. Associates the caption with the control via
+/// AutomationProperties.LabeledBy so screen readers announce the label.
 pub fn field(label: &str, control: &impl Interface) -> Result<StackPanel> {
-    let row = stack(Orientation::Vertical, 4.0)?;
-    let caption = heading(label, Some(12.0), Some(600))?;
+    let tokens = design_tokens::tokens();
+    let row = stack(Orientation::Vertical, tokens.spacing.xs)?;
+    let caption = caption(label)?;
     append(&row, &caption)?;
     append(&row, control)?;
+    // Associate the caption (label) with the control for accessibility.
+    let caption_element: IUIElement = caption.cast()?;
+    let control_element: IUIElement = control.cast()?;
+    AutomationProperties::SetLabeledBy(&control_element, &caption_element)?;
     Ok(row)
 }
 
@@ -437,18 +681,24 @@ pub fn password_value(password: &mailin_winui_sys::PasswordBox) -> String {
 /// A labelled toggle row: title and subtitle on the left, the switch on the
 /// right. Returns both the row (to append to a panel) and the switch (to read
 /// the value back when saving).
+/// `accessible_name` sets the AutomationProperties.Name on the toggle switch.
+/// `accessible_on`/`accessible_off` set the On/Off labels for screen readers.
 pub fn switch_row(
     title: &str,
     subtitle: &str,
     active: bool,
+    accessible_name: Option<&str>,
+    accessible_on: Option<&str>,
+    accessible_off: Option<&str>,
 ) -> Result<(StackPanel, mailin_winui_sys::ToggleSwitch)> {
-    let row = stack(Orientation::Horizontal, 12.0)?;
-    let labels = stack(Orientation::Vertical, 2.0)?;
+    let tokens = design_tokens::tokens();
+    let row = stack(Orientation::Horizontal, tokens.spacing.sm)?;
+    let labels = stack(Orientation::Vertical, tokens.spacing.xs)?;
     let title_block = text(title)?;
-    title_block.SetFontWeight(FontWeight { weight: 600 })?;
+    title_block.SetFontWeight(tokens.semibold_weight())?;
     let subtitle_block = text(subtitle)?;
     let subtitle_element: IUIElement = subtitle_block.cast()?;
-    subtitle_element.SetOpacity(0.7)?;
+    subtitle_element.SetOpacity(tokens.colors.subtitle_opacity)?;
     append(&labels, &title_block)?;
     append(&labels, &subtitle_block)?;
     stretch_horizontal(&labels)?;
@@ -456,6 +706,16 @@ pub fn switch_row(
 
     let toggle = mailin_winui_sys::ToggleSwitch::new().context("could not create a toggle")?;
     toggle.SetIsOn(active)?;
+    // Set accessibility properties on the toggle switch
+    if let Some(name) = accessible_name {
+        AutomationProperties::SetName(&toggle, name)?;
+    }
+    if let Some(on_label) = accessible_on {
+        toggle.SetOnContent(&text(on_label)?)?;
+    }
+    if let Some(off_label) = accessible_off {
+        toggle.SetOffContent(&text(off_label)?)?;
+    }
     let toggle_element: FrameworkElement = toggle.cast()?;
     toggle_element.SetVerticalAlignment(VerticalAlignment::Center)?;
     append(&row, &toggle)?;
@@ -489,10 +749,15 @@ pub fn window_xaml_root(window: &Window) -> Result<XamlRoot> {
 
 /// Attach a keyboard accelerator to an element. Attach it to the window's
 /// content root so the shortcut works wherever focus is inside the window.
+/// `description` sets the KeyboardAccelerator.String for key tips / help.
 pub fn add_keyboard_accelerator(
     element: &impl Interface,
     accelerator: &KeyboardAccelerator,
+    description: Option<&str>,
 ) -> Result<()> {
+    if let Some(desc) = description {
+        accelerator.SetDescription(desc)?;
+    }
     let element: IUIElement = element.cast()?;
     element.KeyboardAccelerators()?.Append(accelerator)?;
     Ok(())

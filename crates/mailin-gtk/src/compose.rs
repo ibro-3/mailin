@@ -7,8 +7,8 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use libadwaita as adw;
 
-use mailin_core::compose::{new_draft_key, recipient_addresses};
-use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
+use mailin_core::compose::{apply_template, new_draft_key, recipient_addresses, template_draft, with_signature_prefix};
+use mailin_core::{Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template};
 
 use crate::app::AppState;
 use crate::format;
@@ -57,7 +57,23 @@ pub fn present(
         .tooltip_text("Attach files")
         .build();
     attach.add_css_class("flat");
+    {
+        use gtk::accessible::Property;
+        attach.update_property(&[Property::Label("Attach files")]);
+    }
     header.pack_start(&attach);
+
+    // Templates menu button
+    let templates_btn = gtk::MenuButton::builder()
+        .icon_name("document-template-symbolic")
+        .tooltip_text("Message templates")
+        .build();
+    templates_btn.add_css_class("flat");
+    {
+        use gtk::accessible::Property;
+        templates_btn.update_property(&[Property::Label("Message templates")]);
+    }
+    header.pack_start(&templates_btn);
 
     let to_row = adw::EntryRow::builder().title("To").build();
     let cc_row = adw::EntryRow::builder().title("Cc").build();
@@ -82,6 +98,11 @@ pub fn present(
         .right_margin(12)
         .build();
     body_view.buffer().set_text(&draft.body);
+    // Give the message body editor an accessible name (it has no visible label).
+    {
+        use gtk::accessible::Property;
+        body_view.update_property(&[Property::Label("Message body")]);
+    }
     let body_scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -128,6 +149,293 @@ pub fn present(
     let attachments: Rc<RefCell<Vec<ComposeAttachment>>> =
         Rc::new(RefCell::new(draft.attachments.clone()));
     let dirty = Rc::new(Cell::new(false));
+    rebuild_attachments(
+        &attachment_list,
+        &attachments_group,
+        &attachments,
+        Some(Rc::clone(&dirty)),
+    );
+
+    // Templates popover
+    let templates_popover = gtk::Popover::builder()
+        .has_arrow(true)
+        .position(gtk::PositionType::Bottom)
+        .build();
+    let templates_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .build();
+    templates_list.add_css_class("boxed-list");
+    templates_popover.set_child(Some(&templates_list));
+    templates_btn.set_popover(Some(&templates_popover));
+
+    // Clone widgets for use in populate_templates closure
+    let to_row_for_populate = to_row.clone();
+    let cc_row_for_populate = cc_row.clone();
+    let bcc_row_for_populate = bcc_row.clone();
+    let subject_row_for_populate = subject_row.clone();
+    let body_view_for_populate = body_view.clone();
+    let window_for_populate = window.clone();
+    let banner_for_populate = banner.clone();
+    let dirty_for_populate = Rc::clone(&dirty);
+
+    // Populate templates list
+    let populate_templates = {
+        let app = Rc::clone(&app);
+        let account_id = account.id;
+        let templates_list = templates_list.clone();
+        let templates_popover = templates_popover.clone();
+        move || {
+            while let Some(child) = templates_list.first_child() {
+                templates_list.remove(&child);
+            }
+            if let Ok(templates) = app.mailin.store().list_templates(&account_id) {
+                if templates.is_empty() {
+                    let empty_row = adw::ActionRow::builder()
+                        .title("No templates yet")
+                        .subtitle("Create templates from the account settings")
+                        .activatable(false)
+                        .build();
+                    empty_row.add_css_class("dim-label");
+                    templates_list.append(&empty_row);
+                } else {
+                    for template in templates {
+                        let row = adw::ActionRow::builder()
+                            .title(&template.name)
+                            .subtitle(&template.subject)
+                            .activatable(true)
+                            .build();
+                        let template_clone = template.clone();
+                        let to_row = to_row_for_populate.clone();
+                        let cc_row = cc_row_for_populate.clone();
+                        let bcc_row = bcc_row_for_populate.clone();
+                        let subject_row = subject_row_for_populate.clone();
+                        let body_view = body_view_for_populate.clone();
+                        let dirty = Rc::clone(&dirty_for_populate);
+                        let templates_popover = templates_popover.clone();
+                        let banner = banner_for_populate.clone();
+                        row.connect_activated(move |_| {
+                            // Only prefill empty fields
+                            let vars = std::collections::HashMap::new();
+                            let draft = template_draft(&template_clone, &vars);
+                            if to_row.text().is_empty() {
+                                to_row.set_text(&draft.to);
+                            }
+                            if cc_row.text().is_empty() {
+                                cc_row.set_text(&draft.cc);
+                            }
+                            if bcc_row.text().is_empty() {
+                                bcc_row.set_text(&draft.bcc);
+                            }
+                            if subject_row.text().is_empty() {
+                                subject_row.set_text(&draft.subject);
+                            }
+                            let buffer = body_view.buffer();
+                            let current_body = buffer
+                                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                                .to_string();
+                            if current_body.trim().is_empty() {
+                                buffer.set_text(&draft.body);
+                            }
+                            dirty.set(true);
+                            templates_popover.popdown();
+                            banner.set_title("Template applied");
+                            banner.set_revealed(true);
+                        });
+                        templates_list.append(&row);
+                    }
+                }
+            }
+            templates_list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            let save_row = adw::ActionRow::builder()
+                .title("Save as template…")
+                .build();
+            let to_row = to_row_for_populate.clone();
+            let cc_row = cc_row_for_populate.clone();
+            let bcc_row = bcc_row_for_populate.clone();
+            let subject_row = subject_row_for_populate.clone();
+            let body_view = body_view_for_populate.clone();
+            let app = Rc::clone(&app);
+            let account_id = account.id;
+            let templates_popover = templates_popover.clone();
+            let banner = banner_for_populate.clone();
+            let window = window_for_populate.clone();
+            save_row.connect_activated(move |_| {
+                templates_popover.popdown();
+                save_as_template_dialog(&window, &app, account_id, &to_row, &cc_row, &bcc_row, &subject_row, &body_view, &banner);
+            });
+            templates_list.append(&save_row);
+        }
+    };
+    // Show templates when popover opens
+    templates_popover.connect_closed({
+        let _populate = populate_templates.clone();
+        move |_| {
+            // Re-populate next time it opens
+        }
+    });
+    // Initial population on first open
+    templates_popover.set_autohide(true);
+    // We'll populate when the button is clicked by connecting to the popover's show signal
+    // For simplicity, populate now
+    populate_templates();
+
+    // Contact autocomplete for recipient fields
+    let setup_autocomplete = {
+        let app = Rc::clone(&app);
+        let account_id = account.id;
+        move |entry_row: &adw::EntryRow| {
+            let popover = gtk::Popover::builder()
+                .has_arrow(true)
+                .position(gtk::PositionType::Bottom)
+                .build();
+            let list_box = gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::Single)
+                .build();
+            list_box.add_css_class("boxed-list");
+            popover.set_child(Some(&list_box));
+            entry_row.add_controller(gtk::EventControllerKey::new());
+            // We'll use a key controller on the entry itself
+            let entry = entry_row.clone();
+            let popover_clone = popover.clone();
+            let list_box_clone = list_box.clone();
+            let app = Rc::clone(&app);
+            let account_id = account_id;
+            
+            // Store the popover as data on the entry for later access
+            let popover_ref = Rc::new(RefCell::new(Some(popover_clone)));
+            let list_box_ref = Rc::new(RefCell::new(Some(list_box_clone)));
+            
+            // Connect to entry changes to show/filter suggestions
+            entry.connect_changed({
+                let entry = entry.clone();
+                let popover_ref = Rc::clone(&popover_ref);
+                let list_box_ref = Rc::clone(&list_box_ref);
+                let app = Rc::clone(&app);
+                let account_id = account_id;
+                move |_| {
+                    let query = entry.text().to_string();
+                    if query.trim().is_empty() {
+                        if let Some(p) = popover_ref.borrow().as_ref() {
+                            p.popdown();
+                        }
+                        return;
+                    }
+                    
+                    // Search contacts
+                    if let Ok(contacts) = app.mailin.store().search_contacts(&account_id, &query, 10) {
+                        // Clear list
+                        if let Some(list) = list_box_ref.borrow().as_ref() {
+                            while let Some(child) = list.first_child() {
+                                list.remove(&child);
+                            }
+                            if contacts.is_empty() {
+                                if let Some(p) = popover_ref.borrow().as_ref() {
+                                    p.popdown();
+                                }
+                            } else {
+                                for contact in contacts {
+                                    let row = adw::ActionRow::builder()
+                                        .title(&contact.email)
+                                        .subtitle(if contact.display_name.is_empty() { "" } else { &contact.display_name })
+                                        .activatable(true)
+                                        .build();
+                                    let email = contact.email.clone();
+                                    let entry = entry.clone();
+                                    let popover_ref = Rc::clone(&popover_ref);
+                                    row.connect_activated({
+                                        let email = email.clone();
+                                        let entry = entry.clone();
+                                        let popover_ref = Rc::clone(&popover_ref);
+                                        move |_| {
+                                            // Append or replace email in the entry
+                                            let current = entry.text().to_string();
+                                            let new_text = if current.trim().is_empty() {
+                                                email.clone()
+                                            } else {
+                                                // Check if we're completing a partial email
+                                                let parts: Vec<&str> = current.split(',').collect();
+                                                let mut new_parts = parts.clone();
+                                                if let Some(last) = new_parts.last_mut() {
+                                                    *last = email.as_str();
+                                                } else {
+                                                    new_parts.push(&email);
+                                                }
+                                                new_parts.join(", ")
+                                            };
+                                            entry.set_text(&new_text);
+                                            if let Some(p) = popover_ref.borrow().as_ref() {
+                                                p.popdown();
+                                            }
+                                        }
+                                    });
+                                    if let Some(list) = list_box_ref.borrow().as_ref() {
+                                        list.append(&row);
+                                    }
+                                }
+                                // Position popover under the entry
+                                if let Some(p) = popover_ref.borrow().as_ref() {
+                                    p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(0, entry.height(), entry.width(), 1)));
+                                    p.popup();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Handle key events for navigation
+            let key_controller = gtk::EventControllerKey::new();
+            let entry_for_keys = entry.clone();
+            let list_box_for_keys = Rc::clone(&list_box_ref);
+            let popover_for_keys = Rc::clone(&popover_ref);
+            key_controller.connect_key_pressed(move |_, key, _, _| {
+                if let (Some(list), Some(popover)) = (list_box_for_keys.borrow().as_ref(), popover_for_keys.borrow().as_ref()) {
+                    match key {
+                        gtk::gdk::Key::Escape => {
+                            popover.popdown();
+                            return glib::Propagation::Stop;
+                        }
+                        gtk::gdk::Key::Up | gtk::gdk::Key::Down => {
+                            let selected = list.selected_row();
+                            let children: Vec<_> = list
+                                .observe_children()
+                                .snapshot()
+                                .iter()
+                                .filter_map(|o| o.downcast_ref::<gtk::ListBoxRow>().cloned())
+                                .collect();
+                            if children.is_empty() {
+                                return glib::Propagation::Proceed;
+                            }
+                            let current_idx = selected.as_ref().and_then(|r| {
+                                children.iter().position(|c| c.upcast_ref::<glib::Object>() == r.upcast_ref::<glib::Object>())
+                            }).unwrap_or(0);
+                            let new_idx = match key {
+                                gtk::gdk::Key::Up => current_idx.saturating_sub(1),
+                                gtk::gdk::Key::Down => (current_idx + 1).min(children.len() - 1),
+                                _ => current_idx,
+                            };
+                            list.select_row(Some(&children[new_idx]));
+                            return glib::Propagation::Stop;
+                        }
+                        gtk::gdk::Key::Return => {
+                            if let Some(row) = list.selected_row() {
+                                row.emit_by_name::<()>("activated", &[]);
+                                return glib::Propagation::Stop;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                glib::Propagation::Proceed
+            });
+            entry.add_controller(key_controller);
+        }
+    };
+    
+    setup_autocomplete(&to_row);
+    setup_autocomplete(&cc_row);
+    setup_autocomplete(&bcc_row);
+    
     rebuild_attachments(
         &attachment_list,
         &attachments_group,
@@ -363,6 +671,11 @@ fn rebuild_attachments(
             .valign(gtk::Align::Center)
             .build();
         remove.add_css_class("flat");
+        {
+            use gtk::accessible::Property;
+            let remove_name = format!("Remove attachment {}", attachment.filename);
+            remove.update_property(&[Property::Label(&remove_name)]);
+        }
         let attachments = Rc::clone(attachments);
         let remove_list = list.clone();
         let remove_group = group.clone();
@@ -486,7 +799,7 @@ fn reply_with(
         cc,
         bcc: String::new(),
         subject: reply_subject(&message.subject),
-        body: quoted_reply(message, body),
+        body: with_signature_prefix(&account.signature, &quoted_reply(message, body)),
         in_reply_to: message.message_id.clone(),
         references,
         draft_key: None,
@@ -518,7 +831,7 @@ pub fn forward(account: &Account, message: &MessageHeader, body: Option<&str>) -
         from_name: account.display_name.clone(),
         from_addr: account.email.clone(),
         subject: forward_subject(&message.subject),
-        body: text,
+        body: with_signature_prefix(&account.signature, &text),
         references: Vec::new(),
         ..OutgoingMessage::default()
     }
@@ -572,6 +885,73 @@ fn quoted_reply(message: &MessageHeader, body: Option<&str>) -> String {
         .unwrap_or_default();
     text.push_str(&quoted);
     text
+}
+
+/// Show a dialog to save the current compose content as a template.
+fn save_as_template_dialog(
+    parent: &adw::Window,
+    app: &Rc<AppState>,
+    account_id: AccountId,
+    to_row: &adw::EntryRow,
+    cc_row: &adw::EntryRow,
+    bcc_row: &adw::EntryRow,
+    subject_row: &adw::EntryRow,
+    body_view: &gtk::TextView,
+    banner: &adw::Banner,
+) {
+    let dialog = adw::MessageDialog::builder()
+        .heading("Save as template")
+        .body("Enter a name for this template:")
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+
+    let entry = adw::EntryRow::builder()
+        .title("Template name")
+        .show_apply_button(true)
+        .build();
+    dialog.set_extra_child(Some(&entry));
+
+    let entry_clone = entry.clone();
+    let to_text = to_row.text().to_string();
+    let cc_text = cc_row.text().to_string();
+    let bcc_text = bcc_row.text().to_string();
+    let subject_text = subject_row.text().to_string();
+    let buffer = body_view.buffer();
+    let body_text = buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string();
+    let app = Rc::clone(app);
+    let banner = banner.clone();
+
+    dialog.connect_response(None, move |dialog: &adw::MessageDialog, response| {
+        if response == "save" {
+            let name = entry_clone.text().to_string().trim().to_owned();
+            if !name.is_empty() {
+                match app.mailin.store().upsert_template(
+                    &account_id,
+                    &name,
+                    &subject_text,
+                    &body_text,
+                ) {
+                    Ok(_) => {
+                        banner.set_title("Template saved");
+                        banner.set_revealed(true);
+                    }
+                    Err(e) => {
+                        banner.set_title(&format!("Could not save template: {e}"));
+                        banner.set_revealed(true);
+                    }
+                }
+            }
+        }
+        dialog.close();
+    });
+
+    dialog.present();
 }
 
 #[cfg(test)]
@@ -660,5 +1040,37 @@ mod tests {
         );
         assert!(draft.body.contains("Body text"));
         assert!(!draft.body.contains("root@example.com"));
+    }
+
+    #[test]
+    fn signatures_sit_above_quotes_and_forwards() {
+        let mut account = account();
+        account.signature = "Ada\nhttps://ada.example".into();
+
+        let reply_draft = reply(&account, &message(), Some("Hello"));
+        assert!(
+            reply_draft
+                .body
+                .starts_with("-- \nAda\nhttps://ada.example\n\nOn "),
+            "signature missing from reply: {:?}",
+            reply_draft.body
+        );
+        assert!(reply_draft.body.contains("> Hello"));
+
+        let forward_draft = forward(&account, &message(), Some("Body text"));
+        assert!(
+            forward_draft.body.starts_with(
+                "-- \nAda\nhttps://ada.example\n\n---------- Forwarded message ----------"
+            ),
+            "signature missing from forward: {:?}",
+            forward_draft.body
+        );
+    }
+
+    #[test]
+    fn blank_signatures_leave_bodies_untouched() {
+        let draft = reply(&account(), &message(), Some("Hello"));
+        assert!(draft.body.starts_with("\n\nOn "));
+        assert!(!draft.body.contains("-- \n"));
     }
 }

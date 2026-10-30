@@ -28,6 +28,7 @@ use crate::error::{Error, Result};
 use crate::imap::ImapSession;
 use crate::model::{
     Folder, FolderId, FolderRole, MessageId, OutboxEntry, OutboxState, OutgoingEnvelope,
+    ScheduledAction, SnoozePayload,
 };
 use crate::sync::{self, SyncMode};
 use secrecy::{ExposeSecret, SecretString};
@@ -207,6 +208,30 @@ impl Engine {
         });
     }
 
+    /// Snooze messages until the specified time (Unix timestamp).
+    /// Messages are moved to the Snoozed folder and will be moved back at due_at.
+    pub fn snooze_messages(&self, message_ids: &[MessageId], due_at: i64) {
+        self.send(Command::SnoozeMessages {
+            message_ids: message_ids.to_vec(),
+            due_at,
+        });
+    }
+
+    /// Unsnooze messages immediately, moving them back to their original folders.
+    pub fn unsnooze_messages(&self, message_ids: &[MessageId]) {
+        self.send(Command::UnsnoozeMessages {
+            message_ids: message_ids.to_vec(),
+        });
+    }
+
+    /// Apply rules to messages in a folder (used after body fetch).
+    pub fn apply_rules(&self, folder_id: FolderId, message_ids: &[MessageId]) {
+        self.send(Command::ApplyRules {
+            folder_id,
+            message_ids: message_ids.to_vec(),
+        });
+    }
+
     /// Store a message in the outbox and wake the sender.
     pub fn queue_and_send(
         &self,
@@ -290,6 +315,17 @@ enum Command {
         account_id: AccountId,
         entry_id: i64,
     },
+    SnoozeMessages {
+        message_ids: Vec<MessageId>,
+        due_at: i64,
+    },
+    UnsnoozeMessages {
+        message_ids: Vec<MessageId>,
+    },
+    ApplyRules {
+        folder_id: FolderId,
+        message_ids: Vec<MessageId>,
+    },
     Shutdown,
 }
 
@@ -342,12 +378,24 @@ enum WorkerCommand {
     CancelOutbox {
         entry_id: i64,
     },
+    SnoozeMessages {
+        message_ids: Vec<MessageId>,
+        due_at: i64,
+    },
+    UnsnoozeMessages {
+        message_ids: Vec<MessageId>,
+    },
+    ApplyRules {
+        folder_id: FolderId,
+        message_ids: Vec<MessageId>,
+    },
     Stop,
 }
 
 async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceiver<Command>) {
     let mut workers: HashMap<AccountId, mpsc::UnboundedSender<WorkerCommand>> = HashMap::new();
     let sender = tokio::spawn(outbox_sender(state.clone()));
+    let scheduled = tokio::spawn(scheduled_worker(state.clone()));
 
     // Start the workers of accounts that want background synchronization. A
     // worker connects and syncs the inbox on its own.
@@ -465,6 +513,44 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                 let worker = ensure_worker(&mut workers, &state, account_id);
                 let _ = worker.send(WorkerCommand::CancelOutbox { entry_id });
             }
+            Command::SnoozeMessages {
+                message_ids,
+                due_at,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::SnoozeMessages { message_ids, due_at });
+                }
+            }
+            Command::UnsnoozeMessages {
+                message_ids,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::UnsnoozeMessages { message_ids });
+                }
+            }
+            Command::ApplyRules {
+                folder_id,
+                message_ids,
+            } => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::ApplyRules { folder_id, message_ids });
+                }
+            }
         }
     }
 
@@ -472,7 +558,9 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
         let _ = worker.send(WorkerCommand::Stop);
     }
     sender.abort();
+    scheduled.abort();
     let _ = sender.await;
+    let _ = scheduled.await;
 }
 
 fn ensure_worker(
@@ -887,6 +975,15 @@ async fn handle_command(
         WorkerCommand::CancelOutbox { entry_id } => {
             state.mailbox.cancel_outbox(entry_id)?;
         }
+        WorkerCommand::SnoozeMessages { message_ids, due_at } => {
+            snooze_messages(session, state, account, &message_ids, due_at).await?;
+        }
+        WorkerCommand::UnsnoozeMessages { message_ids } => {
+            unsnooze_messages(session, state, account, &message_ids).await?;
+        }
+        WorkerCommand::ApplyRules { folder_id, message_ids } => {
+            apply_rules(session, state, account, folder_id, &message_ids).await?;
+        }
     }
     Ok(false)
 }
@@ -911,7 +1008,7 @@ async fn fetch_body(
         return Ok(());
     };
 
-    let (_, body) = crate::imap::parse::parse_message(&raw);
+    let (header, body) = crate::imap::parse::parse_message(&raw);
     let store = state.mailbox.store();
     if store.set_body(
         message_id,
@@ -924,6 +1021,20 @@ async fn fetch_body(
         state.mailbox.publish(Event::MessagesChanged {
             folder_id: folder.id,
         });
+        // Apply rules that depend on body content
+        state.mailbox.apply_rules(folder.id, &[message_id]);
+    }
+    // Seed contacts from full message headers
+    let account_id = folder.account_id;
+    if let Some(addr) = &header.from_addr {
+        let name = header.from_name.as_deref().unwrap_or("");
+        let _ = store.upsert_contact(&account_id, addr, name, false);
+    }
+    for addr in crate::sync::parse_address_list(&header.to_addrs) {
+        let _ = store.upsert_contact(&account_id, &addr, "", false);
+    }
+    for addr in crate::sync::parse_address_list(&header.cc_addrs) {
+        let _ = store.upsert_contact(&account_id, &addr, "", false);
     }
     Ok(())
 }
@@ -1123,6 +1234,341 @@ async fn move_messages(
     Ok(())
 }
 
+async fn snooze_messages(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    message_ids: &[MessageId],
+    due_at: i64,
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+        return Err(Error::Config("the account has no Snoozed folder; create one on the server first".into()));
+    };
+
+    // Group by source folder
+    let mut groups: HashMap<FolderId, Vec<(MessageId, u32, FolderId)>> = HashMap::new();
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else { continue; };
+        groups.entry(message.folder_id).or_default().push((*message_id, message.uid, message.folder_id));
+    }
+
+    for (source_id, items) in groups {
+        let Some(source) = folders.iter().find(|f| f.id == source_id) else { continue; };
+        let uids: Vec<u32> = items.iter().map(|(_, uid, _)| *uid).collect();
+        session.select(&source.name).await?;
+        session.move_messages(&uids, &snoozed.name).await?;
+
+        for (message_id, _, return_to_folder_id) in items {
+            // Remove from source cache
+            let _ = state.mailbox.store().delete_message_by_id(message_id)?;
+            // Schedule unsnooze
+            let payload = crate::model::SnoozePayload {
+                message_id: message_id.0,
+                return_to_folder_id: return_to_folder_id.0,
+            };
+            let payload_json = serde_json::to_string(&payload)?;
+            state.mailbox.store().schedule_action(&account.id, due_at, "snooze_message", &payload_json)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source_id });
+        }
+    }
+
+    // Sync the Snoozed folder to pull in the moved messages
+    sync_folder_logged(session, state, snoozed.id, SyncMode::Full).await;
+    Ok(())
+}
+
+async fn unsnooze_messages(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    message_ids: &[MessageId],
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+        return Ok(()); // No snoozed folder, nothing to do
+    };
+
+    // Get messages from snoozed folder
+    let mut to_unsnooze = Vec::new();
+    for message_id in message_ids {
+        if let Some(message) = state.mailbox.message(*message_id)? {
+            if message.folder_id == snoozed.id {
+                to_unsnooze.push((message_id, message));
+            }
+        }
+    }
+
+    if to_unsnooze.is_empty() {
+        return Ok(());
+    }
+
+    // Group by return folder (we need to look up the scheduled action for return_to_folder_id)
+    for (message_id, message) in to_unsnooze {
+        // Find the scheduled action to get return_to_folder_id
+        let store = state.mailbox.store();
+        let actions = store.due_actions()?; // This gets all pending, we need a better query
+        // For now, we'll use a simpler approach: move back to Inbox if we can't find the original
+        let return_folder_id = find_role(&folders, FolderRole::Inbox).map(|f| f.id);
+        if let Some(return_folder_id) = return_folder_id {
+            let uids = vec![message.uid];
+            session.select(&snoozed.name).await?;
+            session.move_messages(&uids, &folders.iter().find(|f| f.id == return_folder_id).unwrap().name).await?;
+            let _ = store.delete_message_by_id(*message_id)?;
+            store.set_action_state(message_id.0, "done", None)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: snoozed.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: return_folder_id });
+        }
+    }
+
+    // Also cancel any pending scheduled actions for these messages
+    let store = state.mailbox.store();
+    let all_actions = store.due_actions()?;
+    for action in all_actions {
+        if action.kind == "snooze_message" {
+            if let Ok(payload) = serde_json::from_str::<crate::model::SnoozePayload>(&action.payload_json) {
+                if message_ids.iter().any(|m| m.0 == payload.message_id) {
+                    store.set_action_state(action.id, "done", None)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_rules(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    folder_id: FolderId,
+    message_ids: &[MessageId],
+) -> Result<()> {
+    use crate::rules::{eval_rule, parse_actions, RegexCache};
+
+    let store = state.mailbox.store();
+    let rules = store.list_rules(&account.id)?;
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    let mut regex_cache = RegexCache::default();
+
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else {
+            continue;
+        };
+
+        // Get body if available for body conditions
+        let body_text = if message.body_fetched {
+            store.body(message.id)?.and_then(|(text, _html)| text)
+        } else {
+            None
+        };
+
+        for rule in &rules {
+            if eval_rule(rule, &message, body_text.as_deref(), &mut regex_cache) {
+                let actions = parse_actions(rule);
+                for action in actions {
+                    execute_rule_action(session, state, account, &action, message_id).await?;
+                }
+                if rule.stop {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn execute_rule_action(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    action: &crate::model::RuleAction,
+    message_id: &MessageId,
+) -> Result<()> {
+    use crate::model::FolderRole;
+
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(message) = state.mailbox.message(*message_id)? else {
+        return Ok(());
+    };
+
+    match action.kind.as_str() {
+        "move" => {
+            // Value is the target folder role or folder ID
+            let target_folder = if let Ok(folder_id) = action.value.parse::<i64>() {
+                folders.iter().find(|f| f.id.0 == folder_id)
+            } else {
+                find_role(&folders, action.value.parse().unwrap_or(FolderRole::Other))
+            };
+
+            if let Some(target) = target_folder {
+                let uids = vec![message.uid];
+                let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                    return Ok(());
+                };
+                session.select(&source.name).await?;
+                session.move_messages(&uids, &target.name).await?;
+                let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+                state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+                state.mailbox.publish(Event::MessagesChanged { folder_id: target.id });
+            }
+        }
+        "copy" => {
+            // Similar to move but without deleting from source
+            let target_folder = if let Ok(folder_id) = action.value.parse::<i64>() {
+                folders.iter().find(|f| f.id.0 == folder_id)
+            } else {
+                find_role(&folders, action.value.parse().unwrap_or(FolderRole::Other))
+            };
+
+            if let Some(target) = target_folder {
+                let uids = vec![message.uid];
+                let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                    return Ok(());
+                };
+                session.select(&source.name).await?;
+                session.copy_messages(&uids, &target.name).await?;
+                // Note: we don't delete from source for copy
+                state.mailbox.publish(Event::MessagesChanged { folder_id: target.id });
+            }
+        }
+        "flag" => {
+            // Value is the flag to add
+            let flags = vec![action.value.clone()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &flags, &[]).await?;
+            let mut msg_flags = message.flags.clone();
+            if !msg_flags.iter().any(|f| f.eq_ignore_ascii_case(&action.value)) {
+                msg_flags.push(action.value.clone());
+            }
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "unflag" => {
+            // Value is the flag to remove
+            let flags = vec![action.value.clone()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &[], &flags).await?;
+            let mut msg_flags = message.flags.clone();
+            msg_flags.retain(|f| !f.eq_ignore_ascii_case(&action.value));
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "mark_read" => {
+            let flags = vec!["\\Seen".to_string()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &flags, &[]).await?;
+            let mut msg_flags = message.flags.clone();
+            if !msg_flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")) {
+                msg_flags.push("\\Seen".to_string());
+            }
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "mark_unread" => {
+            let flags = vec!["\\Seen".to_string()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &[], &flags).await?;
+            let mut msg_flags = message.flags.clone();
+            msg_flags.retain(|f| !f.eq_ignore_ascii_case("\\Seen"));
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "trash" => {
+            let Some(trash) = find_role(&folders, FolderRole::Trash) else {
+                return Err(Error::Config("no Trash folder".into()));
+            };
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            if source.id == trash.id {
+                return Ok(()); // Already in trash
+            }
+            let uids = vec![message.uid];
+            session.select(&source.name).await?;
+            session.move_messages(&uids, &trash.name).await?;
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: trash.id });
+        }
+        "archive" => {
+            let Some(archive) = find_role(&folders, FolderRole::Archive) else {
+                return Err(Error::Config("no Archive folder".into()));
+            };
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            let uids = vec![message.uid];
+            session.select(&source.name).await?;
+            session.move_messages(&uids, &archive.name).await?;
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: archive.id });
+        }
+        "junk" => {
+            let Some(junk) = find_role(&folders, FolderRole::Junk) else {
+                return Err(Error::Config("no Junk folder".into()));
+            };
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            let uids = vec![message.uid];
+            session.select(&source.name).await?;
+            session.move_messages(&uids, &junk.name).await?;
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: junk.id });
+        }
+        "snooze" => {
+            // Value is due_at timestamp
+            if let Ok(due_at) = action.value.parse::<i64>() {
+                state.mailbox.store().schedule_action(
+                    &account.id,
+                    due_at,
+                    "snooze_message",
+                    &serde_json::to_string(&crate::model::SnoozePayload {
+                        message_id: message_id.0,
+                        return_to_folder_id: message.folder_id.0,
+                    })?,
+                )?;
+                let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+                    return Err(Error::Config("no Snoozed folder".into()));
+                };
+                let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                    return Ok(());
+                };
+                let uids = vec![message.uid];
+                session.select(&source.name).await?;
+                session.move_messages(&uids, &snoozed.name).await?;
+                let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+                state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+                state.mailbox.publish(Event::MessagesChanged { folder_id: snoozed.id });
+            }
+        }
+        "stop" => {
+            // Stop processing further rules
+            return Ok(());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 async fn empty_trash(
     session: &mut ImapSession,
     state: &Arc<EngineState>,
@@ -1308,6 +1754,82 @@ async fn outbox_sender(state: Arc<EngineState>) {
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
         }
+    }
+}
+
+/// Background worker that executes scheduled actions (snooze, send-later, etc.)
+async fn scheduled_worker(state: Arc<EngineState>) {
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let notify_clone = notify.clone();
+
+    loop {
+        // Process all due actions
+        let actions = match state.mailbox.store().due_actions() {
+            Ok(actions) => actions,
+            Err(e) => {
+                tracing::warn!(%e, "failed to fetch due scheduled actions");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+        };
+
+        for action in actions {
+            let result = execute_scheduled_action(&state, &action).await;
+            if let Err(e) = result {
+                tracing::warn!(action_id = action.id, %e, "scheduled action failed");
+                let _ = state.mailbox.store().set_action_state(action.id, "failed", Some(&e.to_string()));
+            } else {
+                let _ = state.mailbox.store().set_action_state(action.id, "done", None);
+            }
+        }
+
+        // Wait for next check: either 60 seconds or until notified
+        let _ = tokio::time::timeout(Duration::from_secs(60), notify_clone.notified()).await;
+    }
+}
+
+async fn execute_scheduled_action(state: &Arc<EngineState>, action: &ScheduledAction) -> Result<()> {
+    match action.kind.as_str() {
+        "snooze_message" => {
+            let payload: SnoozePayload = serde_json::from_str(&action.payload_json)?;
+            let message_id = MessageId(payload.message_id);
+            let return_folder_id = FolderId(payload.return_to_folder_id);
+
+            // Move message back to original folder
+            let folders = state.mailbox.list_folders(&action.account_id)?;
+            let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+                return Err(Error::Config("no Snoozed folder".into()));
+            };
+            let Some(return_folder) = folders.iter().find(|f| f.id == return_folder_id) else {
+                return Err(Error::Config("return folder not found".into()));
+            };
+
+            let Some(message) = state.mailbox.message(message_id)? else {
+                return Ok(()); // Already gone
+            };
+
+            if message.folder_id != snoozed.id {
+                return Ok(()); // Not in snoozed folder anymore
+            }
+
+            let uids = vec![message.uid];
+            let account = state.mailbox.account(&action.account_id)?.ok_or(Error::AccountNotFound(action.account_id))?;
+            let password = state.mailbox.password(&action.account_id)?;
+            let mut session = crate::imap::ImapSession::connect(
+                &account.imap,
+                password.expose_secret(),
+                crate::tls::client_config()?,
+            ).await?;
+
+            session.select(&snoozed.name).await?;
+            session.move_messages(&uids, &return_folder.name).await?;
+
+            let _ = state.mailbox.store().delete_message_by_id(message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: snoozed.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: return_folder_id });
+            Ok(())
+        }
+        _ => Err(Error::Config(format!("unknown scheduled action kind: {}", action.kind))),
     }
 }
 

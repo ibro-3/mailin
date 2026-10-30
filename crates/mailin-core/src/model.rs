@@ -4,6 +4,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::account::AccountId;
+use crate::compose::OutgoingMessage;
+use std::collections::HashMap;
 
 /// Local row identifier of a folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -38,6 +40,7 @@ pub enum FolderRole {
     Trash,
     Junk,
     Archive,
+    Snoozed,
     #[default]
     Other,
 }
@@ -51,6 +54,7 @@ impl FolderRole {
             Self::Trash => "trash",
             Self::Junk => "junk",
             Self::Archive => "archive",
+            Self::Snoozed => "snoozed",
             Self::Other => "other",
         }
     }
@@ -78,6 +82,10 @@ impl FolderRole {
         if has("\\Archive") || has("\\All") || has("\\AllMail") {
             return Self::Archive;
         }
+        // RFC 6154 doesn't define \Snoozed, but some servers use it or X-Snoozed
+        if has("\\Snoozed") || has("X-Snoozed") {
+            return Self::Snoozed;
+        }
 
         let leaf = name.rsplit(['/', '.']).next().unwrap_or(name);
         let leaf = leaf.to_ascii_lowercase();
@@ -87,6 +95,7 @@ impl FolderRole {
             "trash" | "deleted" | "deleted items" | "deleted messages" => Self::Trash,
             "junk" | "spam" | "junk e-mail" | "bulk mail" => Self::Junk,
             "archive" | "all mail" | "all" => Self::Archive,
+            "snoozed" => Self::Snoozed,
             _ => Self::Other,
         }
     }
@@ -100,7 +109,8 @@ impl FolderRole {
             Self::Archive => 3,
             Self::Junk => 4,
             Self::Trash => 5,
-            Self::Other => 6,
+            Self::Snoozed => 6,
+            Self::Other => 7,
         }
     }
 }
@@ -116,6 +126,7 @@ impl FromStr for FolderRole {
             "trash" => Self::Trash,
             "junk" => Self::Junk,
             "archive" => Self::Archive,
+            "snoozed" => Self::Snoozed,
             "other" => Self::Other,
             _ => return Err(()),
         })
@@ -206,6 +217,18 @@ impl MessageHeader {
             (Some(name), None) => name.clone(),
             (None, None) => "(unknown sender)".to_owned(),
         }
+    }
+
+    /// Bare domain of the sender address, used for per-sender trust checks
+    /// such as the remote-content allowlist.
+    pub fn from_domain(&self) -> Option<&str> {
+        let addr = self.from_addr.as_deref()?;
+        // Tolerate `Name <user@host>` shapes by looking at the angle part.
+        let addr = addr.rsplit_once('<').map_or(addr, |(_, inner)| inner);
+        let addr = addr.trim().trim_end_matches('>');
+        addr.rsplit_once('@')
+            .map(|(_, domain)| domain)
+            .filter(|domain| !domain.is_empty() && !domain.contains(char::is_whitespace))
     }
 }
 
@@ -402,6 +425,130 @@ impl OutgoingEnvelope {
         }
         Ok(())
     }
+}
+
+/// A contact for autocomplete, seeded from observed mail or added manually.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub email: String,
+    pub display_name: String,
+    pub last_used_at: Option<i64>,
+    pub times_seen: i64,
+    pub manual: bool,
+}
+
+/// A message template with `{{variable}}` placeholders for compose prefill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Template {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub name: String,
+    pub subject: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl Template {
+    /// Create an OutgoingMessage from this template with variable substitution.
+    pub fn to_draft(&self, from_name: String, from_addr: String) -> OutgoingMessage {
+        OutgoingMessage {
+            from_name,
+            from_addr,
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+            ..OutgoingMessage::default()
+        }
+    }
+}
+
+/// Condition for a rule: field, operator, value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleCondition {
+    pub field: String,
+    pub op: String,
+    pub value: String,
+}
+
+/// Action for a rule: kind and value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleAction {
+    pub kind: String,
+    pub value: String,
+}
+
+/// A mail filtering rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rule {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub name: String,
+    pub enabled: bool,
+    pub priority: i64,
+    pub conditions_json: String,
+    pub actions_json: String,
+    pub stop: bool,
+    pub created_at: i64,
+}
+
+/// A scheduled action to be executed at a specific time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledAction {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub due_at: i64,
+    pub kind: String,
+    pub payload_json: String,
+    pub state: String,
+    pub created_at: i64,
+    pub last_error: Option<String>,
+}
+
+/// Payload for the 'snooze_message' scheduled action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnoozePayload {
+    pub message_id: i64,
+    pub return_to_folder_id: i64,
+}
+
+/// Virtual folder kinds for unified views across accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualFolderKind {
+    UnifiedInbox = 0,
+    Starred = 1,
+    AllMail = 2,
+}
+
+impl From<VirtualFolderKind> for i64 {
+    fn from(kind: VirtualFolderKind) -> Self {
+        kind as i64
+    }
+}
+
+impl TryFrom<i64> for VirtualFolderKind {
+    type Error = ();
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(VirtualFolderKind::UnifiedInbox),
+            1 => Ok(VirtualFolderKind::Starred),
+            2 => Ok(VirtualFolderKind::AllMail),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A virtual folder that aggregates messages across accounts/folders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VirtualFolder {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub name: String,
+    pub kind: VirtualFolderKind,
+    pub query_json: String,
+    pub created_at: i64,
 }
 
 #[cfg(test)]

@@ -14,8 +14,12 @@ use crate::window::MainWindow;
 const APP_ID: &str = "dev.mailin.Mailin";
 
 /// Everything that lives for the whole process. The UI keeps an `Rc` of this.
+///
+/// The config sits behind an `Rc<RefCell<…>>` so the preferences dialog can
+/// write changes back into the running application; the UI reads it on every
+/// use instead of caching values that would go stale.
 pub struct AppState {
-    pub config: Config,
+    pub config: Rc<RefCell<Config>>,
     pub mailin: std::sync::Arc<Mailin>,
     pub engine: Engine,
 }
@@ -29,7 +33,7 @@ impl AppState {
         let mailin = std::sync::Arc::new(Mailin::open(&paths)?);
         let engine = Engine::start(std::sync::Arc::clone(&mailin))?;
         Ok(Self {
-            config,
+            config: Rc::new(RefCell::new(config)),
             mailin,
             engine,
         })
@@ -57,7 +61,8 @@ pub fn run() -> glib::ExitCode {
         let startup_error = Rc::clone(&startup_error);
         move |_| match AppState::open() {
             Ok(opened) => {
-                apply_theme(opened.config.ui.theme);
+                apply_theme(opened.config.borrow().ui.theme);
+                install_css();
                 *state.borrow_mut() = Some(Rc::new(opened));
             }
             Err(error) => {
@@ -113,6 +118,27 @@ pub fn apply_theme(theme: Theme) {
         Theme::Dark => adw::ColorScheme::ForceDark,
     };
     adw::StyleManager::default().set_color_scheme(scheme);
+}
+
+/// Application-wide styles that libadwaita does not provide: the reader's
+/// remote-content banner needs a tinted background for its two actions.
+fn install_css() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(
+        ".remote-banner {\
+           background-color: alpha(@accent_color, 0.16);\
+           border-radius: 8px;\
+           padding: 6px;\
+         }",
+    );
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 /// Parse a mailto: URI into an OutgoingMessage draft.

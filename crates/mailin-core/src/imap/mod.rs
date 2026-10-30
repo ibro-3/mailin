@@ -483,6 +483,18 @@ impl ImapSession {
         self.delete_messages(uids).await
     }
 
+    /// Copy messages to another mailbox without removing from source.
+    pub async fn copy_messages(&mut self, uids: &[u32], target: &str) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set = uid_set(uids);
+        self.inner
+            .uid_copy(&set, target)
+            .await
+            .map_err(|e| Error::Imap(format!("UID COPY to {target} failed: {e}")))
+    }
+
     /// Mark messages `\Deleted` and expunge them from the selected mailbox.
     pub async fn delete_messages(&mut self, uids: &[u32]) -> Result<()> {
         if uids.is_empty() {

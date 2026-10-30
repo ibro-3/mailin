@@ -70,6 +70,19 @@ pub enum Theme {
     Dark,
 }
 
+/// Row spacing and preview lines shown in the message list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageListDensity {
+    /// Three lines per row with generous padding.
+    #[default]
+    Comfortable,
+    /// Tighter padding, snippet still visible.
+    Cozy,
+    /// Minimal padding, no snippet: fits the most messages.
+    Compact,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiPreferences {
@@ -84,6 +97,12 @@ pub struct UiPreferences {
     pub mark_read_on_open: bool,
     /// Show a desktop notification when mail arrives in the background.
     pub notifications: bool,
+    /// Row spacing and preview lines in the message list.
+    pub message_list_density: MessageListDensity,
+    /// Enable quick actions (swipe on GTK, hover on WinUI) on message rows.
+    pub quick_actions: bool,
+    /// Which actions are available in the quick-actions overlay.
+    pub quick_action_items: Vec<QuickAction>,
 }
 
 impl Default for UiPreferences {
@@ -95,6 +114,55 @@ impl Default for UiPreferences {
             page_size: 100,
             mark_read_on_open: true,
             notifications: true,
+            message_list_density: MessageListDensity::default(),
+            quick_actions: true,
+            quick_action_items: vec![
+                QuickAction::Archive,
+                QuickAction::Delete,
+                QuickAction::Flag,
+                QuickAction::MarkRead,
+            ],
+        }
+    }
+}
+
+/// A single action offered in the message-row quick-actions overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickAction {
+    Archive,
+    Delete,
+    Junk,
+    Flag,
+    Unflag,
+    MarkRead,
+    MarkUnread,
+}
+
+impl QuickAction {
+    /// Short label used on the button.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Archive => "Archive",
+            Self::Delete => "Delete",
+            Self::Junk => "Junk",
+            Self::Flag => "Flag",
+            Self::Unflag => "Unflag",
+            Self::MarkRead => "Read",
+            Self::MarkUnread => "Unread",
+        }
+    }
+
+    /// Icon name for the button.
+    pub const fn icon(self) -> &'static str {
+        match self {
+            Self::Archive => "folder-archive-symbolic",
+            Self::Delete => "user-trash-symbolic",
+            Self::Junk => "mail-mark-junk-symbolic",
+            Self::Flag => "starred-symbolic",
+            Self::Unflag => "non-starred-symbolic",
+            Self::MarkRead => "mail-read-symbolic",
+            Self::MarkUnread => "mail-unread-symbolic",
         }
     }
 }
@@ -229,6 +297,27 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::with_root(dir.path());
         assert_eq!(Config::load(&paths).expect("load"), Config::default());
+    }
+
+    #[test]
+    fn density_round_trips_through_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        let mut config = Config::default();
+        config.ui.message_list_density = MessageListDensity::Compact;
+        config.save(&paths).expect("save");
+        let loaded = Config::load(&paths).expect("load");
+        assert_eq!(loaded.ui.message_list_density, MessageListDensity::Compact);
+    }
+
+    #[test]
+    fn configs_written_before_density_keep_the_default() {
+        let config: Config = toml::from_str("[ui]\npage_size = 50\n").expect("config");
+        assert_eq!(
+            config.ui.message_list_density,
+            MessageListDensity::Comfortable
+        );
+        assert_eq!(config.ui.page_size, 50);
     }
 
     #[test]

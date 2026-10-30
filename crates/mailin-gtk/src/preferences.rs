@@ -1,17 +1,29 @@
 //! Preferences dialog for the GTK front-end.
+//!
+//! Every widget writes into a working copy of the configuration as it is
+//! changed. When the dialog closes the copy is validated, written to disk and
+//! handed back to the running application through the `on_saved` callback, so
+//! preference changes take effect without restarting Mailin.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use mailin_core::{Config, Paths, Theme};
+use mailin_core::{Config, MessageListDensity, Paths, Theme};
 
 use crate::app::{AppState, apply_theme};
 
 /// Show the preferences dialog.
-pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
-    let config = Rc::new(RefCell::new(app.config.clone()));
+///
+/// `on_saved` runs after a valid configuration has been persisted and
+/// installed in the running [`AppState`].
+pub fn show_preferences(
+    parent: &impl IsA<gtk::Widget>,
+    app: &Rc<AppState>,
+    on_saved: impl Fn() + 'static,
+) {
+    let config = Rc::new(RefCell::new(app.config.borrow().clone()));
     let paths = Paths::discover().expect("paths");
 
     let dialog = adw::PreferencesDialog::new();
@@ -31,6 +43,17 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         Theme::Light => theme_combo.set_selected(1),
         Theme::Dark => theme_combo.set_selected(2),
     }
+    theme_combo.connect_selected_notify({
+        let config = Rc::clone(&config);
+        move |combo| {
+            let theme = match combo.selected() {
+                1 => Theme::Light,
+                2 => Theme::Dark,
+                _ => Theme::System,
+            };
+            config.borrow_mut().ui.theme = theme;
+        }
+    });
 
     let theme_row = adw::ActionRow::builder()
         .title("Theme")
@@ -38,6 +61,31 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         .build();
     theme_row.add_suffix(&theme_combo);
     appearance_group.add(&theme_row);
+
+    let density_combo = gtk::DropDown::from_strings(&["Comfortable", "Cozy", "Compact"]);
+    density_combo.set_selected(match config.borrow().ui.message_list_density {
+        MessageListDensity::Comfortable => 0,
+        MessageListDensity::Cozy => 1,
+        MessageListDensity::Compact => 2,
+    });
+    density_combo.connect_selected_notify({
+        let config = Rc::clone(&config);
+        move |combo| {
+            let density = match combo.selected() {
+                1 => MessageListDensity::Cozy,
+                2 => MessageListDensity::Compact,
+                _ => MessageListDensity::Comfortable,
+            };
+            config.borrow_mut().ui.message_list_density = density;
+        }
+    });
+
+    let density_row = adw::ActionRow::builder()
+        .title("Message list density")
+        .subtitle("Row spacing and preview lines in the message list")
+        .build();
+    density_row.add_suffix(&density_combo);
+    appearance_group.add(&density_row);
 
     general_page.add(&appearance_group);
 
@@ -47,6 +95,13 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     let html_switch = gtk::Switch::builder()
         .active(config.borrow().ui.html_enabled)
         .build();
+    html_switch.connect_state_set({
+        let config = Rc::clone(&config);
+        move |_, state| {
+            config.borrow_mut().ui.html_enabled = state;
+            gtk::glib::Propagation::Stop
+        }
+    });
     let html_row = adw::ActionRow::builder()
         .title("Render HTML messages")
         .subtitle("Display HTML formatting when available")
@@ -57,9 +112,16 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     let remote_content_switch = gtk::Switch::builder()
         .active(config.borrow().ui.remote_content_enabled)
         .build();
+    remote_content_switch.connect_state_set({
+        let config = Rc::clone(&config);
+        move |_, state| {
+            config.borrow_mut().ui.remote_content_enabled = state;
+            gtk::glib::Propagation::Stop
+        }
+    });
     let remote_content_row = adw::ActionRow::builder()
         .title("Load remote content")
-        .subtitle("Allow images and resources from the network (can be overridden per-account)")
+        .subtitle("Allow images and resources from the network (can be overridden per-sender)")
         .build();
     remote_content_row.add_suffix(&remote_content_switch);
     messages_group.add(&remote_content_row);
@@ -75,6 +137,12 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         ))
         .numeric(true)
         .build();
+    page_size_spin.connect_value_changed({
+        let config = Rc::clone(&config);
+        move |spin| {
+            config.borrow_mut().ui.page_size = spin.value() as u32;
+        }
+    });
     let page_size_row = adw::ActionRow::builder()
         .title("Messages per page")
         .subtitle("Number of messages loaded at once")
@@ -85,6 +153,13 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     let mark_read_switch = gtk::Switch::builder()
         .active(config.borrow().ui.mark_read_on_open)
         .build();
+    mark_read_switch.connect_state_set({
+        let config = Rc::clone(&config);
+        move |_, state| {
+            config.borrow_mut().ui.mark_read_on_open = state;
+            gtk::glib::Propagation::Stop
+        }
+    });
     let mark_read_row = adw::ActionRow::builder()
         .title("Mark as read on open")
         .subtitle("Automatically mark messages read when opened")
@@ -102,6 +177,13 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     let notifications_switch = gtk::Switch::builder()
         .active(config.borrow().ui.notifications)
         .build();
+    notifications_switch.connect_state_set({
+        let config = Rc::clone(&config);
+        move |_, state| {
+            config.borrow_mut().ui.notifications = state;
+            gtk::glib::Propagation::Stop
+        }
+    });
     let notifications_row = adw::ActionRow::builder()
         .title("Show new mail notifications")
         .subtitle("Display desktop notifications for new messages")
@@ -132,6 +214,12 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         ))
         .numeric(true)
         .build();
+    poll_interval_spin.connect_value_changed({
+        let config = Rc::clone(&config);
+        move |spin| {
+            config.borrow_mut().sync.poll_interval_secs = spin.value() as u64;
+        }
+    });
     let poll_interval_row = adw::ActionRow::builder()
         .title("Poll interval")
         .subtitle("Seconds between automatic folder checks (when IDLE is unavailable)")
@@ -150,6 +238,12 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         ))
         .numeric(true)
         .build();
+    max_parallel_spin.connect_value_changed({
+        let config = Rc::clone(&config);
+        move |spin| {
+            config.borrow_mut().sync.max_parallel_accounts = spin.value() as u8;
+        }
+    });
     let max_parallel_row = adw::ActionRow::builder()
         .title("Parallel accounts")
         .subtitle("Maximum number of accounts to sync simultaneously")
@@ -170,6 +264,17 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         mailin_core::config::BodySyncPolicy::OnOpen => body_sync_combo.set_selected(0),
         mailin_core::config::BodySyncPolicy::Eager => body_sync_combo.set_selected(1),
     }
+    body_sync_combo.connect_selected_notify({
+        let config = Rc::clone(&config);
+        move |combo| {
+            let policy = if combo.selected() == 1 {
+                mailin_core::config::BodySyncPolicy::Eager
+            } else {
+                mailin_core::config::BodySyncPolicy::OnOpen
+            };
+            config.borrow_mut().sync.body_sync = policy;
+        }
+    });
 
     let body_sync_row = adw::ActionRow::builder()
         .title("Body fetching")
@@ -194,6 +299,12 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
         ))
         .numeric(true)
         .build();
+    retention_spin.connect_value_changed({
+        let config = Rc::clone(&config);
+        move |spin| {
+            config.borrow_mut().sync.retention_days = spin.value() as u32;
+        }
+    });
     let retention_row = adw::ActionRow::builder()
         .title("Keep messages for")
         .subtitle("Days to retain message headers (0 = forever)")
@@ -212,7 +323,7 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
 
     let account_group = adw::PreferencesGroup::builder()
         .title("Per-Account Settings")
-        .description("Account-specific settings like remote content loading are managed in the account settings dialog.")
+        .description("Account-specific settings like signatures and remote content trust are managed in the account settings dialog.")
         .build();
 
     let account_row = adw::ActionRow::builder()
@@ -224,29 +335,38 @@ pub fn show_preferences(parent: &impl IsA<gtk::Widget>, app: &Rc<AppState>) {
     accounts_page.add(&account_group);
     dialog.add(&accounts_page);
 
-    // Connect close to save config
-    let config_clone = config.clone();
-    let paths_clone = paths.clone();
-
-    dialog.connect_closed(move |_| {
-        save_config(&config_clone, &paths_clone);
+    // Validate, persist and hand the new configuration back to the window.
+    dialog.connect_closed({
+        let config = config.clone();
+        let paths = paths.clone();
+        let app = Rc::clone(app);
+        move |_| {
+            if apply_config(&config, &paths, &app) {
+                on_saved();
+            }
+        }
     });
 
     dialog.present(Some(parent));
 }
 
-fn save_config(config: &Rc<RefCell<Config>>, paths: &Paths) {
-    let config = config.borrow_mut();
+/// Validate the edited configuration, write it to disk and install it in the
+/// running application. Returns `false` when validation failed, in which case
+/// nothing is written anywhere.
+fn apply_config(edited: &Rc<RefCell<Config>>, paths: &Paths, app: &Rc<AppState>) -> bool {
+    let candidate = edited.borrow().clone();
 
-    if let Err(e) = config.validate() {
+    if let Err(e) = candidate.validate() {
         eprintln!("Config validation failed: {e}");
-        return;
+        return false;
     }
 
-    if let Err(e) = config.save(paths) {
+    if let Err(e) = candidate.save(paths) {
         eprintln!("Failed to save config: {e}");
     }
 
     // Apply theme immediately
-    apply_theme(config.ui.theme);
+    apply_theme(candidate.ui.theme);
+    *app.config.borrow_mut() = candidate;
+    true
 }

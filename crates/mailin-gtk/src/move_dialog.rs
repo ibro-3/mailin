@@ -37,6 +37,11 @@ pub fn show(
         .placeholder_text("Search folders")
         .width_chars(20)
         .build();
+    // Placeholder text isn't reliably announced as a name; set it explicitly.
+    {
+        use gtk::accessible::Property;
+        search.update_property(&[Property::Label("Search folders")]);
+    }
 
     // Only real folders can be destinations, and only one row is selected
     // at a time, so a row index maps straight into this vector.

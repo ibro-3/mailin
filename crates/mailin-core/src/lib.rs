@@ -24,6 +24,7 @@ pub mod html;
 mod imap;
 pub mod model;
 pub mod oauth;
+pub mod rules;
 mod smtp;
 pub mod store;
 mod sync;
@@ -35,13 +36,14 @@ pub use account::{
 };
 pub use client::{Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
-pub use config::{Config, Paths, SyncPreferences, Theme, UiPreferences};
+pub use config::{Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, UiPreferences};
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use model::{
-    AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, Rule, RuleAction, RuleCondition,
+    ScheduledAction, SnoozePayload, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
 };
 pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use store::{FolderUpsert, Store};

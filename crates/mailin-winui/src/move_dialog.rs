@@ -37,8 +37,9 @@ pub fn show(
         .SetTitle(&title)
         .context("could not title the folder picker")?;
 
-    let panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 8.0)?;
-    ui::margin(&panel, 24.0, 16.0, 24.0, 16.0)?;
+    let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical)?;
+    ui::margin_lg(&panel)?;
+    ui::margin_vertical(&panel, 8.0)?;
 
     let search = ui::text_box("Search folders")?;
     ui::append(&panel, &search)?;
@@ -59,7 +60,7 @@ pub fn show(
             .collect(),
     );
 
-    let list = ui::stack(mailin_winui_sys::Orientation::Vertical, 4.0)?;
+    let list = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
     for (button, _, _) in entries.iter() {
         ui::stretch_horizontal(button)?;
         ui::append(&list, button)?;

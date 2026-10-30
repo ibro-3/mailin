@@ -14,7 +14,7 @@ use crate::account::{Account, AccountId};
 use crate::config::Paths;
 use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
-use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState};
+use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, VirtualFolderKind};
 use crate::store::Store;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -55,6 +55,11 @@ pub enum Event {
         message_id: MessageId,
     },
     OutboxChanged,
+    ScheduledActionRan {
+        account_id: AccountId,
+        action_id: i64,
+        kind: String,
+    },
     AccountError {
         account_id: AccountId,
         message: String,
@@ -155,6 +160,10 @@ impl Mailin {
         Ok(())
     }
 
+    pub fn apply_rules(&self, folder_id: FolderId, message_ids: &[MessageId]) {
+        self.store().apply_rules(folder_id, message_ids)
+    }
+
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
         let accounts = self.store.list_accounts()?;
         accounts
@@ -238,6 +247,17 @@ impl Mailin {
             .list_messages(folder, offset, limit.clamp(1, 1000))
     }
 
+    pub fn list_messages_virtual(
+        &self,
+        kind: VirtualFolderKind,
+        account_filter: &[AccountId],
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<(MessageHeader, FolderId, AccountId)>> {
+        self.store
+            .list_messages_virtual(kind, account_filter, limit.clamp(1, 1000), offset)
+    }
+
     pub fn message(&self, id: MessageId) -> Result<Option<MessageHeader>> {
         self.store.message(id)
     }
@@ -271,6 +291,15 @@ impl Mailin {
 
     pub fn unread_total(&self, account: &AccountId) -> Result<u32> {
         self.store.unread_total(account)
+    }
+
+    pub fn unread_total_all(&self) -> Result<u32> {
+        let accounts = self.list_accounts()?;
+        let mut total = 0;
+        for account in accounts {
+            total += self.store.unread_total(&account.id)?;
+        }
+        Ok(total)
     }
 
     // ------------------------------------------------------------------ outbox

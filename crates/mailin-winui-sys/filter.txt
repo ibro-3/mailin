@@ -180,3 +180,10 @@ Windows.UI.Notifications.ToastTemplateType
 Windows.Data.Xml.Dom.IXmlNodeSerializer::InnerText
 Windows.Data.Xml.Dom.IXmlNodeList::Length
 Windows.Data.Xml.Dom.IXmlNodeList::Item
+
+Microsoft.UI.Xaml.Automation.AutomationProperties
+Microsoft.UI.Xaml.Automation.IAutomationPropertiesStatics
+Microsoft.UI.Xaml.Controls.ToolTipService
+Microsoft.UI.Xaml.Controls.IToolTipService
+Windows.UI.ViewManagement.AccessibilitySettings
+Windows.UI.ViewManagement.IAccessibilitySettings

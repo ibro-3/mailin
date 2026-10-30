@@ -130,6 +130,13 @@ pub fn present(
     };
 
     // Create form fields
+    let allowlist: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(
+        existing_account
+            .as_ref()
+            .map(|account| account.remote_allowed_domains.clone())
+            .unwrap_or_default(),
+    ));
+
     let name_row = adw::EntryRow::builder().title("Display name").build();
     let email_row = adw::EntryRow::builder().title("Email address").build();
     let password_row = adw::PasswordEntryRow::builder().title("Password").build();
@@ -155,6 +162,8 @@ pub fn present(
         .hexpand(true)
         .visible(false)
         .build();
+    // Alert role so sign-in status changes are announced by screen readers.
+    oauth_status.set_accessible_role(gtk::AccessibleRole::Alert);
 
     let imap_host = adw::EntryRow::builder().title("IMAP server").build();
     let imap_port = adw::EntryRow::builder().title("Port").build();
@@ -204,11 +213,98 @@ pub fn present(
     outgoing.add(&smtp_security);
     outgoing.add(&smtp_user);
 
+    // Signature: plain text, shown under the composer's `-- ` separator.
+    let signature_view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(6)
+        .bottom_margin(6)
+        .left_margin(6)
+        .right_margin(6)
+        .accepts_tab(false)
+        .build();
+    signature_view.set_tooltip_text(Some(
+        "Appended to messages you send. Mailin adds the “-- ” separator for you.",
+    ));
+    // Bind the buffer to the *visible* view so edit-mode prefill and save both
+    // reach the field the user actually sees.
+    let signature_buffer = Rc::new(RefCell::new(signature_view.buffer()));
+    // Give the editor an accessible name; the bare PreferencesRow has no title.
+    {
+        use gtk::accessible::Property;
+        signature_view.update_property(&[Property::Label("Signature")]);
+    }
+    let signature_row = adw::ActionRow::builder()
+        .title("Signature")
+        .build();
+    let signature_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(120)
+        .child(&signature_view)
+        .build();
+    signature_scroll.set_valign(gtk::Align::Start);
+    signature_row.add_suffix(&signature_scroll);
+    signature_row.set_activatable(false);
+
+    let signatures = adw::PreferencesGroup::builder()
+        .title("Signature")
+        .description("Plain text, appended below the RFC 3676 “-- ” separator.")
+        .build();
+    signatures.add(&signature_row);
+
+    // Remote-content allowlist: domains whose images and resources always load.
+    let trust_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let trust_placeholder = gtk::Label::builder()
+        .label("No senders trusted yet. Use “Always allow @sender” in the reader to add one.")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
+    trust_list.set_placeholder(Some(&trust_placeholder));
+    let trust_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(120)
+        .child(&trust_list)
+        .build();
+    let trust_group = adw::PreferencesGroup::builder()
+        .title("Trusted senders for remote content")
+        .description("Messages from these domains always load remote content, regardless of the global setting.")
+        .build();
+    trust_group.add(&trust_scroll);
+
+    // Templates manager
+    let templates_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let templates_placeholder = gtk::Label::builder()
+        .label("No templates yet")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
+    templates_list.set_placeholder(Some(&templates_placeholder));
+    let templates_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(150)
+        .child(&templates_list)
+        .build();
+    let templates_add = gtk::Button::with_label("New Template");
+    templates_add.add_css_class("suggested-action");
+    let templates_group = adw::PreferencesGroup::builder()
+        .title("Message templates")
+        .description("Reusable message templates with {{variable}} placeholders for quick compose.")
+        .build();
+    templates_group.add(&templates_scroll);
+    templates_group.set_header_suffix(Some(&templates_add));
+
     let page = adw::PreferencesPage::new();
     page.add(&identity);
     page.add(&oauth_group);
     page.add(&incoming);
     page.add(&outgoing);
+    page.add(&signatures);
+    page.add(&trust_group);
+    page.add(&templates_group);
 
     let header = adw::HeaderBar::new();
     let window_title = adw::WindowTitle::new(title, subtitle);
@@ -221,6 +317,8 @@ pub fn present(
         .visible(false)
         .build();
     error_label.add_css_class("error");
+    // Alert role so validation/connection errors are announced.
+    error_label.set_accessible_role(gtk::AccessibleRole::Alert);
 
     let cancel = gtk::Button::with_label("Cancel");
     let test = gtk::Button::with_label("Test Connection");
@@ -309,6 +407,10 @@ pub fn present(
         name_row.set_text(&account.display_name);
         email_row.set_text(&account.email);
         // Password left empty - user can enter new one to change it
+
+        signature_buffer
+            .borrow()
+            .set_text(account.signature.as_str());
 
         let oauth = account.imap.auth_method == AuthMethod::OAuth2;
         auth_method_row.set_selected(auth_index(account.imap.auth_method));
@@ -533,6 +635,147 @@ pub fn present(
     let existing_account_for_save = existing_account.clone();
     let existing_account_for_remove = existing_account.clone();
 
+    // Live view of the allowlist; each row carries a remove button that edits
+    // the shared cell and repaints the list.
+    fn repaint_trust_list(trust_list: &gtk::ListBox, allowlist: &Rc<RefCell<Vec<String>>>) {
+        while let Some(child) = trust_list.row_at_index(0) {
+            trust_list.remove(&child);
+        }
+        for domain in allowlist.borrow().iter() {
+            let label = gtk::Label::builder()
+                .label(domain)
+                .xalign(0.0)
+                .hexpand(true)
+                .build();
+            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+            remove.add_css_class("flat");
+            remove.set_tooltip_text(Some(&format!("Stop trusting {domain}")));
+            {
+                use gtk::accessible::Property;
+                let remove_name = format!("Stop trusting {domain}");
+                remove.update_property(&[Property::Label(&remove_name)]);
+            }
+            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row_box.set_margin_top(4);
+            row_box.set_margin_bottom(4);
+            row_box.set_margin_start(8);
+            row_box.set_margin_end(4);
+            row_box.append(&label);
+            row_box.append(&remove);
+            let row = adw::ActionRow::new();
+            row.set_child(Some(&row_box));
+            trust_list.append(&row);
+
+            let allowlist = Rc::clone(allowlist);
+            let trust_list = trust_list.clone();
+            let domain_clone = domain.clone();
+            remove.connect_clicked(move |_| {
+                allowlist
+                    .borrow_mut()
+                    .retain(|entry| entry != &domain_clone);
+                repaint_trust_list(&trust_list, &allowlist);
+            });
+        }
+    }
+    let refresh_trust = {
+        let trust_list = trust_list.clone();
+        let allowlist = Rc::clone(&allowlist);
+        move || repaint_trust_list(&trust_list, &allowlist)
+    };
+    refresh_trust();
+
+    // Templates manager: populate list and handle add/edit/delete
+    let refresh_templates = {
+        let app = Rc::clone(&app);
+        let account_id = existing_account.as_ref().map(|a| a.id);
+        let templates_list = templates_list.clone();
+        let dialog = dialog.clone();
+        let error_label = error_label.clone();
+        move || {
+            if let Some(account_id) = account_id {
+                while let Some(child) = templates_list.first_child() {
+                    templates_list.remove(&child);
+                }
+                if let Ok(templates) = app.mailin.store().list_templates(&account_id) {
+                    if templates.is_empty() {
+                        // Placeholder is shown automatically
+                    } else {
+                        for template in templates {
+                            let row = adw::ActionRow::builder()
+                                .title(&template.name)
+                                .subtitle(&template.subject)
+                                .activatable(true)
+                                .build();
+                            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+                            edit_btn.add_css_class("flat");
+                            edit_btn.set_tooltip_text(Some("Edit template"));
+                            let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                            delete_btn.add_css_class("flat");
+                            delete_btn.add_css_class("destructive-action");
+                            delete_btn.set_tooltip_text(Some("Delete template"));
+                            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                            row_box.set_margin_top(4);
+                            row_box.set_margin_bottom(4);
+                            row_box.set_margin_start(8);
+                            row_box.set_margin_end(4);
+                            row_box.append(&gtk::Label::builder()
+                                .label(&template.name)
+                                .xalign(0.0)
+                                .hexpand(true)
+                                .build());
+                            row_box.append(&edit_btn);
+                            row_box.append(&delete_btn);
+                            row.set_child(Some(&row_box));
+
+                            // Clone values for use in both button closures
+                            let app_for_edit = Rc::clone(&app);
+                            let app_for_delete = Rc::clone(&app);
+                            let templates_list_for_edit = templates_list.clone();
+                            let templates_list_for_delete = templates_list.clone();
+                            let error_label_for_edit = error_label.clone();
+                            let error_label_for_delete = error_label.clone();
+                            let account_id = account_id;
+                            let template_name_for_edit = template.name.clone();
+                            let template_name_for_delete = template.name.clone();
+                            let template_subject = template.subject.clone();
+                            let template_body = template.body.clone();
+                            edit_btn.connect_clicked({
+                                let dialog = dialog.clone();
+                                move |_| {
+                                    edit_template_dialog(&dialog, &app_for_edit, account_id, &template_name_for_edit, &template_subject, &template_body, &error_label_for_edit);
+                                }
+                            });
+                            delete_btn.connect_clicked(move |_| {
+                                if let Err(e) = app_for_delete.mailin.store().delete_template(&account_id, &template_name_for_delete) {
+                                    error_label_for_delete.set_text(&format!("Could not delete template: {e}"));
+                                    error_label_for_delete.set_visible(true);
+                                } else {
+                                    error_label_for_delete.set_visible(false);
+                                }
+                            });
+                            templates_list.append(&row);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    refresh_templates();
+
+    templates_add.connect_clicked({
+        let app = Rc::clone(&app);
+        let account_id = existing_account.as_ref().map(|a| a.id);
+        let templates_list = templates_list.clone();
+        let dialog = dialog.clone();
+        let error_label = error_label.clone();
+        let refresh: Rc<dyn Fn()> = Rc::new(refresh_templates.clone());
+        move |_| {
+            if let Some(account_id) = account_id {
+                new_template_dialog(&dialog, &app, account_id, &error_label, Rc::clone(&refresh));
+            }
+        }
+    });
+
     let on_saved: Rc<dyn Fn(AccountId)> = Rc::new(on_saved);
     save.connect_clicked({
         let dialog = dialog.clone();
@@ -573,15 +816,33 @@ pub fn present(
             };
             // Keep the identifier across retries: a failed keyring write must
             // not leave an account row behind that a second click duplicates.
-            // In edit mode, preserve the existing account ID.
+            // In edit mode, preserve the existing account ID and everything the
+            // form does not know about: sync settings and the remote-content
+            // allowlist are edited elsewhere and must survive a settings save.
             if let Some(existing) = &existing_account_for_save {
                 account.id = existing.id;
+                account.sync = existing.sync.clone();
+                account
+                    .remote_allowed_domains
+                    .clone_from(&existing.remote_allowed_domains);
             } else {
                 match account_id.get() {
                     Some(id) => account.id = id,
                     None => account_id.set(Some(account.id)),
                 }
             }
+            // The signature field lives in this dialog, so it is applied here
+            // rather than in `Draft::build`.
+            let text = {
+                let buffer = signature_buffer.borrow();
+                buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string()
+            };
+            account.signature = text;
+            account
+                .remote_allowed_domains
+                .clone_from(&allowlist.borrow());
             // Only update password if user entered a new one. OAuth2 accounts
             // keep tokens in the account row and do not use the keyring.
             let password_opt = if password.is_empty() || is_oauth {
@@ -763,6 +1024,182 @@ fn provider_at(index: u32) -> OAuthProvider {
     }
 }
 
+/// Dialog to create a new template.
+fn new_template_dialog(
+    parent: &adw::Dialog,
+    app: &Rc<AppState>,
+    account_id: AccountId,
+    error_label: &gtk::Label,
+    refresh: Rc<dyn Fn()>,
+) {
+    let dialog = adw::MessageDialog::builder()
+        .heading("New Template")
+        .body("Enter template details:")
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+
+    let name_entry = adw::EntryRow::builder()
+        .title("Name")
+        .show_apply_button(true)
+        .build();
+    let subject_entry = adw::EntryRow::builder()
+        .title("Subject")
+        .show_apply_button(true)
+        .build();
+    let body_view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(6)
+        .bottom_margin(6)
+        .left_margin(6)
+        .right_margin(6)
+        .accepts_tab(false)
+        .build();
+    let body_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(150)
+        .child(&body_view)
+        .build();
+    let body_row = adw::ActionRow::builder()
+        .title("Body")
+        .build();
+    body_row.add_suffix(&body_scroll);
+    body_row.set_activatable(false);
+
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    container.set_margin_top(12);
+    container.set_margin_bottom(12);
+    container.set_margin_start(12);
+    container.set_margin_end(12);
+    container.append(&name_entry);
+    container.append(&subject_entry);
+    container.append(&body_row);
+    dialog.set_extra_child(Some(&container));
+
+    let app = Rc::clone(app);
+    let error_label = error_label.clone();
+    let refresh = refresh.clone();
+    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+        if response == "save" {
+            let name = name_entry.text().to_string().trim().to_owned();
+            let subject = subject_entry.text().to_string();
+            let buffer = body_view.buffer();
+            let body = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string();
+            if !name.is_empty() {
+                match app.mailin.store().upsert_template(&account_id, &name, &subject, &body) {
+                    Ok(_) => {
+                        error_label.set_visible(false);
+                        refresh();
+                    }
+                    Err(e) => {
+                        error_label.set_text(&format!("Could not save template: {e}"));
+                        error_label.set_visible(true);
+                    }
+                }
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
+/// Dialog to edit an existing template.
+fn edit_template_dialog(
+    parent: &adw::Dialog,
+    app: &Rc<AppState>,
+    account_id: AccountId,
+    current_name: &str,
+    current_subject: &str,
+    current_body: &str,
+    error_label: &gtk::Label,
+) {
+    let dialog = adw::MessageDialog::builder()
+        .heading("Edit Template")
+        .body("Modify template details:")
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+
+    let name_entry = adw::EntryRow::builder()
+        .title("Name")
+        .show_apply_button(true)
+        .build();
+    name_entry.set_text(current_name);
+    let subject_entry = adw::EntryRow::builder()
+        .title("Subject")
+        .show_apply_button(true)
+        .build();
+    subject_entry.set_text(current_subject);
+    let body_view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(6)
+        .bottom_margin(6)
+        .left_margin(6)
+        .right_margin(6)
+        .accepts_tab(false)
+        .build();
+    body_view.buffer().set_text(current_body);
+    let body_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(150)
+        .child(&body_view)
+        .build();
+    let body_row = adw::ActionRow::builder()
+        .title("Body")
+        .build();
+    body_row.add_suffix(&body_scroll);
+    body_row.set_activatable(false);
+
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    container.set_margin_top(12);
+    container.set_margin_bottom(12);
+    container.set_margin_start(12);
+    container.set_margin_end(12);
+    container.append(&name_entry);
+    container.append(&subject_entry);
+    container.append(&body_row);
+    dialog.set_extra_child(Some(&container));
+
+    let app = Rc::clone(app);
+    let error_label = error_label.clone();
+    let old_name = current_name.to_owned();
+    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+        if response == "save" {
+            let name = name_entry.text().to_string().trim().to_owned();
+            let subject = subject_entry.text().to_string();
+            let buffer = body_view.buffer();
+            let body = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string();
+            if !name.is_empty() {
+                // Delete old if name changed
+                if name != old_name {
+                    let _ = app.mailin.store().delete_template(&account_id, &old_name);
+                }
+                match app.mailin.store().upsert_template(&account_id, &name, &subject, &body) {
+                    Ok(_) => {
+                        error_label.set_visible(false);
+                    }
+                    Err(e) => {
+                        error_label.set_text(&format!("Could not save template: {e}"));
+                        error_label.set_visible(true);
+                    }
+                }
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,7 +1326,7 @@ mod tests {
         ));
         let engine = Engine::start(Arc::clone(&mailin)).expect("engine");
         let app = Rc::new(crate::app::AppState {
-            config: Config::default(),
+            config: Rc::new(RefCell::new(Config::default())),
             mailin,
             engine,
         });

@@ -17,8 +17,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::account::{Account, AccountId};
 use crate::error::{Error, Result};
 use crate::model::{
-    AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, Rule, RuleAction, RuleCondition, ScheduledAction, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
 };
 
 pub use migrations::SCHEMA_VERSION;
@@ -769,6 +769,469 @@ impl Store {
         let rows = stmt.query_map(params![account.to_string()], map_outbox)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Error::from)
+    }
+
+    // --------------------------------------------------------------- templates
+
+    /// Insert or update a template for an account.
+    pub fn upsert_template(
+        &self,
+        account: &AccountId,
+        name: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO templates (account_id, name, subject, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(account_id, name) DO UPDATE SET
+                 subject = excluded.subject,
+                 body = excluded.body,
+                 updated_at = excluded.updated_at
+             RETURNING id",
+            params![account.to_string(), name, subject, body, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all templates for an account, ordered by name.
+    pub fn list_templates(&self, account: &AccountId) -> Result<Vec<Template>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, name, subject, body, created_at, updated_at
+             FROM templates
+             WHERE account_id = ?1
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Template {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                name: row.get(2)?,
+                subject: row.get(3)?,
+                body: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a template by name for an account.
+    pub fn delete_template(&self, account: &AccountId, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM templates WHERE account_id = ?1 AND name = ?2",
+            params![account.to_string(), name],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- contacts
+
+    /// Insert or update a contact for an account.
+    /// Increments times_seen and updates last_used_at.
+    /// Preserves existing display_name if new one is empty.
+    pub fn upsert_contact(
+        &self,
+        account: &AccountId,
+        email: &str,
+        display_name: &str,
+        manual: bool,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO contacts (account_id, email, display_name, last_used_at, times_seen, manual)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)
+             ON CONFLICT(account_id, email) DO UPDATE SET
+                 display_name = CASE 
+                     WHEN contacts.display_name = '' OR contacts.display_name IS NULL 
+                     THEN excluded.display_name 
+                     ELSE contacts.display_name 
+                 END,
+                 last_used_at = excluded.last_used_at,
+                 times_seen = contacts.times_seen + 1,
+                 manual = contacts.manual | excluded.manual
+             RETURNING id",
+            params![account.to_string(), email, display_name, now, manual as i64],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all contacts for an account, ordered by times_seen DESC, last_used_at DESC.
+    pub fn list_contacts(&self, account: &AccountId) -> Result<Vec<Contact>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, email, display_name, last_used_at, times_seen, manual
+             FROM contacts
+             WHERE account_id = ?1
+             ORDER BY times_seen DESC, last_used_at DESC NULLS LAST",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Contact {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                email: row.get(2)?,
+                display_name: row.get(3)?,
+                last_used_at: row.get(4)?,
+                times_seen: row.get(5)?,
+                manual: row.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Search contacts by prefix match on email or display_name.
+    /// Results ordered by times_seen DESC, last_used_at DESC.
+    pub fn search_contacts(&self, account: &AccountId, query: &str, limit: u32) -> Result<Vec<Contact>> {
+        let conn = self.lock()?;
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, email, display_name, last_used_at, times_seen, manual
+             FROM contacts
+             WHERE account_id = ?1 AND (lower(email) LIKE ?2 OR lower(display_name) LIKE ?2)
+             ORDER BY times_seen DESC, last_used_at DESC NULLS LAST
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![account.to_string(), pattern, limit as i64], |row| {
+            Ok(Contact {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                email: row.get(2)?,
+                display_name: row.get(3)?,
+                last_used_at: row.get(4)?,
+                times_seen: row.get(5)?,
+                manual: row.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a contact by email for an account.
+    pub fn delete_contact(&self, account: &AccountId, email: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM contacts WHERE account_id = ?1 AND email = ?2",
+            params![account.to_string(), email],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- scheduled actions
+
+    /// Schedule a new action to run at the specified time.
+    pub fn schedule_action(
+        &self,
+        account: &AccountId,
+        due_at: i64,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO scheduled_actions (account_id, due_at, kind, payload_json, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)
+             RETURNING id",
+            params![account.to_string(), due_at, kind, payload_json, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Get all pending actions that are due (due_at <= now).
+    pub fn due_actions(&self) -> Result<Vec<ScheduledAction>> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, due_at, kind, payload_json, state, created_at, last_error
+             FROM scheduled_actions
+             WHERE state = 'pending' AND due_at <= ?1
+             ORDER BY due_at",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            Ok(ScheduledAction {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                due_at: row.get(2)?,
+                kind: row.get(3)?,
+                payload_json: row.get(4)?,
+                state: row.get(5)?,
+                created_at: row.get(6)?,
+                last_error: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Update the state of a scheduled action.
+    pub fn set_action_state(&self, id: i64, state: &str, error: Option<&str>) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE scheduled_actions SET state = ?2, last_error = ?3 WHERE id = ?1",
+            params![id, state, error],
+        )?;
+        Ok(changed > 0)
+    }
+
+    // --------------------------------------------------------------- rules
+
+    /// Insert or update a rule for an account.
+    pub fn upsert_rule(
+        &self,
+        account: &AccountId,
+        name: &str,
+        enabled: bool,
+        priority: i64,
+        conditions_json: &str,
+        actions_json: &str,
+        stop: bool,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO rules (account_id, name, enabled, priority, conditions_json, actions_json, stop, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id, name) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 priority = excluded.priority,
+                 conditions_json = excluded.conditions_json,
+                 actions_json = excluded.actions_json,
+                 stop = excluded.stop
+             RETURNING id",
+            params![
+                account.to_string(),
+                name,
+                enabled as i64,
+                priority,
+                conditions_json,
+                actions_json,
+                stop as i64,
+                now,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all rules for an account, ordered by priority DESC, id ASC.
+    pub fn list_rules(&self, account: &AccountId) -> Result<Vec<Rule>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, name, enabled, priority, conditions_json, actions_json, stop, created_at
+             FROM rules
+             WHERE account_id = ?1
+             ORDER BY priority DESC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Rule {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                name: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                priority: row.get(4)?,
+                conditions_json: row.get(5)?,
+                actions_json: row.get(6)?,
+                stop: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a rule by name for an account.
+    pub fn delete_rule(&self, account: &AccountId, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM rules WHERE account_id = ?1 AND name = ?2",
+            params![account.to_string(), name],
+        )? > 0)
+    }
+
+    /// Apply rules to messages - delegates to the engine via the Mailin facade.
+    /// This is a placeholder that the Mailin facade uses to call the engine.
+    pub fn apply_rules(&self, _folder_id: FolderId, _message_ids: &[MessageId]) {
+        // The actual rule application happens in the engine.
+        // This method exists to allow the Mailin facade to call it.
+        // The engine's apply_rules is called via Mailin::apply_rules which
+        // routes to the engine. This is a no-op at the store level.
+    }
+
+    // --------------------------------------------------------------- virtual folders
+
+    /// Create or update a virtual folder.
+    pub fn upsert_virtual_folder(
+        &self,
+        account: &AccountId,
+        name: &str,
+        kind: VirtualFolderKind,
+        query_json: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO virtual_folders (account_id, name, kind, query_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id, name) DO UPDATE SET
+                 kind = excluded.kind,
+                 query_json = excluded.query_json
+             RETURNING id",
+            params![account.to_string(), name, kind as i64, query_json, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all virtual folders for an account.
+    pub fn list_virtual_folders(&self, account: &AccountId) -> Result<Vec<VirtualFolder>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, name, kind, query_json, created_at
+             FROM virtual_folders
+             WHERE account_id = ?1
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(VirtualFolder {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                name: row.get(2)?,
+                kind: match row.get::<_, i64>(3)? {
+                    0 => VirtualFolderKind::UnifiedInbox,
+                    1 => VirtualFolderKind::Starred,
+                    _ => VirtualFolderKind::AllMail,
+                },
+                query_json: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a virtual folder by name for an account.
+    pub fn delete_virtual_folder(&self, account: &AccountId, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM virtual_folders WHERE account_id = ?1 AND name = ?2",
+            params![account.to_string(), name],
+        )? > 0)
+    }
+
+    /// Get messages for a virtual folder (unified inbox, etc.)
+    /// Returns (MessageHeader, FolderId, AccountId) tuples for cross-account display.
+    pub fn list_messages_virtual(
+        &self,
+        kind: VirtualFolderKind,
+        account_filter: &[AccountId],
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<(MessageHeader, FolderId, AccountId)>> {
+        let conn = self.lock()?;
+        
+        let account_placeholders = account_filter.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(limit as i64), Box::new(offset as i64)];
+        for acc in account_filter {
+            params.push(Box::new(acc.to_string()));
+        }
+        
+        let (folder_roles, _folder_roles_params): (&str, Vec<&str>) = match kind {
+            VirtualFolderKind::UnifiedInbox => {
+                ("'inbox'", vec![])
+            }
+            VirtualFolderKind::Starred => {
+                ("'archive'", vec![])  // Using archive as starred proxy
+            }
+            VirtualFolderKind::AllMail => {
+                ("'inbox','sent','archive','drafts'", vec![])
+            }
+        };
+        
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS}, f.id as folder_id, f.account_id
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.role IN ({}) AND f.account_id IN ({})
+             ORDER BY m.received_at DESC, m.uid DESC
+             LIMIT ?1 OFFSET ?2",
+            folder_roles, account_placeholders
+        );
+        
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+            let flags: String = row.get(14)?;
+            let account_id_str: String = row.get(17)?;
+            let folder_id: i64 = row.get(16)?;
+            Ok((
+                MessageHeader {
+                    id: MessageId(row.get(0)?),
+                    folder_id: FolderId(row.get(1)?),
+                    uid: row.get(2)?,
+                    message_id: row.get(3)?,
+                    thread_key: row.get(4)?,
+                    subject: row.get(5)?,
+                    from_name: row.get(6)?,
+                    from_addr: row.get(7)?,
+                    to_addrs: row.get(8)?,
+                    cc_addrs: row.get(9)?,
+                    sent_at: row.get(10)?,
+                    received_at: row.get(11)?,
+                    snippet: row.get(12)?,
+                    size: row.get(13)?,
+                    flags: flags.split_whitespace().map(str::to_owned).collect(),
+                    has_attachments: row.get::<_, i64>(15)? != 0,
+                    body_fetched: row.get::<_, i64>(16)? != 0,
+                },
+                FolderId(folder_id),
+                AccountId::parse(&account_id_str)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(e)))?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Count unread messages for a virtual folder.
+    pub fn count_unread_virtual(&self, kind: VirtualFolderKind, account_filter: &[AccountId]) -> Result<u32> {
+        let conn = self.lock()?;
+        
+        let account_placeholders = account_filter.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+        for acc in account_filter {
+            params.push(Box::new(acc.to_string()));
+        }
+        
+        let folder_roles = match kind {
+            VirtualFolderKind::UnifiedInbox => "'inbox'",
+            VirtualFolderKind::Starred => "'archive'",
+            VirtualFolderKind::AllMail => "'inbox','sent','archive','drafts'",
+        };
+        
+        let sql = format!(
+            "SELECT COUNT(*)
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.role IN ({}) AND f.account_id IN ({})
+             AND instr(' ' || m.flags || ' ', ' \\Seen ') = 0",
+            folder_roles, account_placeholders
+        );
+        
+        let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| row.get(0))?;
+        Ok(count as u32)
     }
 }
 

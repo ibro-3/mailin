@@ -12,12 +12,13 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gdk::{Key, ModifierType};
+use gdk_pixbuf::prelude::*;
 use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
     Account, AccountId, AttachmentMeta, Event, Folder, FolderId, FolderRole, MessageHeader,
-    MessageId, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
+    MessageId, MessageListDensity, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -41,6 +42,8 @@ struct Selection {
     folder: Option<FolderId>,
     /// When `true`, the message list shows outbox entries instead of the selected folder.
     show_outbox: bool,
+    /// When `true`, the message list shows unified inbox across all accounts.
+    unified_inbox: bool,
     message: Option<MessageId>,
     /// Outbox entries currently shown (when show_outbox is true)
     outbox_entries: Vec<OutboxEntry>,
@@ -87,7 +90,9 @@ struct Widgets {
     reader_to: gtk::Label,
     reader_cc: gtk::Label,
     reader_date: gtk::Label,
-    remote_banner: adw::Banner,
+    remote_panel: gtk::Revealer,
+    remote_once: gtk::Button,
+    remote_trust: gtk::Button,
     reader_attachments: gtk::Box,
     reader_body: gtk::Box,
     read_button: gtk::Button,
@@ -167,6 +172,11 @@ impl MainWindow {
             .active(true)
             .build();
         sidebar_toggle.add_css_class("flat");
+        // Icon-only toggle: give screen readers a name.
+        {
+            use gtk::accessible::Property;
+            sidebar_toggle.update_property(&[Property::Label("Toggle folders")]);
+        }
         header.pack_start(&sidebar_toggle);
 
         let compose_button = icon_button("mail-message-new-symbolic", "New message (Ctrl+N)");
@@ -196,6 +206,10 @@ impl MainWindow {
             .tooltip_text("Account options")
             .popover(&account_menu)
             .build();
+        {
+            use gtk::accessible::Property;
+            account_menu_button.update_property(&[Property::Label("Account options")]);
+        }
 
         let account_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         account_bar.set_margin_top(8);
@@ -256,6 +270,10 @@ impl MainWindow {
             .icon_name("view-more-symbolic")
             .tooltip_text("Message actions")
             .build();
+        {
+            use gtk::accessible::Property;
+            message_menu_button.update_property(&[Property::Label("Message actions")]);
+        }
         list_header.append(&archive_button);
         list_header.append(&junk_button);
         list_header.append(&trash_button);
@@ -361,9 +379,28 @@ impl MainWindow {
         let reader_attachments = gtk::Box::new(gtk::Orientation::Vertical, 6);
         reader_attachments.set_visible(false);
 
-        let remote_banner = adw::Banner::new("Remote content is blocked to protect your privacy.");
-        remote_banner.set_button_label(Some("Load remote content"));
-        remote_banner.set_revealed(false);
+        // Remote-content banner: "Load once" keeps the session behaviour of the
+        // old adw::Banner; the second action trusts the sender's domain on the
+        // account, which is why the banner is a plain two-button box.
+        let remote_text =
+            gtk::Label::new(Some("Remote content is blocked to protect your privacy."));
+        remote_text.set_xalign(0.0);
+        remote_text.set_hexpand(true);
+        remote_text.set_wrap(true);
+        let remote_once = gtk::Button::with_label("Load once");
+        remote_once.add_css_class("flat");
+        let remote_trust = gtk::Button::with_label("Always allow sender");
+        remote_trust.add_css_class("flat");
+        let remote_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        remote_row.add_css_class("remote-banner");
+        remote_row.append(&remote_text);
+        remote_row.append(&remote_once);
+        remote_row.append(&remote_trust);
+        let remote_panel = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .child(&remote_row)
+            .build();
 
         let reader_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         reader_body.set_margin_top(6);
@@ -374,6 +411,10 @@ impl MainWindow {
             .tooltip_text("Star message")
             .build();
         flag_button.add_css_class("flat");
+        {
+            use gtk::accessible::Property;
+            flag_button.update_property(&[Property::Label("Star message")]);
+        }
         let read_button = icon_button("mail-mark-read-symbolic", "Mark as read");
         let html_button = gtk::ToggleButton::builder()
             .label("HTML")
@@ -409,7 +450,7 @@ impl MainWindow {
         reader_content.append(&reader_cc);
         reader_content.append(&reader_date);
         reader_content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        reader_content.append(&remote_banner);
+        reader_content.append(&remote_panel);
         reader_content.append(&reader_attachments);
         reader_content.append(&reader_body);
 
@@ -494,7 +535,7 @@ impl MainWindow {
         toolbar.set_content(Some(&toast));
         window.set_content(Some(&toolbar));
 
-        let html_mode = app.config.ui.html_enabled;
+        let html_mode = app.config.borrow().ui.html_enabled;
         let this = Rc::new(Self {
             app,
             selection: RefCell::new(Selection::default()),
@@ -546,7 +587,9 @@ impl MainWindow {
                 reader_to,
                 reader_cc,
                 reader_date,
-                remote_banner,
+                remote_panel,
+                remote_once,
+                remote_trust,
                 reader_attachments,
                 reader_body,
                 read_button,
@@ -587,6 +630,9 @@ impl MainWindow {
 
         // Shortcuts window (F1 / Ctrl+?)
         let shortcuts = build_shortcuts_window(&this.widgets.window);
+        // Register as the standard help overlay so GTK exposes it through the
+        // `win.show-help-overlay` action and the window's accessibility tree.
+        this.widgets.window.set_help_overlay(Some(&shortcuts));
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed({
             let shortcuts = shortcuts.clone();
@@ -693,6 +739,28 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&outbox_edit_action);
 
+        // Notification action: mark as read (accepts "account_id:message_id1,message_id2,..." parameter)
+        let mark_read = gio::SimpleAction::new("notification-mark-read", Some(&glib::VariantTy::STRING));
+        mark_read.connect_activate({
+            let this = Rc::clone(this);
+            move |_, parameter| {
+                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                this.notification_mark_read(&param);
+            }
+        });
+        this.widgets.window.add_action(&mark_read);
+
+        // Notification action: archive (accepts "account_id:message_id1,message_id2,..." parameter)
+        let archive = gio::SimpleAction::new("notification-archive", Some(&glib::VariantTy::STRING));
+        archive.connect_activate({
+            let this = Rc::clone(this);
+            move |_, parameter| {
+                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                this.notification_archive(&param);
+            }
+        });
+        this.widgets.window.add_action(&archive);
+
         this.widgets.archive_button.connect_clicked({
             let this = Rc::clone(this);
             move |_| this.archive_selected()
@@ -757,13 +825,19 @@ impl MainWindow {
                     return;
                 }
                 let index = dropdown.selected();
-                let account = this
-                    .accounts
-                    .borrow()
-                    .get(index as usize)
-                    .map(|account| account.id);
-                if let Some(account) = account {
-                    this.select_account(account);
+                if index == 0 {
+                    // "All Accounts" selected - enter unified inbox mode
+                    this.enter_unified_inbox();
+                } else {
+                    // Regular account selected (index - 1 because of "All Accounts" at index 0)
+                    let account = this
+                        .accounts
+                        .borrow()
+                        .get((index - 1) as usize)
+                        .map(|account| account.id);
+                    if let Some(account) = account {
+                        this.select_account(account);
+                    }
                 }
             }
         });
@@ -890,22 +964,27 @@ impl MainWindow {
             }
         });
 
-        this.widgets.remote_banner.connect_button_clicked({
+        this.widgets.remote_once.connect_clicked({
             let this = Rc::clone(this);
-            move |banner| {
+            move |_| {
                 let Some(message_id) = this.selection.borrow().message else {
                     return;
                 };
                 this.remote_allowed.set(Some(message_id));
-                banner.set_revealed(false);
+                this.widgets.remote_panel.set_reveal_child(false);
                 this.render_body(message_id);
             }
+        });
+
+        this.widgets.remote_trust.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.trust_current_sender()
         });
 
         this.widgets.compose_button.connect_clicked({
             let this = Rc::clone(this);
             move |_| {
-                let _ = Self::open_compose(&this, OutgoingMessage::default());
+                let _ = Self::open_compose(&this, this.new_draft());
             }
         });
 
@@ -998,7 +1077,7 @@ impl MainWindow {
         compose_action.connect_activate({
             let this = Rc::clone(this);
             move |_, _| {
-                let _ = Self::open_compose(&this, OutgoingMessage::default());
+                let _ = Self::open_compose(&this, this.new_draft());
             }
         });
         this.widgets.window.add_action(&compose_action);
@@ -1043,7 +1122,12 @@ impl MainWindow {
         let preferences_action = gio::SimpleAction::new("preferences", None);
         preferences_action.connect_activate({
             let this = Rc::clone(this);
-            move |_, _| crate::preferences::show_preferences(&this.widgets.window, &this.app)
+            move |_, _| {
+                let window = Rc::clone(&this);
+                crate::preferences::show_preferences(&this.widgets.window, &this.app, move || {
+                    window.apply_config();
+                });
+            }
         });
         this.widgets.window.add_action(&preferences_action);
 
@@ -1075,16 +1159,22 @@ impl MainWindow {
         let keep = current.filter(|id| accounts.iter().any(|account| account.id == *id));
 
         self.programmatic.set(true);
-        let names: Vec<String> = accounts
+        let mut names: Vec<String> = accounts
             .iter()
             .map(|account| format!("{} <{}>", account.display_name, account.email))
             .collect();
+        // Add "All Accounts" option for unified inbox at the top
+        names.insert(0, "All Accounts (Unified Inbox)".to_string());
         let model = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
         self.widgets.account_dropdown.set_model(Some(&model));
         if let Some(index) =
             keep.and_then(|id| accounts.iter().position(|account| account.id == id))
         {
-            self.widgets.account_dropdown.set_selected(index as u32);
+            // +1 because we inserted "All Accounts" at index 0
+            self.widgets.account_dropdown.set_selected((index + 1) as u32);
+        } else if accounts.is_empty() {
+            // No accounts, select "All Accounts" (which will show empty)
+            self.widgets.account_dropdown.set_selected(0);
         }
         self.programmatic.set(false);
         *self.accounts.borrow_mut() = accounts;
@@ -1128,6 +1218,7 @@ impl MainWindow {
                 selection.query.clear();
             }
             selection.account = Some(id);
+            selection.unified_inbox = false;
             if selection.limit == 0 {
                 selection.limit = self.page_size();
             }
@@ -1139,29 +1230,88 @@ impl MainWindow {
             .iter()
             .position(|account| account.id == id)
         {
-            self.widgets.account_dropdown.set_selected(index as u32);
+            self.widgets.account_dropdown.set_selected((index + 1) as u32); // +1 for "All Accounts"
         }
         self.programmatic.set(false);
         self.update_subtitle();
         self.refresh_folders();
     }
 
+    fn enter_unified_inbox(&self) {
+        {
+            let mut selection = self.selection.borrow_mut();
+            selection.folder = None;
+            selection.message = None;
+            selection.search = false;
+            selection.query.clear();
+            selection.unified_inbox = true;
+            selection.account = None;
+            if selection.limit == 0 {
+                selection.limit = self.page_size();
+            }
+        }
+        self.programmatic.set(true);
+        self.widgets.account_dropdown.set_selected(0); // "All Accounts"
+        self.programmatic.set(false);
+        self.update_subtitle();
+        self.refresh_folders();
+    }
+
     fn update_subtitle(&self) {
-        let account = self.selection.borrow().account;
-        let subtitle = account
-            .and_then(|id| self.accounts.borrow().iter().find(|a| a.id == id).cloned())
-            .map(|account| account.email)
-            .unwrap_or_else(|| "No account".to_owned());
-        self.widgets.title.set_subtitle(&subtitle);
+        let selection = self.selection.borrow();
+        if selection.unified_inbox {
+            let total_accounts = self.accounts.borrow().len();
+            self.widgets.title.set_subtitle(&format!("Unified Inbox ({} accounts)", total_accounts));
+        } else {
+            let account = selection.account;
+            let subtitle = account
+                .and_then(|id| self.accounts.borrow().iter().find(|a| a.id == id).cloned())
+                .map(|account| account.email)
+                .unwrap_or_else(|| "No account".to_owned());
+            self.widgets.title.set_subtitle(&subtitle);
+        }
     }
 
     // -------------------------------------------------------------- folders
 
     fn refresh_folders(&self) {
-        let Some(account_id) = self.selection.borrow().account else {
+        let selection = self.selection.borrow();
+        if selection.unified_inbox {
+            // In unified inbox mode, show just "Unified Inbox" as the only folder
+            self.clear_folders();
+            let unread_total = self.app.mailin.unread_total_all().unwrap_or(0);
+            let unified_folder = Folder {
+                id: FolderId(0), // Virtual ID for unified inbox
+                account_id: AccountId::default(),
+                name: "Unified Inbox".to_owned(),
+                delimiter: "/".to_owned(),
+                role: FolderRole::Other,
+                uid_validity: None,
+                uid_next: None,
+                highest_modseq: None,
+                last_synced_at: None,
+                message_count: 0,
+                unread_count: unread_total,
+            };
+            
+            self.programmatic.set(true);
+            clear_list(&self.widgets.folder_list);
+            self.widgets.folder_list.append(&folder_row(&unified_folder));
+            self.widgets.folder_list.select_row(Some(
+                &self.widgets.folder_list.row_at_index(0).expect("row")
+            ));
+            self.widgets.folder_stack.set_visible_child_name("list");
+            *self.folders.borrow_mut() = vec![unified_folder];
+            self.programmatic.set(false);
+            return;
+        }
+        
+        let Some(account_id) = selection.account else {
             self.clear_folders();
             return;
         };
+        drop(selection);
+        
         let mut folders = match self.app.mailin.list_folders(&account_id) {
             Ok(folders) => folders,
             Err(error) => {
@@ -1272,12 +1422,25 @@ impl MainWindow {
 
     // ------------------------------------------------------------- messages
 
+    /// Apply a freshly saved configuration to the widgets that cache values
+    /// from it: the reader (HTML preference) and the message list (density,
+    /// page size).
+    fn apply_config(&self) {
+        let html_enabled = self.app.config.borrow().ui.html_enabled;
+        self.html_mode.set(html_enabled);
+        self.refresh_messages();
+        let message_id = self.selection.borrow().message;
+        if let Some(message_id) = message_id {
+            self.render_body(message_id);
+        }
+    }
+
     fn page_size(&self) -> u32 {
-        self.app.config.ui.page_size.clamp(1, MAX_PAGE)
+        self.app.config.borrow().ui.page_size.clamp(1, MAX_PAGE)
     }
 
     fn refresh_messages(&self) {
-        let (search, query, folder_id, limit, show_outbox, account_id) = {
+        let (search, query, folder_id, limit, show_outbox, account_id, unified_inbox) = {
             let selection = self.selection.borrow();
             (
                 selection.search,
@@ -1286,8 +1449,29 @@ impl MainWindow {
                 selection.limit,
                 selection.show_outbox,
                 selection.account,
+                selection.unified_inbox,
             )
         };
+
+        if unified_inbox {
+            let limit = limit.max(self.page_size());
+            let account_ids: Vec<AccountId> = self.accounts.borrow().iter().map(|a| a.id).collect();
+            match self.app.mailin.list_messages_virtual(
+                mailin_core::model::VirtualFolderKind::UnifiedInbox,
+                &account_ids,
+                limit,
+                0,
+            ) {
+                Ok(messages) => {
+                    let title = format!("Unified Inbox ({} accounts)", self.accounts.borrow().len());
+                    let more = messages.len() as u32 >= limit && limit < MAX_PAGE;
+                    let message_headers: Vec<MessageHeader> = messages.into_iter().map(|(h, _, _)| h).collect();
+                    self.show_messages(message_headers, title, more);
+                }
+                Err(error) => self.show_error(&error.to_string()),
+            }
+            return;
+        }
 
         if search {
             let Some(account_id) = account_id else {
@@ -1381,8 +1565,16 @@ impl MainWindow {
 
         self.programmatic.set(true);
         clear_list(&self.widgets.message_list);
+        let density = self.app.config.borrow().ui.message_list_density;
+        let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
+        let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
+        let app = Rc::clone(&self.app);
         for message in &messages {
-            self.widgets.message_list.append(&message_row(message, now));
+            let row = message_row(message, now, density);
+            if quick_actions_enabled {
+                attach_quick_actions(&row, Rc::clone(&app), quick_action_items.clone(), message.id);
+            }
+            self.widgets.message_list.append(&row);
         }
         for (index, message) in messages.iter().enumerate() {
             if Some(message.id) != selected && !previous.contains(&message.id) {
@@ -1530,7 +1722,7 @@ impl MainWindow {
         self.render_attachments(message.id);
         self.render_body(message.id);
         self.update_actions(message);
-        if self.app.config.ui.mark_read_on_open && !message.is_seen() {
+        if self.app.config.borrow().ui.mark_read_on_open && !message.is_seen() {
             self.app
                 .engine
                 .set_flags(message.id, vec!["\\Seen".to_owned()], Vec::new());
@@ -1566,9 +1758,70 @@ impl MainWindow {
             .set_text(&format::full_date(timestamp));
     }
 
+    /// Header for `message_id`, preferring the rows already in the list over a
+    /// fresh store lookup.
+    fn header_for(&self, message_id: MessageId) -> Option<MessageHeader> {
+        self.messages
+            .borrow()
+            .iter()
+            .find(|message| message.id == message_id)
+            .cloned()
+            .or_else(|| self.app.mailin.message(message_id).ok().flatten())
+    }
+
+    /// Whether the account behind the current selection trusts `domain` for
+    /// remote content. Read from the store so the check stays correct after
+    /// the account dialog or the banner's trust button saved a change.
+    fn sender_domain_allowed(&self, domain: &str) -> bool {
+        let account = self.selection.borrow().account;
+        match account {
+            Some(id) => self
+                .app
+                .mailin
+                .account(&id)
+                .ok()
+                .flatten()
+                .is_some_and(|account| account.remote_domain_allowed(domain)),
+            None => false,
+        }
+    }
+
+    /// Persist "always allow" for the sender's domain on the current account
+    /// and re-render the message with remote content enabled.
+    fn trust_current_sender(&self) {
+        let (message_id, account_id) = {
+            let selection = self.selection.borrow();
+            (selection.message, selection.account)
+        };
+        let (Some(message_id), Some(account_id)) = (message_id, account_id) else {
+            return;
+        };
+        let Some(domain) = self
+            .header_for(message_id)
+            .and_then(|header| header.from_domain().map(str::to_owned))
+        else {
+            return;
+        };
+        let Some(mut account) = self.app.mailin.account(&account_id).ok().flatten() else {
+            return;
+        };
+        if account.allow_remote_domain(&domain)
+            && let Err(error) = self.app.mailin.save_account(&account, None)
+        {
+            self.show_error(&error.to_string());
+            return;
+        }
+        self.remote_allowed.set(Some(message_id));
+        self.widgets.remote_panel.set_reveal_child(false);
+        self.widgets.toast.add_toast(adw::Toast::new(&format!(
+            "Always showing content from @{domain}"
+        )));
+        self.render_body(message_id);
+    }
+
     fn render_body(&self, message_id: MessageId) {
         clear_box(&self.widgets.reader_body);
-        self.widgets.remote_banner.set_revealed(false);
+        self.widgets.remote_panel.set_reveal_child(false);
         let Ok(body) = self.app.mailin.message_body(message_id) else {
             self.widgets
                 .reader_body
@@ -1588,8 +1841,15 @@ impl MainWindow {
 
                 if want_html {
                     let html_body = html.as_deref().unwrap_or_default();
-                    let allow_remote = self.app.config.ui.remote_content_enabled
-                        || self.remote_allowed.get() == Some(message_id);
+                    let sender_domain = self
+                        .header_for(message_id)
+                        .and_then(|header| header.from_domain().map(str::to_owned));
+                    let trusted = sender_domain
+                        .as_deref()
+                        .is_some_and(|domain| self.sender_domain_allowed(domain));
+                    let allow_remote = self.app.config.borrow().ui.remote_content_enabled
+                        || self.remote_allowed.get() == Some(message_id)
+                        || trusted;
                     let images = self.inline_images(message_id);
                     let dark = adw::StyleManager::default().is_dark();
                     let view = self.html_view();
@@ -1599,7 +1859,16 @@ impl MainWindow {
                     );
                     self.widgets.reader_body.append(&view);
                     if !allow_remote && html::has_remote_content(html_body) {
-                        self.widgets.remote_banner.set_revealed(true);
+                        match sender_domain {
+                            Some(domain) => {
+                                self.widgets
+                                    .remote_trust
+                                    .set_label(&format!("Always allow @{domain}"));
+                                self.widgets.remote_trust.set_visible(true);
+                            }
+                            None => self.widgets.remote_trust.set_visible(false),
+                        }
+                        self.widgets.remote_panel.set_reveal_child(true);
                     }
                 } else if has_text {
                     self.widgets
@@ -1678,14 +1947,46 @@ impl MainWindow {
             .mailin
             .list_attachments(message_id)
             .unwrap_or_default();
-        let visible = attachments
+        let visible: Vec<_> = attachments
             .into_iter()
             .filter(|attachment| !attachment.is_inline)
-            .collect::<Vec<_>>();
+            .collect();
         if visible.is_empty() {
             self.widgets.reader_attachments.set_visible(false);
             return;
         }
+        
+        // "Download all" button when multiple attachments
+        if visible.len() > 1 {
+            let download_all_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            download_all_row.add_css_class("card");
+            download_all_row.set_margin_top(2);
+            download_all_row.set_margin_bottom(2);
+            let download_all = gtk::Button::with_label("Download all");
+            download_all.add_css_class("flat");
+            download_all.set_margin_start(10);
+            let app = Rc::clone(&self.app);
+            let window = self.widgets.window.clone().upcast::<gtk::Window>();
+            let toast = self.widgets.toast.clone();
+            let pending = Rc::clone(&self.pending_attachment);
+            let visible_clone = visible.clone();
+            download_all.connect_clicked(move |_| {
+                for att in &visible_clone {
+                    request_save_attachment(
+                        Rc::clone(&app),
+                        window.clone(),
+                        toast.clone(),
+                        Rc::clone(&pending),
+                        message_id,
+                        att.clone(),
+                        false,
+                    );
+                }
+            });
+            download_all_row.append(&download_all);
+            self.widgets.reader_attachments.append(&download_all_row);
+        }
+        
         for attachment in visible {
             self.widgets
                 .reader_attachments
@@ -1695,32 +1996,65 @@ impl MainWindow {
     }
 
     fn attachment_row(&self, message_id: MessageId, attachment: AttachmentMeta) -> gtk::Widget {
+        let is_image = attachment.mime_type.starts_with("image/");
+        let is_pdf = attachment.mime_type == "application/pdf";
+        let is_large = attachment.size.map(|s| s > 40_000_000).unwrap_or(false);
+        
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         row.add_css_class("card");
         row.set_margin_top(2);
         row.set_margin_bottom(2);
-
+        
+        // Preview for images and PDFs
+        if is_image || is_pdf {
+            if let Ok(preview) = self.attachment_preview(message_id, attachment.clone()) {
+                row.append(&preview);
+            }
+        }
+        
         let icon = gtk::Image::from_icon_name("mail-attachment-symbolic");
         icon.set_pixel_size(16);
         icon.set_margin_start(10);
         row.append(&icon);
-
+        
         let name = gtk::Label::new(Some(&attachment.display_name()));
         name.set_xalign(0.0);
         name.set_hexpand(true);
         name.set_ellipsize(pango::EllipsizeMode::Middle);
         row.append(&name);
-
+        
         if let Some(size) = attachment.size {
-            let size = gtk::Label::new(Some(&format::file_size(size)));
-            size.add_css_class("caption");
-            size.add_css_class("dim-label");
-            row.append(&size);
+            let size_label = gtk::Label::new(Some(&format::file_size(size)));
+            size_label.add_css_class("caption");
+            size_label.add_css_class("dim-label");
+            if is_large {
+                size_label.add_css_class("error"); // Red color for large files
+            }
+            row.append(&size_label);
         }
-
+        
+        if is_large {
+            let warning = gtk::Label::new(Some("⚠ Large file"));
+            warning.add_css_class("error");
+            warning.set_margin_end(8);
+            // Convey the warning text to screen readers (the ⚠ glyph alone is
+            // decorative).
+            {
+                use gtk::accessible::Property;
+                warning.update_property(&[Property::Label("Large file")]);
+            }
+            row.append(&warning);
+        }
+        
         let save = gtk::Button::with_label("Save");
         save.add_css_class("flat");
         save.set_margin_end(4);
+        // Distinguish this Save button from others by naming the file.
+        {
+            use gtk::accessible::Property;
+            let save_name = format!("Save {}", attachment.display_name());
+            save.update_property(&[Property::Label(&save_name)]);
+        }
         let app = Rc::clone(&self.app);
         let window = self.widgets.window.clone().upcast::<gtk::Window>();
         let toast = self.widgets.toast.clone();
@@ -1738,6 +2072,50 @@ impl MainWindow {
         });
         row.append(&save);
         row.upcast()
+    }
+
+    fn attachment_preview(&self, message_id: MessageId, attachment: AttachmentMeta) -> Result<gtk::Widget, glib::Error> {
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        container.set_size_request(60, 60);
+        
+        let is_image = attachment.mime_type.starts_with("image/");
+        let is_pdf = attachment.mime_type == "application/pdf";
+        
+        if is_image {
+            // Image preview - show thumbnail
+            if let Ok(Some(data)) = self.app.mailin.attachment(message_id, &attachment.part_id) {
+                if let Some(bytes) = data.data {
+                    if let Ok(pixbuf) = Self::bytes_to_pixbuf(&bytes) {
+                        let image = gtk::Image::from_pixbuf(Some(&pixbuf));
+                        image.set_halign(gtk::Align::Center);
+                        image.set_valign(gtk::Align::Center);
+                        container.append(&image);
+                    }
+                }
+            }
+        } else if is_pdf {
+            // PDF preview - show icon
+            let icon = gtk::Image::from_icon_name("application-pdf-symbolic");
+            icon.set_pixel_size(32);
+            icon.set_halign(gtk::Align::Center);
+            container.append(&icon);
+            let label = gtk::Label::new(Some("PDF"));
+            label.add_css_class("caption");
+            label.set_halign(gtk::Align::Center);
+            container.append(&label);
+        }
+        
+        Ok(container.upcast())
+    }
+    
+    fn bytes_to_pixbuf(bytes: &[u8]) -> Result<gdk_pixbuf::Pixbuf, glib::Error> {
+        let loader = gdk_pixbuf::PixbufLoader::new();
+        loader.write(bytes)?;
+        loader.close()?;
+        loader.pixbuf().ok_or_else(|| glib::Error::new(
+            gdk_pixbuf::PixbufError::InsufficientMemory,
+            "Failed to load pixbuf"
+        ))
     }
 
     /// Finish a save that was waiting for attachment bytes to be downloaded.
@@ -1778,6 +2156,13 @@ impl MainWindow {
         } else {
             "Star message"
         }));
+        {
+            use gtk::accessible::Property;
+            let name = if flagged { "Remove star" } else { "Star message" };
+            self.widgets
+                .flag_button
+                .update_property(&[Property::Label(name)]);
+        }
         self.widgets.read_button.set_icon_name(if seen {
             "mail-mark-unread-symbolic"
         } else {
@@ -1842,6 +2227,76 @@ impl MainWindow {
         }
         self.app.engine.archive_messages(&ids);
         self.toast("Archiving…");
+    }
+
+    /// Handle "Mark as read" action from notification.
+    /// Parameter format: "account_id:message_id1,message_id2,..." (message IDs optional)
+    pub fn notification_mark_read(&self, param: &str) {
+        let (account_id_str, ids_str) = param.split_once(':').unwrap_or((param, ""));
+        let Ok(account_id) = account_id_str.parse::<AccountId>() else {
+            return;
+        };
+        
+        // If message IDs provided, use them; otherwise fetch unread messages from inbox
+        let ids: Vec<MessageId> = if !ids_str.is_empty() {
+            ids_str
+                .split(',')
+                .filter_map(|s| s.parse::<i64>().ok().map(MessageId))
+                .collect()
+        } else {
+            self.get_unread_inbox_messages(account_id)
+        };
+        
+        if ids.is_empty() {
+            return;
+        }
+        // Mark as read by adding \Seen flag
+        self.app.engine.bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+        self.toast("Marked as read");
+    }
+
+    /// Handle "Archive" action from notification.
+    /// Parameter format: "account_id:message_id1,message_id2,..." (message IDs optional)
+    pub fn notification_archive(&self, param: &str) {
+        let (account_id_str, ids_str) = param.split_once(':').unwrap_or((param, ""));
+        let Ok(account_id) = account_id_str.parse::<AccountId>() else {
+            return;
+        };
+        
+        // If message IDs provided, use them; otherwise fetch unread messages from inbox
+        let ids: Vec<MessageId> = if !ids_str.is_empty() {
+            ids_str
+                .split(',')
+                .filter_map(|s| s.parse::<i64>().ok().map(MessageId))
+                .collect()
+        } else {
+            self.get_unread_inbox_messages(account_id)
+        };
+        
+        if ids.is_empty() {
+            return;
+        }
+        self.app.engine.archive_messages(&ids);
+        self.toast("Archiving…");
+    }
+
+    /// Get unread message IDs from the inbox folder for an account.
+    fn get_unread_inbox_messages(&self, account_id: AccountId) -> Vec<MessageId> {
+        let Ok(folders) = self.app.mailin.list_folders(&account_id) else {
+            return Vec::new();
+        };
+        let inbox_folder = folders.iter().find(|f| f.role == FolderRole::Inbox);
+        let Some(folder) = inbox_folder else {
+            return Vec::new();
+        };
+        let Ok(messages) = self.app.mailin.list_messages(folder.id, 0, 100) else {
+            return Vec::new();
+        };
+        messages
+            .into_iter()
+            .filter(|m| !m.is_seen())
+            .map(|m| m.id)
+            .collect()
     }
 
     fn delete_selected(&self, permanent: bool) {
@@ -2084,6 +2539,22 @@ impl MainWindow {
         let _ = Self::open_compose(this, draft);
     }
 
+    /// Draft for a brand-new message: an empty body that already carries the
+    /// selected account's signature, so the caret starts above it.
+    fn new_draft(&self) -> OutgoingMessage {
+        let signature = self
+            .selection
+            .borrow()
+            .account
+            .and_then(|account_id| self.app.mailin.account(&account_id).ok().flatten())
+            .map(|account| mailin_core::compose::signature_block(&account.signature))
+            .unwrap_or_default();
+        OutgoingMessage {
+            body: signature,
+            ..OutgoingMessage::default()
+        }
+    }
+
     fn open_compose(this: &Rc<Self>, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
         let Some(account_id) = this.selection.borrow().account else {
             this.widgets
@@ -2167,6 +2638,11 @@ impl MainWindow {
                 Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                 Ok(Event::OutboxChanged) => outbox_changed = true,
                 Ok(Event::AccountError { message, .. }) => account_error = Some(message),
+                Ok(Event::ScheduledActionRan { .. }) => {
+                    // Scheduled action completed, refresh folders and messages
+                    folders_changed = true;
+                    messages_changed = true;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {
                     // A slow UI is allowed to miss events: refresh everything
@@ -2217,7 +2693,7 @@ impl MainWindow {
     }
 
     /// Desktop notification for background mail. Clicking it activates the
-    /// application through the default action.
+    /// application through the default action. Buttons allow marking read/archiving.
     fn notify_new_mail(&self, account_id: AccountId, count: u32) {
         let application_active = self
             .widgets
@@ -2229,7 +2705,7 @@ impl MainWindow {
                     .iter()
                     .any(|window| window.is_active())
             });
-        if !self.app.config.ui.notifications || application_active {
+        if !self.app.config.borrow().ui.notifications || application_active {
             return;
         }
         let Some(application) = self.widgets.window.application() else {
@@ -2242,6 +2718,11 @@ impl MainWindow {
             .find(|account| account.id == account_id)
             .map(|account| account.email.clone())
             .unwrap_or_else(|| "Mailin".to_owned());
+
+        // Parameter for notification actions: account_id (message IDs would be ideal but
+        // NewMessages event doesn't include them; handlers will fetch unread inbox messages)
+        let param = account_id.to_string();
+
         let notification = gio::Notification::new(if count == 1 {
             "New message"
         } else {
@@ -2252,6 +2733,18 @@ impl MainWindow {
             if count == 1 { "" } else { "s" }
         )));
         notification.set_default_action("app.present");
+
+        // Add "Mark as read" button
+        notification.add_button(
+            "Mark as read",
+            &format!("app.notification-mark-read::{}", param),
+        );
+        // Add "Archive" button
+        notification.add_button(
+            "Archive",
+            &format!("app.notification-archive::{}", param),
+        );
+
         application.send_notification(Some(&format!("mailin-{account_id}")), &notification);
     }
 
@@ -2453,9 +2946,13 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .tooltip_text(tooltip)
         .build();
     button.add_css_class("flat");
-    // Set accessible name via the Accessible interface
+    // Icon-only buttons have no text content, so screen readers have nothing
+    // to announce. `Property::Label` is the accessible *name*; the tooltip
+    // remains as the accessible *description* (GTK maps tooltip-text to it).
+    // The name is the tooltip text without the trailing accelerator hint.
     use gtk::accessible::Property;
-    button.update_property(&[Property::Description(tooltip)]);
+    let name = tooltip.split(" (").next().unwrap_or(tooltip);
+    button.update_property(&[Property::Label(name), Property::Description(tooltip)]);
     button
 }
 
@@ -2529,6 +3026,7 @@ pub(crate) fn role_icon(role: FolderRole) -> &'static str {
         FolderRole::Trash => "user-trash-symbolic",
         FolderRole::Junk => "dialog-warning-symbolic",
         FolderRole::Archive => "package-x-generic-symbolic",
+        FolderRole::Snoozed => "alarm-symbolic",
         FolderRole::Other => "folder-symbolic",
     }
 }
@@ -2582,17 +3080,36 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     if folder_title(folder) != folder.name {
         row.set_tooltip_text(Some(&folder.name));
     }
+    // Expose the unread count in words; the bare number badge alone reads as
+    // just a digit with no context.
+    if folder.unread_count > 0 {
+        use gtk::accessible::Property;
+        let name = format!(
+            "{}, {} unread message{}",
+            folder_title(folder),
+            folder.unread_count,
+            if folder.unread_count == 1 { "" } else { "s" }
+        );
+        row.update_property(&[Property::Label(&name)]);
+    }
     row
 }
 
-fn message_row(message: &MessageHeader, now: i64) -> gtk::ListBoxRow {
+fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -> gtk::ListBoxRow {
+    use MessageListDensity::{Compact, Cozy};
+
     let seen = message.is_seen();
     let row = gtk::ListBoxRow::new();
     let outer = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    outer.set_margin_top(8);
-    outer.set_margin_bottom(8);
-    outer.set_margin_start(12);
-    outer.set_margin_end(12);
+    let (margin_vertical, margin_horizontal, spacing, show_snippet) = match density {
+        MessageListDensity::Comfortable => (8, 12, 3, true),
+        Cozy => (5, 10, 2, true),
+        Compact => (2, 8, 1, false),
+    };
+    outer.set_margin_top(margin_vertical);
+    outer.set_margin_bottom(margin_vertical);
+    outer.set_margin_start(margin_horizontal);
+    outer.set_margin_end(margin_horizontal);
 
     let dot = gtk::Label::new(Some("●"));
     dot.add_css_class("accent");
@@ -2601,9 +3118,15 @@ fn message_row(message: &MessageHeader, now: i64) -> gtk::ListBoxRow {
     if seen {
         dot.set_opacity(0.0);
     }
+    // The unread dot is a decorative indicator; its state is announced via the
+    // row's accessible label instead, so hide it from the accessibility tree.
+    {
+        use gtk::accessible::State;
+        dot.update_state(&[State::Hidden(true)]);
+    }
     outer.append(&dot);
 
-    let column = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, spacing);
     column.set_hexpand(true);
 
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -2619,12 +3142,21 @@ fn message_row(message: &MessageHeader, now: i64) -> gtk::ListBoxRow {
     if message.is_flagged() {
         let star = gtk::Image::from_icon_name("starred-symbolic");
         star.set_pixel_size(12);
+        // Decorative: flagged state is announced via the row's accessible label.
+        {
+            use gtk::accessible::State;
+            star.update_state(&[State::Hidden(true)]);
+        }
         line.append(&star);
     }
     if message.has_attachments {
         let clip = gtk::Image::from_icon_name("mail-attachment-symbolic");
         clip.set_pixel_size(12);
         clip.add_css_class("dim-label");
+        {
+            use gtk::accessible::State;
+            clip.update_state(&[State::Hidden(true)]);
+        }
         line.append(&clip);
     }
 
@@ -2643,7 +3175,7 @@ fn message_row(message: &MessageHeader, now: i64) -> gtk::ListBoxRow {
     }
     column.append(&subject);
 
-    if let Some(snippet) = message.snippet.as_deref() {
+    if show_snippet && let Some(snippet) = message.snippet.as_deref() {
         let text = format::one_line(snippet, 160);
         if !text.is_empty() {
             let label = gtk::Label::new(Some(&text));
@@ -2657,12 +3189,169 @@ fn message_row(message: &MessageHeader, now: i64) -> gtk::ListBoxRow {
 
     outer.append(&column);
     row.set_child(Some(&outer));
-    row.set_tooltip_text(Some(&format!(
-        "{} — {}",
+    let summary = format!(
+        "{}{}{}{} — {}",
+        if seen { "" } else { "Unread. " },
+        if message.is_flagged() { "Starred. " } else { "" },
+        if message.has_attachments {
+            "Has attachments. "
+        } else {
+            ""
+        },
         message.from_display(),
         format::subject_label(message)
-    )));
+    );
+    row.set_tooltip_text(Some(&summary));
+    // Expose unread/flagged/attachment state to screen readers; the visual
+    // indicators (dot, star, clip) are decorative and hidden.
+    {
+        use gtk::accessible::Property;
+        row.update_property(&[Property::Label(&summary)]);
+    }
     row
+}
+
+/// Attach swipe-to-reveal quick actions to a message row.
+///
+/// A `GestureSwipe` on the row slides an overlay of action buttons into view:
+/// swipe left reveals the "destructive" side (archive / delete), swipe right
+/// reveals the "positive" side (flag / mark read). A second swipe in the same
+/// direction, or tapping elsewhere, hides the overlay again.
+fn attach_quick_actions(
+    row: &gtk::ListBoxRow,
+    app: Rc<AppState>,
+    actions: Vec<mailin_core::config::QuickAction>,
+    message_id: MessageId,
+) {
+    use mailin_core::config::QuickAction;
+
+    // The overlay lives inside the row's child box, aligned to the end.
+    // It starts hidden; the swipe gesture toggles it.
+    let row_child = match row.child() {
+        Some(child) => child,
+        None => return,
+    };
+    // The row child is the horizontal `outer` box built by `message_row`.
+    // Wrap it in an overlay so actions can float on top without disturbing
+    // the existing layout.
+    let outer = match row_child.downcast::<gtk::Box>() {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let overlay = gtk::Overlay::new();
+    // Move every child of `outer` into the overlay's main child.
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    while let Some(child) = outer.first_child() {
+        outer.remove(&child);
+        content.append(&child);
+    }
+    content.set_hexpand(true);
+    overlay.set_child(Some(&content));
+
+    // Build the actions bar.
+    let actions_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    actions_bar.add_css_class("quick-actions");
+    actions_bar.set_halign(gtk::Align::End);
+    actions_bar.set_valign(gtk::Align::Fill);
+    actions_bar.set_visible(false);
+
+    for action in &actions {
+        let button = gtk::Button::from_icon_name(action.icon());
+        button.set_tooltip_text(Some(action.label()));
+        button.add_css_class("flat");
+        {
+            use gtk::accessible::Property;
+            let name = action.label();
+            button.update_property(&[Property::Label(name)]);
+        }
+        button.set_margin_top(4);
+        button.set_margin_bottom(4);
+        button.set_margin_start(4);
+        button.set_margin_end(4);
+        match action {
+            QuickAction::Archive => button.add_css_class("suggested-action"),
+            QuickAction::Delete => button.add_css_class("destructive-action"),
+            _ => {}
+        }
+        let action = *action;
+        let app = Rc::clone(&app);
+        let id = message_id;
+        button.connect_clicked(move |_| {
+            let ids = vec![id];
+            match action {
+                QuickAction::Archive => app.engine.archive_messages(&ids),
+                QuickAction::Delete => app.engine.delete_messages(&ids),
+                QuickAction::Junk => app.engine.mark_messages_junk(&ids, true),
+                QuickAction::Flag => {
+                    app.engine
+                        .bulk_set_flags(&ids, vec!["\\Flagged".to_owned()], Vec::new());
+                }
+                QuickAction::Unflag => {
+                    app.engine
+                        .bulk_set_flags(&ids, Vec::new(), vec!["\\Flagged".to_owned()]);
+                }
+                QuickAction::MarkRead => {
+                    app.engine
+                        .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+                }
+                QuickAction::MarkUnread => {
+                    app.engine
+                        .bulk_set_flags(&ids, Vec::new(), vec!["\\Seen".to_owned()]);
+                }
+            }
+        });
+        actions_bar.append(&button);
+    }
+
+    overlay.add_overlay(&actions_bar);
+
+    // Replace the row's child with the overlay.
+    row.set_child(Some(&overlay));
+
+    // Swipe gesture: horizontal velocity above a threshold reveals actions.
+    let swipe = gtk::GestureSwipe::new();
+    let actions_bar_weak = actions_bar.downgrade();
+    let revealed = std::cell::Cell::new(false);
+    swipe.connect_swipe({
+        let actions_bar_weak = actions_bar_weak.clone();
+        let revealed = revealed.clone();
+        move |_, velocity_x, _velocity_y| {
+            let bar = match actions_bar_weak.upgrade() {
+                Some(bar) => bar,
+                None => return,
+            };
+            let show = velocity_x.abs() > 200.0;
+            if show {
+                // Direction picks which end the bar sits on.
+                if velocity_x < 0.0 {
+                    bar.set_halign(gtk::Align::End);
+                } else {
+                    bar.set_halign(gtk::Align::Start);
+                }
+                bar.set_visible(true);
+                revealed.set(true);
+            } else if revealed.get() {
+                bar.set_visible(false);
+                revealed.set(false);
+            }
+        }
+    });
+    row.add_controller(swipe);
+
+    // A click anywhere on the row hides the overlay again.
+    let click = gtk::GestureClick::new();
+    let actions_bar_weak = actions_bar.downgrade();
+    let revealed = revealed.clone();
+    click.connect_pressed(move |_, _, _, _| {
+        if let Some(bar) = actions_bar_weak.upgrade() {
+            if revealed.get() {
+                bar.set_visible(false);
+                revealed.set(false);
+            }
+        }
+    });
+    row.add_controller(click);
 }
 
 fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {

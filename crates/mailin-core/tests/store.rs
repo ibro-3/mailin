@@ -1,8 +1,8 @@
 //! Store, search and outbox behaviour against a real SQLite database.
 
 use mailin_core::{
-    Account, AttachmentData, AttachmentMeta, FolderRole, FolderSyncState, FolderUpsert, NewMessage,
-    OutboxState, Paths, Security, ServerSettings, Store,
+    Account, AttachmentData, AttachmentMeta, Contact, FolderRole, FolderSyncState, FolderUpsert, NewMessage,
+    OutboxState, Paths, Security, ServerSettings, Store, Template,
 };
 
 fn account() -> Account {
@@ -637,4 +637,257 @@ fn interrupted_outbox_sends_are_queued_again() {
     let entry = store.next_queued_outbox().expect("next").expect("present");
     assert_eq!(entry.state, OutboxState::Queued);
     assert_eq!(entry.attempts, 0);
+}
+
+#[test]
+fn template_crud() {
+    let (store, account) = store_with_account();
+
+    // Create template
+    let id = store
+        .upsert_template(&account.id, "welcome", "Welcome {{name}}", "Hello {{name}},\n\nWelcome!")
+        .expect("upsert");
+    assert!(id > 0);
+
+    // List templates
+    let templates = store.list_templates(&account.id).expect("list");
+    assert_eq!(templates.len(), 1);
+    assert_eq!(templates[0].name, "welcome");
+    assert_eq!(templates[0].subject, "Welcome {{name}}");
+    assert_eq!(templates[0].body, "Hello {{name}},\n\nWelcome!");
+
+    // Update template
+    let id2 = store
+        .upsert_template(&account.id, "welcome", "Welcome {{name}}!", "Hello {{name}}!\n\nWelcome aboard!")
+        .expect("update");
+    assert_eq!(id, id2, "upsert returns same id");
+    let templates = store.list_templates(&account.id).expect("list again");
+    assert_eq!(templates[0].subject, "Welcome {{name}}!");
+    assert_eq!(templates[0].body, "Hello {{name}}!\n\nWelcome aboard!");
+
+    // Delete template
+    assert!(store.delete_template(&account.id, "welcome").expect("delete"));
+    assert!(store.list_templates(&account.id).expect("list empty").is_empty());
+    assert!(!store.delete_template(&account.id, "welcome").expect("delete missing"));
+}
+
+#[test]
+fn templates_are_per_account() {
+    let store = Store::open_in_memory().expect("store");
+    let account1 = Account::new(
+        "Ada",
+        "ada@example.com",
+        ServerSettings::imap("imap.example.com", "ada@example.com"),
+        ServerSettings::smtp_starttls("smtp.example.com", "ada@example.com"),
+    );
+    let account2 = Account::new(
+        "Bob",
+        "bob@example.com",
+        ServerSettings::imap("imap.example.com", "bob@example.com"),
+        ServerSettings::smtp_starttls("smtp.example.com", "bob@example.com"),
+    );
+    store.upsert_account(&account1).expect("account1");
+    store.upsert_account(&account2).expect("account2");
+
+    store
+        .upsert_template(&account1.id, "template", "Subj", "Body")
+        .expect("upsert1");
+    store
+        .upsert_template(&account2.id, "template", "Subj2", "Body2")
+        .expect("upsert2");
+
+    let t1 = store.list_templates(&account1.id).expect("list1");
+    let t2 = store.list_templates(&account2.id).expect("list2");
+    assert_eq!(t1.len(), 1);
+    assert_eq!(t2.len(), 1);
+    assert_eq!(t1[0].subject, "Subj");
+    assert_eq!(t2[0].subject, "Subj2");
+}
+
+#[test]
+fn contact_crud() {
+    let (store, account) = store_with_account();
+
+    // Create contact
+    let id = store
+        .upsert_contact(&account.id, "grace@example.com", "Grace Hopper", false)
+        .expect("upsert");
+    assert!(id > 0);
+
+    // List contacts
+    let contacts = store.list_contacts(&account.id).expect("list");
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].email, "grace@example.com");
+    assert_eq!(contacts[0].display_name, "Grace Hopper");
+    assert_eq!(contacts[0].times_seen, 1);
+    assert!(!contacts[0].manual);
+
+    // Update contact (increment times_seen)
+    let id2 = store
+        .upsert_contact(&account.id, "grace@example.com", "Grace", false)
+        .expect("update");
+    assert_eq!(id, id2, "upsert returns same id");
+    let contacts = store.list_contacts(&account.id).expect("list again");
+    assert_eq!(contacts[0].times_seen, 2);
+    assert_eq!(contacts[0].display_name, "Grace Hopper"); // original name preserved
+
+    // Manual contact should set manual flag
+    let id3 = store
+        .upsert_contact(&account.id, "manual@example.com", "Manual Entry", true)
+        .expect("manual upsert");
+    let contacts = store.list_contacts(&account.id).expect("list manual");
+    let manual = contacts.iter().find(|c| c.email == "manual@example.com").expect("manual contact");
+    assert!(manual.manual);
+
+    // Delete contact
+    assert!(store.delete_contact(&account.id, "grace@example.com").expect("delete"));
+    assert!(store.list_contacts(&account.id).expect("list empty").len() == 1); // only manual remains
+    assert!(!store.delete_contact(&account.id, "grace@example.com").expect("delete missing"));
+}
+
+#[test]
+fn contacts_are_per_account() {
+    let store = Store::open_in_memory().expect("store");
+    let account1 = Account::new(
+        "Ada",
+        "ada@example.com",
+        ServerSettings::imap("imap.example.com", "ada@example.com"),
+        ServerSettings::smtp_starttls("smtp.example.com", "ada@example.com"),
+    );
+    let account2 = Account::new(
+        "Bob",
+        "bob@example.com",
+        ServerSettings::imap("imap.example.com", "bob@example.com"),
+        ServerSettings::smtp_starttls("smtp.example.com", "bob@example.com"),
+    );
+    store.upsert_account(&account1).expect("account1");
+    store.upsert_account(&account2).expect("account2");
+
+    store
+        .upsert_contact(&account1.id, "contact@example.com", "Contact 1", false)
+        .expect("upsert1");
+    store
+        .upsert_contact(&account2.id, "contact@example.com", "Contact 2", false)
+        .expect("upsert2");
+
+    let c1 = store.list_contacts(&account1.id).expect("list1");
+    let c2 = store.list_contacts(&account2.id).expect("list2");
+    assert_eq!(c1.len(), 1);
+    assert_eq!(c2.len(), 1);
+    assert_eq!(c1[0].display_name, "Contact 1");
+    assert_eq!(c2[0].display_name, "Contact 2");
+}
+
+#[test]
+fn contact_search_ranks_by_frequency_and_recency() {
+    let (store, account) = store_with_account();
+
+    // Add contacts with different times_seen
+    store.upsert_contact(&account.id, "a@example.com", "A", false).expect("a");
+    store.upsert_contact(&account.id, "b@example.com", "B", false).expect("b");
+    store.upsert_contact(&account.id, "c@example.com", "C", false).expect("c");
+    // Manually increment times_seen for 'b'
+    store.upsert_contact(&account.id, "b@example.com", "B", false).expect("b again");
+    store.upsert_contact(&account.id, "b@example.com", "B", false).expect("b again");
+
+    // Search for 'example' - should rank by times_seen DESC
+    let results = store.search_contacts(&account.id, "example", 10).expect("search");
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].email, "b@example.com"); // 3 times_seen
+    assert_eq!(results[1].email, "a@example.com"); // 1 times_seen
+    assert_eq!(results[2].email, "c@example.com"); // 1 times_seen
+
+    // Prefix search
+    let results = store.search_contacts(&account.id, "a@ex", 10).expect("prefix search");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].email, "a@example.com");
+
+    // Case insensitive
+    let results = store.search_contacts(&account.id, "A@EX", 10).expect("case insensitive");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].email, "a@example.com");
+
+    // Limit
+    let results = store.search_contacts(&account.id, "example", 2).expect("limit");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn rule_crud() {
+    let (store, account) = store_with_account();
+
+    // Create rule
+    let id = store
+        .upsert_rule(
+            &account.id,
+            "Test Rule",
+            true,
+            10,
+            r#"[{"field": "from", "op": "contains", "value": "test"}]"#,
+            r#"[{"kind": "move", "value": "Archive"}]"#,
+            false,
+        )
+        .expect("upsert");
+    assert!(id > 0);
+
+    // List rules
+    let rules = store.list_rules(&account.id).expect("list");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].name, "Test Rule");
+    assert!(rules[0].enabled);
+    assert_eq!(rules[0].priority, 10);
+
+    // Update rule
+    let id2 = store
+        .upsert_rule(
+            &account.id,
+            "Test Rule",
+            false,
+            20,
+            r#"[{"field": "to", "op": "contains", "value": "update"}]"#,
+            r#"[{"kind": "flag", "value": "\\Flagged"}]"#,
+            true,
+        )
+        .expect("update");
+    assert_eq!(id, id2);
+    let rules = store.list_rules(&account.id).expect("list again");
+    assert_eq!(rules[0].enabled, false);
+    assert_eq!(rules[0].priority, 20);
+    assert!(rules[0].stop);
+
+    // Delete rule
+    assert!(store.delete_rule(&account.id, "Test Rule").expect("delete"));
+    assert!(store.list_rules(&account.id).expect("list empty").is_empty());
+    assert!(!store.delete_rule(&account.id, "Test Rule").expect("delete missing"));
+}
+
+#[test]
+fn rules_are_per_account() {
+    let store = Store::open_in_memory().expect("store");
+    let account1 = Account::new(
+        "Ada",
+        "ada@example.com",
+        ServerSettings::imap("imap.example.com", "ada@example.com"),
+        ServerSettings::smtp_starttls("smtp.example.com", "ada@example.com"),
+    );
+    let account2 = Account::new(
+        "Bob",
+        "bob@example.com",
+        ServerSettings::imap("imap.example.com", "bob@example.com"),
+        ServerSettings::smtp_starttls("smtp.example.com", "bob@example.com"),
+    );
+    store.upsert_account(&account1).expect("account1");
+    store.upsert_account(&account2).expect("account2");
+
+    store
+        .upsert_rule(&account1.id, "rule", true, 0, "[]", "[]", false)
+        .expect("upsert1");
+    store
+        .upsert_rule(&account2.id, "rule", true, 0, "[]", "[]", false)
+        .expect("upsert2");
+
+    let r1 = store.list_rules(&account1.id).expect("list1");
+    let r2 = store.list_rules(&account2.id).expect("list2");
+    assert_eq!(r1.len(), 1);
+    assert_eq!(r2.len(), 1);
 }

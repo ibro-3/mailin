@@ -1553,6 +1553,7 @@ dependencies = [
  "keyring",
  "lettre",
  "mail-parser",
+ "regex",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",
@@ -1576,6 +1577,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "gdk-pixbuf",
  "gdk4",
  "gtk4",
  "libadwaita",

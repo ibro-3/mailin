@@ -11,7 +11,7 @@
 //!    `OnLaunched` override and then pumps messages until the last window
 //!    closes.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result, anyhow};
 use mailin_core::{Config, Engine, Mailin, Paths};
@@ -30,10 +30,17 @@ use crate::window;
 /// of this, so closing a window cannot drop the store while a callback runs.
 #[derive(Debug)]
 pub struct AppState {
-    pub config: Config,
+    pub config: Arc<RwLock<Config>>,
     pub mailin: Arc<Mailin>,
     pub engine: Engine,
     pub toast_notifier: Option<ToastNotifier>,
+}
+
+impl AppState {
+    /// Read-only accessor for the live configuration.
+    pub fn config(&self) -> Config {
+        self.config.read().unwrap().clone()
+    }
 }
 
 impl AppState {
@@ -49,7 +56,7 @@ impl AppState {
         let toast_notifier = ToastNotificationManager::CreateToastNotifier().ok();
 
         Ok(Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             mailin,
             engine,
             toast_notifier,

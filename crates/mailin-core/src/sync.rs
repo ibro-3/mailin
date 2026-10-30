@@ -18,6 +18,28 @@ const HEADER_CHUNK: usize = 50;
 /// flags of new messages are still stored with their headers.
 const FLAG_REFRESH_LIMIT: usize = 50_000;
 
+/// Parse a comma-separated address list into individual email addresses.
+/// Handles "Name <email>" format and bare emails.
+pub(crate) fn parse_address_list(input: &str) -> Vec<String> {
+    let mut addresses = Vec::new();
+    for token in input.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        // Extract email from "Name <email>" format
+        let email = if let Some((_, rest)) = token.rsplit_once('<') {
+            rest.trim_end().trim_end_matches('>').trim().to_string()
+        } else {
+            token.to_string()
+        };
+        if !email.is_empty() && !email.contains(char::is_whitespace) {
+            addresses.push(email.to_lowercase());
+        }
+    }
+    addresses
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncMode {
     /// Add new messages, detect deletions and refresh flags.
@@ -154,6 +176,24 @@ pub(crate) async fn sync_folder(
             .iter()
             .filter(|result| result.created)
             .count();
+
+        // Seed contacts from new messages
+        for message in &messages {
+            let account_id = folder.account_id;
+            // From address
+            if let Some(addr) = &message.from_addr {
+                let name = message.from_name.as_deref().unwrap_or("");
+                let _ = mailbox.store().upsert_contact(&account_id, addr, name, false);
+            }
+            // To addresses
+            for addr in parse_address_list(&message.to_addrs) {
+                let _ = mailbox.store().upsert_contact(&account_id, &addr, "", false);
+            }
+            // Cc addresses
+            for addr in parse_address_list(&message.cc_addrs) {
+                let _ = mailbox.store().upsert_contact(&account_id, &addr, "", false);
+            }
+        }
     }
 
     let mut deleted = 0usize;

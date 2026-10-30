@@ -114,6 +114,9 @@ struct FormRows {
     smtp_port: TextBox,
     smtp_user: TextBox,
     smtp_security: ComboBox,
+    signature: TextBox,
+    trust_list: mailin_winui_sys::ListView,
+    allowlist: Arc<Mutex<Vec<String>>>,
 }
 
 impl FormRows {
@@ -191,20 +194,23 @@ pub fn present(
     ui::star_row(&root)?;
     ui::auto_row(&root)?;
 
-    let header = ui::stack(mailin_winui_sys::Orientation::Vertical, 2.0)?;
-    let title = ui::heading(title_text, Some(24.0), Some(700))?;
-    ui::margin(&title, 20.0, 16.0, 20.0, 4.0)?;
+    let header = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+    let title = ui::heading1(title_text)?;
+    ui::margin_horizontal(&title, 20.0)?;
+    ui::margin_vertical(&title, 10.0)?;
     let subtitle = ui::text(subtitle_text)?;
+    ui::margin_horizontal(&subtitle, 20.0)?;
     ui::margin(&subtitle, 20.0, 0.0, 20.0, 8.0)?;
     ui::append(&header, &title)?;
     ui::append(&header, &subtitle)?;
     ui::set_row(&header, 0)?;
     ui::append(&root, &header)?;
 
-    let form = ui::stack(mailin_winui_sys::Orientation::Vertical, 14.0)?;
-    ui::margin(&form, 20.0, 8.0, 20.0, 16.0)?;
+    let form = ui::stack_lg(mailin_winui_sys::Orientation::Vertical)?;
+    ui::margin_lg(&form)?;
+    ui::margin_vertical(&form, 8.0)?;
 
-    let identity = ui::heading("Account", Some(16.0), Some(600))?;
+    let identity = ui::subheading("Account")?;
     ui::append(&form, &identity)?;
 
     let name = ui::text_box("Ada Lovelace")?;
@@ -218,14 +224,16 @@ pub fn present(
     ui::append(&form, &password_field)?;
 
     // OAuth2 sign-in section, hidden while password authentication is active.
-    let oauth_panel = ui::stack(mailin_winui_sys::Orientation::Vertical, 10.0)?;
-    let oauth_provider = ui::combo(&provider_labels(), 0)?;
-    let oauth_client_id = ui::text_box("OAuth2 client ID")?;
-    let oauth_sign_in = ui::button("Sign in with browser…")?;
+    let oauth_panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical)?;
+    let oauth_provider = ui::combo(&provider_labels(), 0, Some("OAuth2 provider"))?;
+    let oauth_client_id = ui::text_box("OAuth2 client ID", Some("OAuth2 client ID"))?;
+    let oauth_sign_in = ui::button("Sign in with browser…", Some("Sign in with browser"), Some("Sign in with your mail provider via browser"))?;
     let oauth_status = ui::text("")?;
+    // Live region for sign-in status announcements
+    AutomationProperties::SetLiveSetting(&oauth_status, mailin_winui_sys::AutomationLiveSetting::Polite)?;
     ui::append(
         &oauth_panel,
-        &ui::heading("OAuth2 sign-in", Some(16.0), Some(600))?,
+        &ui::subheading("OAuth2 sign-in")?,
     )?;
     ui::append(&oauth_panel, &ui::field("Provider", &oauth_provider)?)?;
     ui::append(
@@ -237,48 +245,80 @@ pub fn present(
     ui::set_visible(&oauth_panel, false)?;
     ui::append(&form, &oauth_panel)?;
 
-    let incoming = ui::heading("Incoming mail (IMAP)", Some(16.0), Some(600))?;
+    let incoming = ui::subheading("Incoming mail (IMAP)")?;
     ui::append(&form, &incoming)?;
-    let imap_host = ui::text_box("imap.example.com")?;
-    let imap_port = ui::text_box("993")?;
-    let imap_user = ui::text_box("Leave empty to use the email address")?;
-    let imap_security = ui::combo(&["TLS", "STARTTLS", "None"], 0)?;
+    let imap_host = ui::text_box("imap.example.com", Some("IMAP server"))?;
+    let imap_port = ui::text_box("993", Some("Port"))?;
+    let imap_user = ui::text_box("Leave empty to use the email address", Some("Username"))?;
+    let imap_security = ui::combo(&["TLS", "STARTTLS", "None"], 0, Some("Encryption"))?;
     ui::append(&form, &ui::field("IMAP server", &imap_host)?)?;
     ui::append(&form, &ui::field("Port", &imap_port)?)?;
     ui::append(&form, &ui::field("Username", &imap_user)?)?;
     ui::append(&form, &ui::field("Encryption", &imap_security)?)?;
 
-    let outgoing = ui::heading("Outgoing mail (SMTP)", Some(16.0), Some(600))?;
+    let outgoing = ui::subheading("Outgoing mail (SMTP)")?;
     ui::append(&form, &outgoing)?;
-    let smtp_host = ui::text_box("smtp.example.com")?;
-    let smtp_port = ui::text_box("465")?;
-    let smtp_user = ui::text_box("Leave empty to use the email address")?;
-    let smtp_security = ui::combo(&["TLS", "STARTTLS", "None"], 0)?;
+    let smtp_host = ui::text_box("smtp.example.com", Some("SMTP server"))?;
+    let smtp_port = ui::text_box("465", Some("Port"))?;
+    let smtp_user = ui::text_box("Leave empty to use the email address", Some("Username"))?;
+    let smtp_security = ui::combo(&["TLS", "STARTTLS", "None"], 0, Some("Encryption"))?;
     ui::append(&form, &ui::field("SMTP server", &smtp_host)?)?;
     ui::append(&form, &ui::field("Port", &smtp_port)?)?;
     ui::append(&form, &ui::field("Username", &smtp_user)?)?;
     ui::append(&form, &ui::field("Encryption", &smtp_security)?)?;
 
+    // Signature: plain text, shown under the composer's `-- ` separator.
+    let signature_heading = ui::subheading("Signature")?;
+    let signature = ui::text_box("", Some("Signature"))?;
+    signature.SetPlaceholderText(
+        "Appended to messages you send. Mailin adds the “-- ” separator for you.",
+    )?;
+    signature.SetAcceptsReturn(true)?;
+    signature.SetTextWrapping(mailin_winui_sys::TextWrapping::Wrap)?;
+    signature.SetHeight(120.0)?;
+    ui::append(&form, &signature_heading)?;
+    ui::append(&form, &signature)?;
+
+    // Remote-content allowlist: domains whose images and resources always load.
+    let trust_heading = ui::subheading("Trusted senders for remote content")?;
+    let trust_desc = ui::body_text(
+        "Messages from these domains always load remote content, regardless of the global setting.",
+    )?;
+    ui::append(&form, &trust_heading)?;
+    ui::append(&form, &trust_desc)?;
+    let trust_list =
+        mailin_winui_sys::ListView::new().context("could not create the trust list")?;
+    trust_list.SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
+    trust_list.SetHeight(120.0)?;
+    ui::append(&form, &trust_list)?;
+
     let scroller = ui::scroll(&form)?;
     ui::set_row(&scroller, 1)?;
     ui::append(&root, &scroller)?;
 
-    let footer = ui::stack(mailin_winui_sys::Orientation::Horizontal, 8.0)?;
-    ui::margin(&footer, 20.0, 10.0, 20.0, 16.0)?;
+    let footer = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+    ui::margin_lg(&footer)?;
+    ui::margin_vertical(&footer, 8.0)?;
     let error: TextBlock = ui::text("")?;
+    // Live region for validation/connection error announcements
+    AutomationProperties::SetLiveSetting(&error, mailin_winui_sys::AutomationLiveSetting::Assertive)?;
     ui::set_visible(&error, false)?;
     ui::append(&footer, &error)?;
     let spacer = ui::text("")?;
     ui::stretch_horizontal(&spacer)?;
     ui::append(&footer, &spacer)?;
 
-    let test = ui::button("Test Connection")?;
-    let cancel = ui::button("Cancel")?;
-    let save = ui::button(save_label)?;
+    let test = ui::button("Test Connection", Some("Test Connection"), Some("Test IMAP and SMTP connection"))?;
+    let cancel = ui::button("Cancel", Some("Cancel"), Some("Cancel without saving"))?;
+    let save = ui::button(save_label, Some("Save account"), Some("Save account settings"))?;
 
     // Remove button for edit mode
     let remove = match mode {
-        AccountDialogMode::Edit => Some(ui::destructive_button("Remove Account")?),
+        AccountDialogMode::Edit => Some(ui::destructive_button(
+            "Remove Account",
+            Some("Remove Account"),
+            Some("Permanently delete this account and all its data"),
+        )?),
         AccountDialogMode::Add => None,
     };
 
@@ -297,6 +337,55 @@ pub fn present(
 
     let oauth_tokens: Arc<Mutex<OAuth2Tokens>> = Arc::new(Mutex::new(OAuth2Tokens::default()));
     let previous_provider = Arc::new(Mutex::new(OAuthProvider::default()));
+    let allowlist: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(
+        existing_account
+            .as_ref()
+            .map(|account| account.remote_allowed_domains.clone())
+            .unwrap_or_default(),
+    ));
+
+    // Trust list container: a vertical stack of rows (domain + remove button)
+    let trust_container = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&form, &trust_container)?;
+
+    // Helper to rebuild the trust list UI
+    fn repopulate_trust_list(
+        trust_container: &mailin_winui_sys::StackPanel,
+        allowlist: &Arc<Mutex<Vec<String>>>,
+    ) {
+        let children = trust_container.Children().expect("Children");
+        let _ = children.Clear();
+        for domain in allowlist.lock().unwrap().iter() {
+            let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+            let label = ui::text(domain)?;
+            label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
+            ui::stretch_horizontal(&label)?;
+            ui::append(&row, &label)?;
+            let remove = ui::button(
+                "Remove",
+                Some(&format!("Stop trusting {domain}")),
+                Some(&format!("Remove {domain} from trusted senders")),
+            )?;
+            let tokens = design_tokens::tokens();
+            remove.SetPadding(mailin_winui_sys::Thickness::new(
+                tokens.spacing.xs,
+                2.0,
+                tokens.spacing.xs,
+                2.0,
+            ))?;
+            ui::append(&row, &remove)?;
+            children.Append(&row)?;
+
+            let allowlist = Arc::clone(allowlist);
+            let trust_container = trust_container.clone();
+            let domain = domain.clone();
+            ui::on_click(&remove, move || {
+                allowlist.lock().unwrap().retain(|entry| entry != &domain);
+                repopulate_trust_list(&trust_container, &allowlist);
+            })?;
+        }
+    }
+    repopulate_trust_list(&trust_container, &allowlist)?;
 
     // Pre-fill form if editing
     if let Some(account) = existing_account.clone() {
@@ -336,6 +425,11 @@ pub fn present(
 
         // Disable email field in edit mode (account identity shouldn't change)
         let _ = ui::set_enabled(&email, false);
+
+        // Pre-fill signature
+        let _ = signature.SetText(&account.signature);
+
+        // Pre-fill trust list (already populated from allowlist above)
     }
 
     revokers.keep(ui::on_selection_changed(&auth_method, {
@@ -458,6 +552,9 @@ pub fn present(
         smtp_port,
         smtp_user,
         smtp_security,
+        signature,
+        trust_container,
+        allowlist: Arc::clone(&allowlist),
     };
     revokers.keep(ui::on_text_changed(&rows.email, {
         let rows_email = rows.email.clone();
@@ -541,6 +638,9 @@ pub fn present(
             smtp_port: rows.smtp_port.clone(),
             smtp_user: rows.smtp_user.clone(),
             smtp_security: rows.smtp_security.clone(),
+            signature: rows.signature.clone(),
+            trust_container: rows.trust_container.clone(),
+            allowlist: Arc::clone(&rows.allowlist),
         };
         let error = error.clone();
         move || {
@@ -607,6 +707,9 @@ pub fn present(
             smtp_port: rows.smtp_port.clone(),
             smtp_user: rows.smtp_user.clone(),
             smtp_security: rows.smtp_security.clone(),
+            signature: rows.signature.clone(),
+            trust_container: rows.trust_container.clone(),
+            allowlist: Arc::clone(&rows.allowlist),
         };
         let error = error.clone();
         move || {
@@ -625,9 +728,15 @@ pub fn present(
             };
             // Keep the identifier across retries: a failed keyring write must
             // not leave an account row behind that a second click duplicates.
-            // In edit mode, preserve the existing account ID.
+            // In edit mode, preserve the existing account ID and non-form fields:
+            // sync settings and the remote-content allowlist are edited elsewhere
+            // and must survive a settings save.
             if let Some(existing) = &existing_account_for_save {
                 account.id = existing.id;
+                account.sync = existing.sync.clone();
+                account
+                    .remote_allowed_domains
+                    .clone_from(&existing.remote_allowed_domains);
             } else {
                 if let Ok(mut slot) = account_id.lock() {
                     match *slot {
@@ -636,6 +745,12 @@ pub fn present(
                     }
                 }
             }
+            // Apply signature from the form field
+            account.signature = ui::text_value(&rows.signature);
+            // Apply allowlist from the shared cell
+            account
+                .remote_allowed_domains
+                .clone_from(&rows.allowlist.lock().unwrap());
             // Only update password if user entered a new one. OAuth2 accounts
             // keep tokens in the account row and do not use the keyring.
             let secret = if password.is_empty() || is_oauth {
