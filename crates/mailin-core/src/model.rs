@@ -226,6 +226,12 @@ pub struct MessageHeader {
     pub message_id: Option<String>,
     /// Root of the `References` chain, used later for conversation grouping.
     pub thread_key: Option<String>,
+    /// Root of the thread (same as thread_key for root messages, or the topmost ancestor).
+    pub thread_root_key: Option<String>,
+    /// Number of replies in this thread (only valid for thread roots).
+    pub thread_reply_count: u32,
+    /// Thread depth (0 for root, 1 for direct reply, etc.). Computed at read time.
+    pub thread_depth: u32,
     pub subject: String,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -295,6 +301,7 @@ pub struct NewMessage {
     pub uid: u32,
     pub message_id: Option<String>,
     pub thread_key: Option<String>,
+    pub thread_root_key: Option<String>,
     pub subject: String,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -315,6 +322,7 @@ impl NewMessage {
             uid,
             message_id: None,
             thread_key: None,
+            thread_root_key: None,
             subject: String::new(),
             from_name: None,
             from_addr: None,

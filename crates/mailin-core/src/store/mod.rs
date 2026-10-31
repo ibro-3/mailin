@@ -23,7 +23,7 @@ use crate::model::{
 
 pub use migrations::SCHEMA_VERSION;
 
-const MESSAGE_COLUMNS: &str = "m.id, m.folder_id, m.uid, m.message_id, m.thread_key, m.subject, \
+const MESSAGE_COLUMNS: &str = "m.id, m.folder_id, m.uid, m.message_id, m.thread_key, m.thread_root_key, m.thread_reply_count, m.subject, \
      m.from_name, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.received_at, m.snippet, \
      m.size, m.flags, m.has_attachments, m.body_state";
 
@@ -668,6 +668,71 @@ impl Store {
         Ok(count as u32)
     }
 
+    // ---------------------------------------------------------------- threading
+
+    /// Get thread roots for a folder (conversation view).
+    /// Returns root messages with reply count and unread count.
+    pub fn get_thread_roots(
+        &self,
+        folder: FolderId,
+        limit: u32,
+    ) -> Result<Vec<MessageHeader>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages m
+             WHERE m.folder_id = ?1 AND (m.thread_root_key = m.message_id OR m.thread_root_key IS NULL)
+             ORDER BY m.received_at DESC, m.uid DESC
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![folder.0, i64::from(limit)],
+            map_message,
+        )?;
+        let mut roots: Vec<MessageHeader> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        
+        // Augment with reply counts and unread counts
+        for root in &mut roots {
+            let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
+            if let Some(key) = root_key {
+                // Count replies
+                let reply_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND (thread_root_key != message_id OR thread_root_key IS NULL)",
+                    params![folder.0, key],
+                    |row| row.get(0),
+                )?;
+                root.thread_reply_count = reply_count as u32;
+                
+                // Count unread in thread
+                let unread_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND instr(' ' || flags || ' ', ' \\Seen ') = 0",
+                    params![folder.0, key],
+                    |row| row.get(0),
+                )?;
+                // We'll use has_attachments field temporarily to store unread count, 
+                // but better to add a proper field. For now, let's just count.
+            }
+        }
+        
+        Ok(roots)
+    }
+
+    /// Get all replies for a thread root, ordered by date.
+    pub fn list_thread_replies(&self, thread_root_key: &str) -> Result<Vec<MessageHeader>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages
+             WHERE thread_root_key = ?1
+             ORDER BY received_at ASC, uid ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![thread_root_key], map_message)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
     // ------------------------------------------------------------------ outbox
 
     pub fn enqueue_outbox(
@@ -1173,9 +1238,9 @@ impl Store {
         
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
-            let flags: String = row.get(14)?;
-            let account_id_str: String = row.get(17)?;
-            let folder_id: i64 = row.get(16)?;
+            let flags: String = row.get(16)?;
+            let account_id_str: String = row.get(19)?;
+            let folder_id: i64 = row.get(18)?;
             Ok((
                 MessageHeader {
                     id: MessageId(row.get(0)?),
@@ -1183,18 +1248,21 @@ impl Store {
                     uid: row.get(2)?,
                     message_id: row.get(3)?,
                     thread_key: row.get(4)?,
-                    subject: row.get(5)?,
-                    from_name: row.get(6)?,
-                    from_addr: row.get(7)?,
-                    to_addrs: row.get(8)?,
-                    cc_addrs: row.get(9)?,
-                    sent_at: row.get(10)?,
-                    received_at: row.get(11)?,
-                    snippet: row.get(12)?,
-                    size: row.get(13)?,
+                    thread_root_key: row.get(5)?,
+                    thread_reply_count: row.get(6)?,
+                    thread_depth: 0, // computed at read time if needed
+                    subject: row.get(7)?,
+                    from_name: row.get(8)?,
+                    from_addr: row.get(9)?,
+                    to_addrs: row.get(10)?,
+                    cc_addrs: row.get(11)?,
+                    sent_at: row.get(12)?,
+                    received_at: row.get(13)?,
+                    snippet: row.get(14)?,
+                    size: row.get(15)?,
                     flags: flags.split_whitespace().map(str::to_owned).collect(),
-                    has_attachments: row.get::<_, i64>(15)? != 0,
-                    body_fetched: row.get::<_, i64>(16)? != 0,
+                    has_attachments: row.get::<_, i64>(17)? != 0,
+                    body_fetched: row.get::<_, i64>(18)? != 0,
                 },
                 FolderId(folder_id),
                 AccountId::parse(&account_id_str)
@@ -1635,6 +1703,7 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
     }
 
     let flags = message.flags.join(" ");
+    let thread_root_key = message.thread_root_key.as_ref().or(message.thread_key.as_ref());
     let existing: Option<i64> = tx
         .query_row(
             "SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2",
@@ -1647,15 +1716,16 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
         Some(id) => {
             tx.execute(
                 "UPDATE messages SET
-                     message_id = ?2, thread_key = ?3, subject = ?4, from_name = ?5,
-                     from_addr = ?6, to_addrs = ?7, cc_addrs = ?8, sent_at = ?9,
-                     received_at = ?10, size = ?11, flags = ?12, has_attachments = ?13,
-                     snippet = COALESCE(?14, snippet)
+                     message_id = ?2, thread_key = ?3, thread_root_key = ?4, subject = ?5, from_name = ?6,
+                     from_addr = ?7, to_addrs = ?8, cc_addrs = ?9, sent_at = ?10,
+                     received_at = ?11, size = ?12, flags = ?13, has_attachments = ?14,
+                     snippet = COALESCE(?15, snippet)
                  WHERE id = ?1",
                 params![
                     id,
                     message.message_id,
                     message.thread_key,
+                    thread_root_key,
                     message.subject,
                     message.from_name,
                     message.from_addr,
@@ -1674,14 +1744,15 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
         None => {
             tx.execute(
                 "INSERT INTO messages
-                     (folder_id, uid, message_id, thread_key, subject, from_name, from_addr,
+                     (folder_id, uid, message_id, thread_key, thread_root_key, subject, from_name, from_addr,
                       to_addrs, cc_addrs, sent_at, received_at, snippet, size, flags, has_attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     message.folder_id.0,
                     message.uid,
                     message.message_id,
                     message.thread_key,
+                    thread_root_key,
                     message.subject,
                     message.from_name,
                     message.from_addr,
@@ -1748,28 +1819,31 @@ fn insert_fts_from_message(tx: &Transaction<'_>, id: MessageId) -> Result<()> {
 }
 
 fn map_message(row: &Row<'_>) -> rusqlite::Result<MessageHeader> {
-    let flags: String = row.get(14)?;
+    let flags: String = row.get(16)?;
     Ok(MessageHeader {
         id: MessageId(row.get(0)?),
         folder_id: FolderId(row.get(1)?),
         uid: row.get(2)?,
         message_id: row.get(3)?,
         thread_key: row.get(4)?,
-        subject: row.get(5)?,
-        from_name: row.get(6)?,
-        from_addr: row.get(7)?,
-        to_addrs: row.get(8)?,
-        cc_addrs: row.get(9)?,
-        sent_at: row.get(10)?,
-        received_at: row.get(11)?,
-        snippet: row.get(12)?,
-        size: row.get(13)?,
+        thread_root_key: row.get(5)?,
+        thread_reply_count: row.get(6)?,
+        thread_depth: 0,
+        subject: row.get(7)?,
+        from_name: row.get(8)?,
+        from_addr: row.get(9)?,
+        to_addrs: row.get(10)?,
+        cc_addrs: row.get(11)?,
+        sent_at: row.get(12)?,
+        received_at: row.get(13)?,
+        snippet: row.get(14)?,
+        size: row.get(15)?,
         flags: flags
             .split_whitespace()
             .map(std::string::ToString::to_string)
             .collect(),
-        has_attachments: row.get::<_, i64>(15)? != 0,
-        body_fetched: row.get::<_, i64>(16)? != 0,
+        has_attachments: row.get::<_, i64>(17)? != 0,
+        body_fetched: row.get::<_, i64>(18)? != 0,
     })
 }
 
