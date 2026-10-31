@@ -39,7 +39,7 @@ pub use account::{
 };
 pub use client::{ClientEvent, Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
-pub use config::{Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, UiPreferences};
+pub use config::{Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode, UiPreferences};
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};

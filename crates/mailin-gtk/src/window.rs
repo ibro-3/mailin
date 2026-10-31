@@ -151,6 +151,8 @@ pub struct MainWindow {
     /// Draft edit window per message, so selecting the same draft row again
     /// focuses the open composer instead of spawning a second one.
     last_draft: RefCell<Option<(MessageId, glib::WeakRef<gtk::Window>)>>,
+    /// Expanded thread roots (thread_root_key) for threaded view.
+    expanded_threads: RefCell<std::collections::HashSet<String>>,
     widgets: Widgets,
 }
 
@@ -558,6 +560,7 @@ impl MainWindow {
             remote_allowed: Cell::new(None),
             pending_attachment: Rc::new(RefCell::new(None)),
             last_draft: RefCell::new(None),
+            expanded_threads: RefCell::new(std::collections::HashSet::new()),
             widgets: Widgets {
                 window,
                 title,
@@ -879,6 +882,37 @@ impl MainWindow {
                 }
             }
         });
+
+        // Thread expand/collapse on chevron click (rightmost area of row)
+        let click_gesture = gtk::GestureClick::new();
+        click_gesture.set_button(0); // Handle all buttons
+        click_gesture.connect_pressed({
+            let this = Rc::clone(this);
+            move |gesture, n_press, x, y| {
+                if this.programmatic.get() || n_press != 1 {
+                    return;
+                }
+                let list_box = &this.widgets.message_list;
+                if let Some(row) = list_box.row_at_y(y as i32) {
+                    let index = row.index() as usize;
+                    if let Some(message) = this.messages.borrow().get(index).cloned() {
+                        let is_thread_root = message.thread_reply_count > 0 || (message.thread_root_key.as_ref().is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
+                        if is_thread_root {
+                            let root_key = message.thread_root_key.as_ref().or(message.message_id.as_ref()).cloned().unwrap_or_default();
+                            let mut expanded = this.expanded_threads.borrow_mut();
+                            if expanded.contains(&root_key) {
+                                expanded.remove(&root_key);
+                            } else {
+                                expanded.insert(root_key);
+                            }
+                            drop(expanded);
+                            this.refresh_messages();
+                        }
+                    }
+                }
+            }
+        });
+        this.widgets.message_list.add_controller(click_gesture);
 
         // Selection changes drive the bulk bar and the reader: once the
         // selection settles on exactly one row, that message is shown.
@@ -1509,6 +1543,20 @@ impl MainWindow {
             return;
         };
         let limit = limit.max(self.page_size());
+        let thread_mode = self.app.config.borrow().ui.thread_mode;
+        if thread_mode != mailin_core::config::ThreadMode::Off {
+            let title = self
+                .app
+                .mailin
+                .folder(folder_id)
+                .ok()
+                .flatten()
+                .map(|folder| folder_title(&folder))
+                .unwrap_or_else(|| "Messages".to_owned());
+            let more = false; // Threaded view loads roots, more is handled differently
+            self.show_threaded_messages(folder_id, title, more);
+            return;
+        }
         match self.app.mailin.list_messages(folder_id, 0, limit) {
             Ok(messages) => {
                 let title = self
@@ -1604,6 +1652,95 @@ impl MainWindow {
                 .message_empty
                 .set_description(Some("Try a different search term."));
         } else if empty {
+            self.widgets.message_empty.set_title("No messages");
+            self.widgets.message_empty.set_description(Some(
+                "This folder is empty, or has not been synchronized yet.",
+            ));
+        }
+        self.widgets
+            .list_stack
+            .set_visible_child_name(if empty { "empty" } else { "list" });
+        self.widgets.load_more.set_visible(more);
+        self.update_bulk_bar();
+    }
+
+    /// Show messages with threaded/conversation view.
+    fn show_threaded_messages(&self, folder_id: FolderId, title: String, more: bool) {
+        let thread_mode = self.app.config.borrow().ui.thread_mode;
+        if thread_mode == mailin_core::config::ThreadMode::Off {
+            // Fall back to flat view
+            let limit = self.selection.borrow().limit.max(self.page_size());
+            if let Ok(messages) = self.app.mailin.list_messages(folder_id, 0, limit) {
+                self.show_messages(messages, title, more);
+            }
+            return;
+        }
+
+        let selected = self.selection.borrow().message;
+        let previous = self.selected_message_ids();
+        let now = format::now_unix();
+        
+        // Fetch thread roots
+        let limit = self.selection.borrow().limit.max(self.page_size());
+        let roots = match self.app.mailin.store().get_thread_roots(folder_id, limit) {
+            Ok(r) => r,
+            Err(e) => {
+                self.show_error(&e.to_string());
+                return;
+            }
+        };
+
+        // Build flat list: roots + expanded replies
+        let mut flat_messages = Vec::new();
+        let expanded = self.expanded_threads.borrow();
+        
+        for root in &roots {
+            flat_messages.push(root.clone());
+            let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
+            if let Some(key) = root_key {
+                if expanded.contains(key) {
+                    // Fetch replies for this thread
+                    if let Ok(replies) = self.app.mailin.store().list_thread_replies(key) {
+                        for mut reply in replies {
+                            reply.thread_depth = 1; // All replies at depth 1 for flat view
+                            flat_messages.push(reply);
+                        }
+                    }
+                }
+            }
+        }
+
+        let empty = flat_messages.is_empty();
+
+        self.programmatic.set(true);
+        clear_list(&self.widgets.message_list);
+        let density = self.app.config.borrow().ui.message_list_density;
+        let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
+        let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
+        let app = Rc::clone(&self.app);
+        
+        for message in &flat_messages {
+            let row = message_row(message, now, density);
+            if quick_actions_enabled {
+                attach_quick_actions(&row, Rc::clone(&app), quick_action_items.clone(), message.id);
+            }
+            self.widgets.message_list.append(&row);
+        }
+        
+        // Restore selection
+        for (index, message) in flat_messages.iter().enumerate() {
+            if Some(message.id) != selected && !previous.contains(&message.id) {
+                continue;
+            }
+            if let Some(row) = self.widgets.message_list.row_at_index(index as i32) {
+                self.widgets.message_list.select_row(Some(&row));
+            }
+        }
+        self.programmatic.set(false);
+
+        *self.messages.borrow_mut() = flat_messages;
+        self.widgets.list_title.set_text(&title);
+        if empty {
             self.widgets.message_empty.set_title("No messages");
             self.widgets.message_empty.set_description(Some(
                 "This folder is empty, or has not been synchronized yet.",
@@ -3129,6 +3266,9 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
     use MessageListDensity::{Compact, Cozy};
 
     let seen = message.is_seen();
+    let is_thread_root = message.thread_reply_count > 0 || (message.thread_root_key.as_ref().is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
+    let depth = message.thread_depth;
+    
     let row = gtk::ListBoxRow::new();
     let outer = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let (margin_vertical, margin_horizontal, spacing, show_snippet) = match density {
@@ -3138,8 +3278,27 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
     };
     outer.set_margin_top(margin_vertical);
     outer.set_margin_bottom(margin_vertical);
-    outer.set_margin_start(margin_horizontal);
+    outer.set_margin_start(margin_horizontal + (depth as i32 * 16)); // Indent by depth
     outer.set_margin_end(margin_horizontal);
+
+    // Thread expand/collapse chevron for thread roots
+    if is_thread_root {
+        let chevron = gtk::Image::from_icon_name("pan-down-symbolic");
+        chevron.set_pixel_size(12);
+        chevron.add_css_class("dim-label");
+        chevron.set_margin_start(4);
+        outer.append(&chevron);
+    } else if depth > 0 {
+        // Placeholder for alignment with thread roots
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_size_request(20, 0);
+        outer.append(&spacer);
+    } else {
+        // Regular message (not in thread view or flat mode)
+        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        spacer.set_size_request(20, 0);
+        outer.append(&spacer);
+    }
 
     let dot = gtk::Label::new(Some("●"));
     dot.add_css_class("accent");
@@ -3168,6 +3327,14 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
         sender.add_css_class("heading");
     }
     line.append(&sender);
+
+    // Reply count badge for thread roots
+    if is_thread_root && message.thread_reply_count > 0 {
+        let badge = gtk::Label::new(Some(&message.thread_reply_count.to_string()));
+        badge.add_css_class("caption");
+        badge.add_css_class("dim-label");
+        line.append(&badge);
+    }
 
     if message.is_flagged() {
         let star = gtk::Image::from_icon_name("starred-symbolic");

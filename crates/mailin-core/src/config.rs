@@ -83,6 +83,19 @@ pub enum MessageListDensity {
     Compact,
 }
 
+/// Thread/conversation view mode for the message list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThreadMode {
+    /// Flat list, one row per message (legacy behavior).
+    #[default]
+    Off,
+    /// Group by conversation, expand/collapse threads.
+    Flat,
+    /// Group by conversation with nested indentation (future).
+    Nested,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiPreferences {
@@ -99,6 +112,8 @@ pub struct UiPreferences {
     pub notifications: bool,
     /// Row spacing and preview lines in the message list.
     pub message_list_density: MessageListDensity,
+    /// Thread/conversation view mode.
+    pub thread_mode: ThreadMode,
     /// Enable quick actions (swipe on GTK, hover on WinUI) on message rows.
     pub quick_actions: bool,
     /// Which actions are available in the quick-actions overlay.
@@ -115,6 +130,7 @@ impl Default for UiPreferences {
             mark_read_on_open: true,
             notifications: true,
             message_list_density: MessageListDensity::default(),
+            thread_mode: ThreadMode::default(),
             quick_actions: true,
             quick_action_items: vec![
                 QuickAction::Archive,

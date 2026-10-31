@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use mailin_core::{Config, MessageListDensity, Paths, Theme};
+use mailin_core::{Config, MessageListDensity, Paths, Theme, ThreadMode};
 
 use crate::app::{AppState, apply_theme};
 
@@ -86,6 +86,31 @@ pub fn show_preferences(
         .build();
     density_row.add_suffix(&density_combo);
     appearance_group.add(&density_row);
+
+    // Thread mode
+    let thread_mode_combo = gtk::DropDown::from_strings(&["Off (flat list)", "Flat (grouped)", "Nested"]);
+    thread_mode_combo.set_selected(match config.borrow().ui.thread_mode {
+        ThreadMode::Off => 0,
+        ThreadMode::Flat => 1,
+        ThreadMode::Nested => 2,
+    });
+    thread_mode_combo.connect_selected_notify({
+        let config = Rc::clone(&config);
+        move |combo| {
+            let mode = match combo.selected() {
+                1 => ThreadMode::Flat,
+                2 => ThreadMode::Nested,
+                _ => ThreadMode::Off,
+            };
+            config.borrow_mut().ui.thread_mode = mode;
+        }
+    });
+    let thread_mode_row = adw::ActionRow::builder()
+        .title("Conversation view")
+        .subtitle("Group messages by thread")
+        .build();
+    thread_mode_row.add_suffix(&thread_mode_combo);
+    appearance_group.add(&thread_mode_row);
 
     general_page.add(&appearance_group);
 
