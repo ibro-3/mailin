@@ -19,6 +19,7 @@ use crate::ui;
 struct GeneralRows {
     theme: ComboBox,
     density: ComboBox,
+    thread_mode: ComboBox,
     html: ToggleSwitch,
     remote_content: ToggleSwitch,
     page_size: ComboBox,
@@ -101,6 +102,11 @@ pub fn show_preferences(
                     1 => MessageListDensity::Cozy,
                     2 => MessageListDensity::Compact,
                     _ => MessageListDensity::Comfortable,
+                };
+                guard.ui.thread_mode = match ui::selected_index(&general.thread_mode) {
+                    1 => mailin_core::config::ThreadMode::Flat,
+                    2 => mailin_core::config::ThreadMode::Nested,
+                    _ => mailin_core::config::ThreadMode::Off,
                 };
                 guard.ui.html_enabled = is_on(&general.html);
                 guard.ui.remote_content_enabled = is_on(&general.remote_content);
@@ -188,6 +194,14 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
     let density = ui::combo(&["Comfortable", "Cozy", "Compact"], density_index)?;
     ui::append(&panel, &ui::field("Message list density", &density)?)?;
 
+    let thread_mode_index = match config.ui.thread_mode {
+        mailin_core::config::ThreadMode::Off => 0,
+        mailin_core::config::ThreadMode::Flat => 1,
+        mailin_core::config::ThreadMode::Nested => 2,
+    };
+    let thread_mode = ui::combo(&["Off (flat list)", "Flat (grouped)", "Nested"], thread_mode_index)?;
+    ui::append(&panel, &ui::field("Conversation view", &thread_mode)?)?;
+
     let (html_row, html) = ui::switch_row(
         "Render HTML messages",
         "Display HTML formatting when available",
@@ -244,6 +258,7 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         GeneralRows {
             theme,
             density,
+            thread_mode,
             html,
             remote_content,
             page_size,

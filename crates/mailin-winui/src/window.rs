@@ -75,6 +75,8 @@ struct State {
     show_outbox: bool,
     remote_allowed: Option<MessageId>,
     pending_attachment: Option<PendingAttachment>,
+    /// Expanded thread roots (thread_root_key) for threaded view.
+    expanded_threads: BTreeSet<String>,
 }
 
 struct Widgets {
@@ -527,6 +529,20 @@ impl MainWindow {
             return;
         };
         let limit = limit.max(self.page_size());
+        let thread_mode = self.app.config().ui.thread_mode;
+        if thread_mode != mailin_core::config::ThreadMode::Off {
+            let title = self
+                .app
+                .mailin
+                .folder(folder_id)
+                .ok()
+                .flatten()
+                .map(|folder| folder_title(&folder))
+                .unwrap_or_else(|| "Messages".to_owned());
+            let more = false;
+            self.show_threaded_messages(folder_id, title, more);
+            return;
+        }
         match self.app.mailin.list_messages(folder_id, 0, limit) {
             Ok(messages) => {
                 let title = self
@@ -676,6 +692,153 @@ impl MainWindow {
             }
         }
         self.state().messages = messages;
+        let _ = self.widgets.list_title.SetText(&title);
+        let searching = self.state().selection.search;
+        let empty_text = if empty && searching {
+            "No results. Try a different search term."
+        } else {
+            "This folder is empty, or has not been synchronized yet."
+        };
+        let _ = self.widgets.message_empty.SetText(empty_text);
+        let _ = ui::set_visible(&self.widgets.message_empty, empty);
+        let _ = ui::set_visible(&self.widgets.message_scroll, !empty);
+        let _ = ui::set_visible(&self.widgets.load_more, more);
+        // Show regular message buttons, hide outbox buttons
+        let _ = ui::set_visible(&self.widgets.outbox_retry_button, false);
+        let _ = ui::set_visible(&self.widgets.outbox_discard_button, false);
+        let _ = ui::set_visible(&self.widgets.outbox_edit_button, false);
+        let _ = ui::set_visible(&self.widgets.archive_button, true);
+        let _ = ui::set_visible(&self.widgets.trash_button, true);
+        let _ = ui::set_visible(&self.widgets.junk_button, true);
+        self.update_bulk_bar();
+    }
+
+    /// Show messages with threaded/conversation view.
+    fn show_threaded_messages(self: &Rc<Self>, folder_id: FolderId, title: String, more: bool) {
+        let thread_mode = self.app.config().ui.thread_mode;
+        if thread_mode == mailin_core::config::ThreadMode::Off {
+            // Fall back to flat view
+            let limit = self.state().selection.limit.max(self.page_size());
+            if let Ok(messages) = self.app.mailin.list_messages(folder_id, 0, limit) {
+                self.show_messages(messages, title, more);
+            }
+            return;
+        }
+
+        let now = format::now_unix();
+        
+        // Fetch thread roots
+        let limit = self.state().selection.limit.max(self.page_size());
+        let roots = match self.app.mailin.store().get_thread_roots(folder_id, limit) {
+            Ok(r) => r,
+            Err(e) => {
+                self.show_error(&e.to_string());
+                return;
+            }
+        };
+
+        // Build flat list: roots + expanded replies
+        let mut flat_messages = Vec::new();
+        let expanded = self.state().expanded_threads.clone();
+        
+        for root in &roots {
+            flat_messages.push(root.clone());
+            let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
+            if let Some(key) = root_key {
+                if expanded.contains(key) {
+                    // Fetch replies for this thread
+                    if let Ok(replies) = self.app.mailin.store().list_thread_replies(key) {
+                        for mut reply in replies {
+                            reply.thread_depth = 1; // All replies at depth 1 for flat view
+                            flat_messages.push(reply);
+                        }
+                    }
+                }
+            }
+        }
+
+        let empty = flat_messages.is_empty();
+
+        self.message_events.clear();
+        let _ = ui::clear(&self.widgets.message_list);
+        self.checkboxes.borrow_mut().clear();
+        // The ticked set never outlives the rows that are on screen.
+        let visible: BTreeSet<MessageId> = flat_messages.iter().map(|message| message.id).collect();
+        let selected = {
+            let mut state = self.state();
+            state.selected.retain(|id| visible.contains(id));
+            state.selected.clone()
+        };
+        let quick_actions_enabled = self.app.config().ui.quick_actions;
+        let quick_action_items = self.app.config().ui.quick_action_items.clone();
+        for message in &flat_messages {
+            let ticked = selected.contains(&message.id);
+            let density = self.app.config().ui.message_list_density;
+            if let Ok((row, button, checkbox, actions_bar)) =
+                message_row(message, now, density, ticked)
+            {
+                let this = Rc::clone(self);
+                let open = message.clone();
+                if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
+                {
+                    self.message_events.keep(revoker);
+                }
+                let id = message.id;
+                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                    if let Ok(revoker) = toggle.Checked({
+                        let this = Rc::clone(self);
+                        move |_, _| this.set_selected(id, true)
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                    if let Ok(revoker) = toggle.Unchecked({
+                        let this = Rc::clone(self);
+                        move |_, _| this.set_selected(id, false)
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                }
+                // Quick actions: populate the bar and wire hover handlers.
+                if quick_actions_enabled {
+                    if let Some(actions_bar) = &actions_bar {
+                        for action in &quick_action_items {
+                            if let Ok(btn) = ui::button(action.label()) {
+                                let this = Rc::clone(self);
+                                let action = *action;
+                                let mid = id;
+                                if let Ok(revoker) = ui::on_click(&btn, move || {
+                                    this.run_quick_action(action, mid);
+                                }) {
+                                    self.message_events.keep(revoker);
+                                }
+                                let _ = ui::append(actions_bar, &btn);
+                            }
+                        }
+                        // PointerEntered → show actions bar.
+                        if let Ok(element) = row.cast::<mailin_winui_sys::IUIElement>() {
+                            let bar = actions_bar.clone();
+                            if let Ok(revoker) = element.PointerEntered(move |_, _| {
+                                let _ = ui::set_visible(&bar, true);
+                                Ok(())
+                            }) {
+                                self.message_events.keep(revoker);
+                            }
+                            // PointerExited → hide actions bar.
+                            let bar = actions_bar.clone();
+                            if let Ok(revoker) = element.PointerExited(move |_, _| {
+                                let _ = ui::set_visible(&bar, false);
+                                Ok(())
+                            }) {
+                                self.message_events.keep(revoker);
+                            }
+                        }
+                    }
+                }
+                self.checkboxes.borrow_mut().push(checkbox);
+                let _ = ui::append(&self.widgets.message_list, &row);
+            }
+        }
+        self.state().messages = flat_messages;
         let _ = self.widgets.list_title.SetText(&title);
         let searching = self.state().selection.search;
         let empty_text = if empty && searching {
@@ -2903,6 +3066,8 @@ fn message_row(
 ) -> Result<(Grid, Button, CheckBox, Option<StackPanel>)> {
     use MessageListDensity::{Compact, Cozy};
     let seen = message.is_seen();
+    let is_thread_root = message.thread_reply_count > 0 || (message.thread_root_key.as_ref().is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
+    let depth = message.thread_depth;
 
     let (vertical_padding, horizontal_padding, spacing, show_snippet) = match density {
         MessageListDensity::Comfortable => (8.0, 12.0, 3.0, true),
@@ -2911,21 +3076,45 @@ fn message_row(
     };
 
     let column = ui::stack(Orientation::Vertical, spacing)?;
+    // Indent by depth for threaded view
+    let indent = (depth as f64) * 20.0;
     ui::padding(
         &column,
         vertical_padding,
-        horizontal_padding,
+        horizontal_padding + indent,
         vertical_padding,
         horizontal_padding,
     )?;
 
     let line = ui::stack(Orientation::Horizontal, 6.0)?;
+    
+    // Thread expand/collapse chevron for thread roots
+    if is_thread_root {
+        let chevron = ui::text("▼")?;
+        // Note: WinUI doesn't have easy rotation, so we use text
+        ui::append(&line, &chevron)?;
+    } else if depth > 0 {
+        // Placeholder for alignment with thread roots
+        let spacer = ui::text("  ")?;
+        ui::append(&line, &spacer)?;
+    } else {
+        let spacer = ui::text("  ")?;
+        ui::append(&line, &spacer)?;
+    }
+
     let sender = ui::text(&format::sender_label(message))?;
     if !seen {
         sender.SetFontWeight(mailin_winui_sys::FontWeight { weight: 600 })?;
     }
     ui::stretch_horizontal(&sender)?;
     ui::append(&line, &sender)?;
+    
+    // Reply count badge for thread roots
+    if is_thread_root && message.thread_reply_count > 0 {
+        let badge = ui::text(&format!(" ({})", message.thread_reply_count))?;
+        ui::append(&line, &badge)?;
+    }
+
     if message.is_flagged() {
         ui::append(&line, &ui::text("★")?)?;
     }
