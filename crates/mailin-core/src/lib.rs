@@ -24,6 +24,7 @@ pub mod html;
 mod caldav;
 mod imap;
 pub mod model;
+pub mod search;
 pub mod oauth;
 pub mod pgp;
 pub mod plugins;

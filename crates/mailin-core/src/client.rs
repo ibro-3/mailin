@@ -297,6 +297,45 @@ impl Mailin {
         self.store.search(account, query, limit)
     }
 
+    /// Enhanced search with structured query parsing and optional folder scope.
+    pub fn search_messages(
+        &self,
+        account: &AccountId,
+        folder_id: Option<FolderId>,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<MessageHeader>> {
+        self.store.search_messages(account, folder_id, query, limit)
+    }
+
+    /// Get search history for an account.
+    pub fn search_history(&self, account: &AccountId) -> Vec<crate::config::SearchHistoryEntry> {
+        self.app_config()
+            .map(|c| c.search.get(account))
+            .unwrap_or_default()
+    }
+
+    /// Add a search query to history.
+    pub fn add_search_history(
+        &self,
+        account: &AccountId,
+        query: String,
+        folder_id: Option<FolderId>,
+    ) -> Result<()> {
+        let mut config = self.app_config().ok_or(Error::Config("config not loaded".into()))?;
+        config.search.add(*account, query, folder_id);
+        let paths = crate::config::Paths::from_database_file(self.store.paths())?;
+        config.save(&paths)?;
+        Ok(())
+    }
+
+    fn app_config(&self) -> Option<crate::Config> {
+        // This is a bit of a hack - in practice the config is managed by AppState
+        // For now, we'll load it from disk each time
+        let paths = crate::config::Paths::from_database_file(self.store.paths()).ok()?;
+        crate::Config::load(&paths).ok()
+    }
+
     pub fn unread_total(&self, account: &AccountId) -> Result<u32> {
         self.store.unread_total(account)
     }

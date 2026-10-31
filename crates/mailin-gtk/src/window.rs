@@ -49,6 +49,8 @@ struct Selection {
     outbox_entries: Vec<OutboxEntry>,
     query: String,
     search: bool,
+    /// Search scope: false = current folder, true = all mail
+    search_all_mail: bool,
     /// Number of headers requested for the current folder.
     limit: u32,
 }
@@ -84,6 +86,8 @@ struct Widgets {
     list_stack: gtk::Stack,
     load_more: gtk::Button,
     search: gtk::SearchEntry,
+    scope_button: gtk::ToggleButton,
+    history_button: gtk::Button,
     reader_stack: gtk::Stack,
     reader_subject: gtk::Label,
     reader_from: gtk::Label,
@@ -196,8 +200,21 @@ impl MainWindow {
         sync_status.add_css_class("sync-status-idle");
         sync_status.set_tooltip_text(Some("Sync status: Idle"));
         
+        // Scope toggle (Current folder / All mail)
+        let scope_button = gtk::ToggleButton::builder()
+            .label("Current folder")
+            .tooltip_text("Search scope: Current folder / All mail")
+            .build();
+        scope_button.add_css_class("flat");
+        
+        // Search history button
+        let history_button = icon_button("view-history-symbolic", "Search history");
+        history_button.add_css_class("flat");
+        
         header.pack_end(&sync_button);
         header.pack_end(&sync_status);
+        header.pack_end(&scope_button);
+        header.pack_end(&history_button);
         header.pack_end(&search);
 
         // ---------------------------------------------------------- sidebar
@@ -592,6 +609,8 @@ impl MainWindow {
                 list_stack,
                 load_more,
                 search,
+                scope_button,
+                history_button,
                 reader_stack,
                 reader_subject,
                 reader_from,
@@ -865,7 +884,7 @@ impl MainWindow {
                 };
                 let folder = this.folders.borrow().get(row.index() as usize).cloned();
                 if let Some(folder) = folder {
-                    this.select_folder(&folder);
+                    let _ = this.select_folder(&folder);
                 }
             }
         });
@@ -1074,6 +1093,62 @@ impl MainWindow {
         this.widgets.search.connect_activate({
             let this = Rc::clone(this);
             move |_| this.run_search()
+        });
+
+        // Search history popover (attached to history_button)
+        let history_popover = gtk::Popover::builder()
+            .has_arrow(true)
+            .build();
+        let history_list = gtk::ListBox::new();
+        history_list.set_selection_mode(gtk::SelectionMode::None);
+        history_popover.set_child(Some(&history_list));
+
+        let history_button = this.widgets.history_button.clone();
+
+        // Set parent for popover positioning (must be done before moving into closure)
+        history_popover.set_parent(&history_button);
+
+        history_button.connect_clicked({
+            let this = Rc::clone(this);
+            let history_popover = history_popover.clone();
+            let history_list = history_list.clone();
+            let history_button = history_button.clone();
+            move |_| {
+                if let Some(account) = this.selection.borrow().account {
+                    let history = this.app.mailin.search_history(&account);
+                    if !history.is_empty() {
+                        // Clear and repopulate
+                        while let Some(child) = history_list.first_child() {
+                            history_list.remove(&child);
+                        }
+                        let now = format::now_unix();
+                        for entry in history {
+                            let row = adw::ActionRow::builder()
+                                .title(&entry.query)
+                                .subtitle(&format!("{} ago", format::list_time(now, entry.timestamp)))
+                                .build();
+                            row.add_css_class("search-history-row");
+                            row.connect_activated({
+                                let this = Rc::clone(&this);
+                                let query = entry.query.clone();
+                                let folder_id = entry.folder_id;
+                                let history_popover = history_popover.clone();
+                                move |_| {
+                                    history_popover.popdown();
+                                    this.widgets.search.set_text(&query);
+                                    if let Some(folder_id) = folder_id {
+                                        this.select_folder_by_id(folder_id);
+                                    }
+                                    this.run_search();
+                                }
+                            });
+                            history_list.append(&row);
+                        }
+                        history_popover.set_parent(&history_button);
+                        history_popover.popup();
+                    }
+                }
+            }
         });
 
         this.widgets.add_button.connect_clicked({
@@ -1411,7 +1486,7 @@ impl MainWindow {
             Some(index) => {
                 let folder = self.folders.borrow()[index].clone();
                 if self.selection.borrow().folder != Some(folder.id) {
-                    self.select_folder(&folder);
+                    let _ = self.select_folder(&folder);
                 }
             }
             None => {
@@ -1430,7 +1505,7 @@ impl MainWindow {
         self.clear_messages();
     }
 
-    fn select_folder(&self, folder: &Folder) {
+    fn select_folder(&self, folder: &Folder) -> mailin_core::Result<()> {
         let is_outbox = folder.id.0 == -1;
         {
             let mut selection = self.selection.borrow_mut();
@@ -1438,7 +1513,7 @@ impl MainWindow {
                 && !selection.search
                 && selection.show_outbox == is_outbox
             {
-                return;
+                return Ok(());
             }
             selection.folder = Some(folder.id);
             selection.message = None;
@@ -1458,8 +1533,15 @@ impl MainWindow {
                 .last_synced_at
                 .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
             if stale {
-                self.app.engine.sync_folder(folder.id);
+                self.app.mailin.store().refresh_folder(folder.id)?;
             }
+        }
+        Ok(())
+    }
+
+    fn select_folder_by_id(&self, folder_id: FolderId) {
+        if let Ok(Some(folder)) = self.app.mailin.folder(folder_id) {
+            let _ = self.select_folder(&folder);
         }
     }
 
@@ -1520,9 +1602,12 @@ impl MainWindow {
             let Some(account_id) = account_id else {
                 return;
             };
-            match self.app.mailin.search(&account_id, &query, SEARCH_LIMIT) {
+            let search_all_mail = self.selection.borrow().search_all_mail;
+            let folder_id = if search_all_mail { None } else { self.selection.borrow().folder };
+            match self.app.mailin.search_messages(&account_id, folder_id, &query, SEARCH_LIMIT) {
                 Ok(results) => {
-                    self.show_messages(results, format!("Results for “{query}”"), false);
+                    let scope_label = if search_all_mail { "All mail" } else { "Current folder" };
+                    self.show_messages(results, format!("Results for “{query}” ({scope_label})"), false);
                 }
                 Err(error) => self.show_error(&error.to_string()),
             }
@@ -1795,10 +1880,16 @@ impl MainWindow {
             self.clear_search();
             return;
         }
+        let search_all_mail = self.widgets.scope_button.is_active();
         {
             let mut selection = self.selection.borrow_mut();
             selection.search = true;
-            selection.query = query;
+            selection.query = query.clone();
+            selection.search_all_mail = search_all_mail;
+        }
+        // Add to search history
+        if let Some(account) = self.selection.borrow().account {
+            let _ = self.app.mailin.add_search_history(&account, query.clone(), self.selection.borrow().folder);
         }
         self.refresh_messages();
     }

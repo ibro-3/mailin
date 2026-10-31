@@ -9,7 +9,7 @@
 mod migrations;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
@@ -58,6 +58,7 @@ impl FolderUpsert {
 #[derive(Debug)]
 pub struct Store {
     conn: Mutex<Connection>,
+    db_path: PathBuf,
 }
 
 impl Store {
@@ -73,8 +74,10 @@ impl Store {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
         }
+        let db_path = path.to_path_buf();
         Ok(Self {
             conn: Mutex::new(conn),
+            db_path,
         })
     }
 
@@ -83,7 +86,13 @@ impl Store {
         Self::configure(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            db_path: PathBuf::from(":memory:"),
         })
+    }
+
+    /// Get the database file path.
+    pub fn paths(&self) -> &Path {
+        &self.db_path
     }
 
     fn configure(conn: &mut Connection) -> Result<()> {
@@ -409,6 +418,16 @@ impl Store {
         Ok(removed as u32)
     }
 
+    /// Mark a folder as needing a full resync by clearing its last_synced_at timestamp.
+    pub fn refresh_folder(&self, folder: FolderId) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE folders SET last_synced_at = NULL WHERE id = ?1",
+            params![folder.0],
+        )?;
+        Ok(())
+    }
+
     /// Apply flag updates for many messages in one transaction. UIDs that are
     /// no longer cached are ignored.
     pub fn set_flags_many(&self, folder: FolderId, updates: &[(u32, Vec<String>)]) -> Result<u32> {
@@ -652,6 +671,66 @@ impl Store {
             ],
             map_message,
         )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Enhanced search with structured query parsing (from:, to:, subject:, has:, is:, before:, after:).
+    /// Searches within a specific folder or across all folders in an account.
+    pub fn search_messages(
+        &self,
+        account: &AccountId,
+        folder_id: Option<FolderId>,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<MessageHeader>> {
+        use crate::search::{build_filter_where, build_fts_query, parse_search_query};
+
+        let parsed = parse_search_query(query);
+        let conn = self.lock()?;
+
+        let (filter_sql, mut filter_params) = build_filter_where(&parsed.filters);
+        let fts_query = build_fts_query(&parsed.fts_terms);
+
+        let mut sql = format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.account_id = ?1"
+        );
+
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(account.to_string())];
+        let mut param_index = 2;
+
+        // Add folder filter if specified
+        if let Some(folder) = folder_id {
+            sql.push_str(" AND m.folder_id = ?");
+            sql.push_str(&param_index.to_string());
+            params.push(Box::new(folder.0));
+            param_index += 1;
+        }
+
+        // Add FTS query if present
+        if let Some(fts) = fts_query {
+            sql.push_str(" AND m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)");
+            sql.push_str(&param_index.to_string());
+            params.push(Box::new(fts));
+            param_index += 1;
+        }
+
+        // Add structured filters
+        if filter_sql != "1=1" {
+            sql.push_str(" AND ");
+            sql.push_str(&filter_sql);
+            params.append(&mut filter_params);
+        }
+
+        sql.push_str(" ORDER BY m.received_at DESC, m.uid DESC LIMIT ?");
+        sql.push_str(&param_index.to_string());
+        params.push(Box::new(i64::from(limit.clamp(1, 500))));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), map_message)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Error::from)
     }

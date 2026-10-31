@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::account::{AccountId, Account};
 use crate::error::{Error, Result};
+use crate::model::FolderId;
 
 const APP_QUALIFIER: &str = "dev";
 const APP_ORGANISATION: &str = "mailin";
@@ -49,6 +52,23 @@ impl Paths {
 
     pub fn database_file(&self) -> PathBuf {
         self.data_dir.join("mailin.db")
+    }
+
+    /// Reconstruct Paths from the database file path.
+    /// Assumes standard layout: data_dir/mailin.db, sibling config_dir/config.toml
+    pub fn from_database_file(db_path: impl AsRef<Path>) -> Result<Self> {
+        let db_path = db_path.as_ref();
+        let data_dir = db_path.parent().ok_or_else(|| {
+            Error::Config("database file has no parent directory".into())
+        })?;
+        let root = data_dir.parent().ok_or_else(|| {
+            Error::Config("data directory has no parent directory".into())
+        })?;
+        Ok(Self {
+            config_dir: root.join("config"),
+            data_dir: data_dir.to_path_buf(),
+            cache_dir: root.join("cache"),
+        })
     }
 
     /// Create the directories with user-only permissions.
@@ -214,12 +234,61 @@ impl Default for SyncPreferences {
     }
 }
 
+/// Search history entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistoryEntry {
+    pub query: String,
+    pub account_id: AccountId,
+    pub folder_id: Option<FolderId>,
+    pub timestamp: i64,
+}
+
 /// Application preferences. Accounts and credentials are *not* stored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub ui: UiPreferences,
     pub sync: SyncPreferences,
+    /// Search history (last 20 per account)
+    pub search: SearchHistory,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistory {
+    /// Per-account search history: account_id -> Vec<SearchHistoryEntry>
+    pub history: HashMap<AccountId, Vec<SearchHistoryEntry>>,
+}
+
+impl SearchHistory {
+    /// Get search history for an account (most recent first, max 20).
+    pub fn get(&self, account_id: &AccountId) -> Vec<SearchHistoryEntry> {
+        self.history
+            .get(account_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .take(20)
+            .collect()
+    }
+
+    /// Add a search query to history.
+    pub fn add(&mut self, account_id: AccountId, query: String, folder_id: Option<FolderId>) {
+        let entry = SearchHistoryEntry {
+            query,
+            account_id,
+            folder_id,
+            timestamp: crate::now_unix(),
+        };
+        let list = self.history.entry(account_id).or_default();
+        // Remove duplicates
+        list.retain(|e| e.query != entry.query);
+        // Insert at front
+        list.insert(0, entry);
+        // Trim to 20
+        if list.len() > 20 {
+            list.truncate(20);
+        }
+    }
 }
 
 impl Config {
