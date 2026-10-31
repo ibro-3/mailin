@@ -17,7 +17,7 @@ use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
-    Account, AccountId, AttachmentMeta, Event, Folder, FolderId, FolderRole, MessageHeader,
+    Account, AccountId, AttachmentMeta, ClientEvent, Folder, FolderId, FolderRole, MessageHeader,
     MessageId, MessageListDensity, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
 };
 use tokio::sync::broadcast;
@@ -2613,7 +2613,7 @@ impl MainWindow {
 
     // --------------------------------------------------------------- events
 
-    fn drain_events(&self, events: &mut broadcast::Receiver<Event>) {
+    fn drain_events(&self, events: &mut broadcast::Receiver<ClientEvent>) {
         let mut accounts_changed = false;
         let mut folders_changed = false;
         let mut messages_changed = false;
@@ -2624,21 +2624,21 @@ impl MainWindow {
 
         loop {
             match events.try_recv() {
-                Ok(Event::AccountsChanged) => accounts_changed = true,
-                Ok(Event::FoldersChanged { .. }) => folders_changed = true,
-                Ok(Event::MessagesChanged { folder_id }) => {
+                Ok(ClientEvent::AccountsChanged) => accounts_changed = true,
+                Ok(ClientEvent::FoldersChanged { .. }) => folders_changed = true,
+                Ok(ClientEvent::MessagesChanged { folder_id }) => {
                     let selection = self.selection.borrow();
                     if selection.search || selection.folder == Some(folder_id) {
                         messages_changed = true;
                     }
                 }
-                Ok(Event::NewMessages {
+                Ok(ClientEvent::NewMessages {
                     account_id, count, ..
                 }) => new_messages.push((account_id, count)),
-                Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
-                Ok(Event::OutboxChanged) => outbox_changed = true,
-                Ok(Event::AccountError { message, .. }) => account_error = Some(message),
-                Ok(Event::ScheduledActionRan { .. }) => {
+                Ok(ClientEvent::BodyReady { message_id }) => body_ready = Some(message_id),
+                Ok(ClientEvent::OutboxChanged) => outbox_changed = true,
+                Ok(ClientEvent::AccountError { message, .. }) => account_error = Some(message),
+                Ok(ClientEvent::ScheduledActionRan { .. }) => {
                     // Scheduled action completed, refresh folders and messages
                     folders_changed = true;
                     messages_changed = true;

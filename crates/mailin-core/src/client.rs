@@ -66,6 +66,9 @@ pub enum Event {
     },
 }
 
+/// Backward compatibility alias for front-ends that imported `client::Event as ClientEvent`.
+pub type ClientEvent = Event;
+
 pub struct Mailin {
     store: Arc<Store>,
     credentials: Arc<dyn CredentialsStore>,

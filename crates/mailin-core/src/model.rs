@@ -551,6 +551,67 @@ pub struct VirtualFolder {
     pub created_at: i64,
 }
 
+/// A PGP public key cached for a recipient.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PgpKey {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub fingerprint: String,
+    pub user_ids: Vec<String>,
+    pub public_key: String,
+    pub created_at: i64,
+}
+
+/// Signature verification result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignatureStatus {
+    Valid,
+    Invalid,
+    UnknownKey,
+    Error,
+}
+
+/// A CalDAV calendar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Calendar {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub href: String,
+    pub display_name: String,
+    pub color: Option<String>,
+    pub ctag: Option<String>,
+    pub last_synced_at: Option<i64>,
+}
+
+/// An event in a calendar (VEVENT).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    pub id: i64,
+    pub calendar_id: i64,
+    pub uid: String,
+    pub summary: String,
+    pub start_at: i64,
+    pub end_at: i64,
+    pub all_day: bool,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    pub attendees_json: String,
+    pub ics_raw: String,
+    pub etag: Option<String>,
+}
+
+/// A plugin for extending Mailin functionality.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plugin {
+    pub name: String,
+    pub version: String,
+    pub source_path: String,
+    pub enabled: bool,
+    pub manifest_json: String,
+    pub permissions_json: String,
+    pub created_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

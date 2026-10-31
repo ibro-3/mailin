@@ -21,9 +21,12 @@ pub mod credentials;
 pub mod engine;
 pub mod error;
 pub mod html;
+mod caldav;
 mod imap;
 pub mod model;
 pub mod oauth;
+pub mod pgp;
+pub mod plugins;
 pub mod rules;
 mod smtp;
 pub mod store;
@@ -34,16 +37,16 @@ pub use account::{
     Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, OAuthProvider, Security,
     ServerSettings,
 };
-pub use client::{Event, Mailin};
+pub use client::{ClientEvent, Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, UiPreferences};
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use model::{
-    AttachmentData, AttachmentMeta, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, Rule, RuleAction, RuleCondition,
-    ScheduledAction, SnoozePayload, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, PgpKey, Plugin, Rule, RuleAction, RuleCondition,
+    ScheduledAction, SignatureStatus, SnoozePayload, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
 };
 pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use store::{FolderUpsert, Store};

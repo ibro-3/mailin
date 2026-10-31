@@ -17,8 +17,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::account::{Account, AccountId};
 use crate::error::{Error, Result};
 use crate::model::{
-    AttachmentData, AttachmentMeta, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, Rule, RuleAction, RuleCondition, ScheduledAction, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, PgpKey, Plugin, Rule, RuleAction, RuleCondition, ScheduledAction, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
 };
 
 pub use migrations::SCHEMA_VERSION;
@@ -1233,11 +1233,377 @@ impl Store {
         let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| row.get(0))?;
         Ok(count as u32)
     }
+
+    // --------------------------------------------------------------- calendars
+
+    /// Create or update a calendar.
+    pub fn upsert_calendar(
+        &self,
+        account: &AccountId,
+        href: &str,
+        display_name: &str,
+        color: Option<&str>,
+        ctag: Option<&str>,
+) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO calendars (account_id, href, display_name, color, ctag, last_synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(account_id, href) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 color = excluded.color,
+                 ctag = excluded.ctag,
+                 last_synced_at = excluded.last_synced_at
+             RETURNING id",
+            params![account.to_string(), href, display_name, color, ctag, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all calendars for an account.
+    pub fn list_calendars(&self, account: &AccountId) -> Result<Vec<Calendar>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, href, display_name, color, ctag, last_synced_at
+             FROM calendars
+             WHERE account_id = ?1
+             ORDER BY display_name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Calendar {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                href: row.get(2)?,
+                display_name: row.get(3)?,
+                color: row.get(4)?,
+                ctag: row.get(5)?,
+                last_synced_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get a calendar by href.
+    pub fn calendar_by_href(&self, account: &AccountId, href: &str) -> Result<Option<Calendar>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, account_id, href, display_name, color, ctag, last_synced_at
+             FROM calendars
+             WHERE account_id = ?1 AND href = ?2",
+            params![account.to_string(), href],
+            |row| {
+                Ok(Calendar {
+                    id: row.get(0)?,
+                    account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                    href: row.get(2)?,
+                    display_name: row.get(3)?,
+                    color: row.get(4)?,
+                    ctag: row.get(5)?,
+                    last_synced_at: row.get(6)?,
+                })
+            },
+        ).optional().map_err(Error::from)
+    }
+
+    /// Update calendar ctag and last_synced_at.
+    pub fn update_calendar_sync(&self, calendar_id: i64, ctag: Option<&str>) -> Result<()> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        conn.execute(
+            "UPDATE calendars SET ctag = ?2, last_synced_at = ?3 WHERE id = ?1",
+            params![calendar_id, ctag, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a calendar.
+    pub fn delete_calendar(&self, calendar_id: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM calendars WHERE id = ?1",
+            params![calendar_id],
+) ? > 0)
+    }
+
+    // --------------------------------------------------------------- events
+
+    /// Insert or update an event.
+    pub fn upsert_event(
+        &self,
+        calendar_id: i64,
+        uid: &str,
+        summary: &str,
+        start_at: i64,
+        end_at: i64,
+        all_day: bool,
+        location: Option<&str>,
+        description: Option<&str>,
+        attendees_json: &str,
+        ics_raw: &str,
+        etag: Option<&str>,
+) -> Result<i64> {
+        let conn = self.lock()?;
+        let id: i64 = conn.query_row(
+            "INSERT INTO events (calendar_id, uid, summary, start_at, end_at, all_day, location, description, attendees_json, ics_raw, etag)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(calendar_id, uid) DO UPDATE SET
+                 summary = excluded.summary,
+                 start_at = excluded.start_at,
+                 end_at = excluded.end_at,
+                 all_day = excluded.all_day,
+                 location = excluded.location,
+                 description = excluded.description,
+                 attendees_json = excluded.attendees_json,
+                 ics_raw = excluded.ics_raw,
+                 etag = excluded.etag
+             RETURNING id",
+            params![calendar_id, uid, summary, start_at, end_at, all_day as i64, location, description, attendees_json, ics_raw, etag],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List events for a calendar within a time range.
+    pub fn list_events(&self, calendar_id: i64, start: i64, end: i64) -> Result<Vec<CalendarEvent>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, calendar_id, uid, summary, start_at, end_at, all_day, location, description, attendees_json, ics_raw, etag
+             FROM events
+             WHERE calendar_id = ?1 AND end_at >= ?2 AND start_at <= ?3
+             ORDER BY start_at",
+        )?;
+        let rows = stmt.query_map(params![calendar_id, start, end], |row| {
+            Ok(CalendarEvent {
+                id: row.get(0)?,
+                calendar_id: row.get(1)?,
+                uid: row.get(2)?,
+                summary: row.get(3)?,
+                start_at: row.get(4)?,
+                end_at: row.get(5)?,
+                all_day: row.get::<_, i64>(6)? != 0,
+                location: row.get(7)?,
+                description: row.get(8)?,
+                attendees_json: row.get(9)?,
+                ics_raw: row.get(10)?,
+                etag: row.get(11)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get an event by UID.
+    pub fn event_by_uid(&self, calendar_id: i64, uid: &str) -> Result<Option<CalendarEvent>> {
+    let conn = self.lock()?;
+    conn.query_row(
+        "SELECT id, calendar_id, uid, summary, start_at, end_at, all_day, location, description, attendees_json, ics_raw, etag
+         FROM events
+         WHERE calendar_id = ?1 AND uid = ?2",
+        params![calendar_id, uid],
+        |row| {
+            Ok(CalendarEvent {
+                id: row.get(0)?,
+                calendar_id: row.get(1)?,
+                uid: row.get(2)?,
+                summary: row.get(3)?,
+                start_at: row.get(4)?,
+                end_at: row.get(5)?,
+                all_day: row.get::<_, i64>(6)? != 0,
+                location: row.get(7)?,
+                description: row.get(8)?,
+                attendees_json: row.get(9)?,
+                ics_raw: row.get(10)?,
+                etag: row.get(11)?,
+            })
+        }).optional().map_err(Error::from)
+    }
+
+    /// Delete an event by UID.
+    pub fn delete_event(&self, calendar_id: i64, uid: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM events WHERE calendar_id = ?1 AND uid = ?2",
+            params![calendar_id, uid],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- plugins
+
+    /// Insert or update a plugin.
+    pub fn upsert_plugin(
+        &self,
+        name: &str,
+        version: &str,
+        source_path: &str,
+        enabled: bool,
+        manifest_json: &str,
+        permissions_json: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO plugins (name, version, source_path, enabled, manifest_json, permissions_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(name) DO UPDATE SET
+                 version = excluded.version,
+                 source_path = excluded.source_path,
+                 enabled = excluded.enabled,
+                 manifest_json = excluded.manifest_json,
+                 permissions_json = excluded.permissions_json
+             RETURNING id",
+            params![name, version, source_path, enabled as i64, manifest_json, permissions_json, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all plugins.
+    pub fn list_plugins(&self) -> Result<Vec<Plugin>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT name, version, source_path, enabled, manifest_json, permissions_json, created_at
+             FROM plugins
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Plugin {
+                name: row.get(0)?,
+                version: row.get(1)?,
+                source_path: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                manifest_json: row.get(4)?,
+                permissions_json: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get a plugin by name.
+    pub fn plugin(&self, name: &str) -> Result<Option<Plugin>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT name, version, source_path, enabled, manifest_json, permissions_json, created_at
+             FROM plugins
+             WHERE name = ?1",
+            params![name],
+            |row| {
+                Ok(Plugin {
+                    name: row.get(0)?,
+                    version: row.get(1)?,
+                    source_path: row.get(2)?,
+                    enabled: row.get::<_, i64>(3)? != 0,
+                    manifest_json: row.get(4)?,
+                    permissions_json: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            },
+        ).optional().map_err(Error::from)
+    }
+
+    /// Delete a plugin by name.
+    pub fn delete_plugin(&self, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM plugins WHERE name = ?1",
+            params![name],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- pgp_keys
+
+    /// Insert or update a PGP key.
+    pub fn upsert_pgp_key(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+        user_ids: &[String],
+        public_key: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let user_ids_json = serde_json::to_string(user_ids).unwrap_or_default();
+        let id: i64 = conn.query_row(
+            "INSERT INTO pgp_keys (account_id, fingerprint, user_ids, public_key, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id, fingerprint) DO UPDATE SET
+                 user_ids = excluded.user_ids,
+                 public_key = excluded.public_key
+             RETURNING id",
+            params![account.to_string(), fingerprint, user_ids_json, public_key, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all PGP keys for an account.
+    pub fn pgp_keys_for_account(&self, account: &AccountId) -> Result<Vec<PgpKey>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, fingerprint, user_ids, public_key, created_at
+             FROM pgp_keys
+             WHERE account_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            let user_ids_json: String = row.get(3)?;
+            let user_ids: Vec<String> = serde_json::from_str(&user_ids_json).unwrap_or_default();
+            Ok(PgpKey {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                fingerprint: row.get(2)?,
+                user_ids,
+                public_key: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get a PGP key by fingerprint.
+    pub fn pgp_key_by_fingerprint(&self, account: &AccountId, fingerprint: &str) -> Result<Option<PgpKey>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, account_id, fingerprint, user_ids, public_key, created_at
+             FROM pgp_keys
+             WHERE account_id = ?1 AND fingerprint = ?2",
+            params![account.to_string(), fingerprint],
+            |row| {
+                let user_ids_json: String = row.get(3)?;
+                let user_ids: Vec<String> = serde_json::from_str(&user_ids_json).unwrap_or_default();
+                Ok(PgpKey {
+                    id: row.get(0)?,
+                    account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                    fingerprint: row.get(2)?,
+                    user_ids,
+                    public_key: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        ).optional().map_err(Error::from)
+    }
+
+    /// Delete a PGP key by fingerprint.
+    pub fn delete_pgp_key(&self, account: &AccountId, fingerprint: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM pgp_keys WHERE account_id = ?1 AND fingerprint = ?2",
+            params![account.to_string(), fingerprint],
+        )? > 0)
+    }
+
 }
 
 // -------------------------------------------------------------------- helpers
-
-/// IMAP mod-sequences are 63 bit unsigned, SQLite integers are signed.
 fn modseq_to_sql(value: Option<u64>) -> Option<i64> {
     value.map(|v| v.min(i64::MAX as u64) as i64)
 }
@@ -1467,7 +1833,6 @@ fn fts_query(input: &str) -> Option<String> {
             .join(" AND "),
     )
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
