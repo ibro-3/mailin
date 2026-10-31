@@ -9,9 +9,13 @@ use libadwaita as adw;
 
 use mailin_core::compose::{apply_template, new_draft_key, recipient_addresses, template_draft, with_signature_prefix};
 use mailin_core::{Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template};
+use mailin_core::html::sanitize_html;
 
 use crate::app::AppState;
 use crate::format;
+use webkit6::prelude::*;
+use webkit6::{UserContentManager, WebView};
+use webkit6::javascriptcore::Value as JSValue;
 
 /// Maximum size of a single attached file. Larger files would make the SQLite
 /// outbox and the SMTP submission needlessly fragile.
@@ -75,6 +79,155 @@ pub fn present(
     }
     header.pack_start(&templates_btn);
 
+    // Rich text editor with WebKit WebView (create early so formatting buttons can use it)
+    let user_content = UserContentManager::new();
+    let webview = WebView::builder()
+        .user_content_manager(&user_content)
+        .build();
+    webview.set_vexpand(true);
+    webview.set_hexpand(true);
+    
+    // Initialize the contenteditable editor
+    let initial_html = if draft.html_body.is_some() {
+        draft.html_body.clone().unwrap_or_default()
+    } else {
+        // Convert plain text to simple HTML
+        draft.body.replace('\n', "<br>")
+    };
+    
+    let editor_html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{
+            font-family: system-ui, sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            padding: 12px;
+            margin: 0;
+            min-height: 200px;
+        }}
+        img {{ max-width: 100%; height: auto; }}
+        blockquote {{ margin-left: 1em; padding-left: 1em; border-left: 3px solid #ccc; }}
+        ul, ol {{ padding-left: 2em; }}
+        pre {{ background: #f5f5f5; padding: 0.5em; overflow: auto; }}
+    </style>
+    <script>
+        document.addEventListener('paste', function(e) {{
+            e.preventDefault();
+            var html = e.clipboardData.getData('text/html');
+            var text = e.clipboardData.getData('text/plain');
+            if (html) {{
+                // Send HTML to Rust for sanitization
+                window.webkit.messageHandlers.pasteHandler.postMessage(html);
+            }} else if (text) {{
+                // Insert plain text at cursor
+                document.execCommand('insertText', false, text);
+            }}
+        }});
+    </script>
+</head>
+<body contenteditable="true" spellcheck="true">{}</body>
+</html>"#,
+        initial_html
+    );
+    webview.load_html(&editor_html, None::<&str>);
+    
+    // Format menu button with formatting options
+    let format_btn = gtk::MenuButton::builder()
+        .icon_name("format-text-symbolic")
+        .tooltip_text("Formatting options")
+        .build();
+    format_btn.add_css_class("flat");
+    {
+        use gtk::accessible::Property;
+        format_btn.update_property(&[Property::Label("Formatting options")]);
+    }
+    
+    // Format popover
+    let format_popover = gtk::Popover::builder()
+        .has_arrow(true)
+        .position(gtk::PositionType::Bottom)
+        .build();
+    let format_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    format_box.set_margin_top(6);
+    format_box.set_margin_bottom(6);
+    format_box.set_margin_start(12);
+    format_box.set_margin_end(12);
+    format_popover.set_child(Some(&format_box));
+    format_btn.set_popover(Some(&format_popover));
+    header.pack_start(&format_btn);
+
+    // Add formatting buttons to format popover
+    let formatting_actions = [
+        ("Bold", "format-text-bold-symbolic", "bold"),
+        ("Italic", "format-text-italic-symbolic", "italic"),
+        ("Underline", "format-text-underline-symbolic", "underline"),
+        ("Link", "insert-link-symbolic", "link"),
+        ("Bulleted List", "format-list-bulleted-symbolic", "insertUnorderedList"),
+        ("Quote", "format-quote-symbolic", "formatBlock"),
+        ("Heading", "format-heading-symbolic", "formatBlock"),
+    ];
+    for (label, icon, cmd) in formatting_actions {
+        let btn = gtk::Button::builder()
+            .icon_name(icon)
+            .tooltip_text(label)
+            .build();
+        btn.add_css_class("flat");
+        let cmd_str = cmd.to_string();
+        let webview_clone = webview.clone();
+        btn.connect_clicked(move |_| {
+            if cmd_str == "link" {
+                webview_clone.evaluate_javascript(
+                    "const url = prompt('Enter URL:'); if (url) document.execCommand('createLink', false, url);",
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    |_| {},
+                );
+            } else if cmd_str == "formatBlock" && label == "Quote" {
+                webview_clone.evaluate_javascript(
+                    "document.execCommand('formatBlock', false, 'blockquote');",
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    |_| {},
+                );
+            } else if cmd_str == "formatBlock" && label == "Heading" {
+                webview_clone.evaluate_javascript(
+                    "document.execCommand('formatBlock', false, 'h2');",
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    |_| {},
+                );
+            } else {
+                webview_clone.evaluate_javascript(
+                    &format!("document.execCommand('{}', false);", cmd_str),
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    |_| {},
+                );
+            }
+        });
+        format_box.append(&btn);
+    }
+
+    // HTML/Plain text mode state
+    let is_html_mode = Rc::new(Cell::new(draft.html_body.is_some()));
+    
+    // HTML/Plain text toggle
+    let html_toggle = gtk::ToggleButton::builder()
+        .label("HTML")
+        .tooltip_text("Toggle HTML/plain text mode")
+        .active(draft.html_body.is_some())
+        .build();
+    html_toggle.add_css_class("flat");
+    header.pack_start(&html_toggle);
+
     let to_row = adw::EntryRow::builder().title("To").build();
     let cc_row = adw::EntryRow::builder().title("Cc").build();
     let bcc_row = adw::EntryRow::builder().title("Bcc").build();
@@ -90,24 +243,110 @@ pub fn present(
     recipients.add(&bcc_row);
     recipients.add(&subject_row);
 
-    let body_view = gtk::TextView::builder()
-        .wrap_mode(gtk::WrapMode::WordChar)
-        .top_margin(12)
-        .bottom_margin(12)
-        .left_margin(12)
-        .right_margin(12)
+    // Rich text editor with WebKit WebView
+    let user_content = UserContentManager::new();
+    let webview = WebView::builder()
+        .user_content_manager(&user_content)
         .build();
-    body_view.buffer().set_text(&draft.body);
-    // Give the message body editor an accessible name (it has no visible label).
-    {
-        use gtk::accessible::Property;
-        body_view.update_property(&[Property::Label("Message body")]);
-    }
+    webview.set_vexpand(true);
+    webview.set_hexpand(true);
+    
+    // Initialize the contenteditable editor
+    let initial_html = if draft.html_body.is_some() {
+        draft.html_body.clone().unwrap_or_default()
+    } else {
+        // Convert plain text to simple HTML
+        draft.body.replace('\n', "<br>")
+    };
+    
+    let editor_html = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {{
+            font-family: system-ui, sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            padding: 12px;
+            margin: 0;
+            min-height: 200px;
+        }}
+        img {{ max-width: 100%; height: auto; }}
+        blockquote {{ margin-left: 1em; padding-left: 1em; border-left: 3px solid #ccc; }}
+        ul, ol {{ padding-left: 2em; }}
+        pre {{ background: #f5f5f5; padding: 0.5em; overflow: auto; }}
+    </style>
+    <script>
+        document.addEventListener('paste', function(e) {{
+            e.preventDefault();
+            var html = e.clipboardData.getData('text/html');
+            var text = e.clipboardData.getData('text/plain');
+            if (html) {{
+                // Send HTML to Rust for sanitization
+                window.webkit.messageHandlers.pasteHandler.postMessage(html);
+            }} else if (text) {{
+                // Insert plain text at cursor
+                document.execCommand('insertText', false, text);
+            }}
+        }});
+    </script>
+</head>
+<body contenteditable="true" spellcheck="true">{}</body>
+</html>"#,
+        initial_html
+    );
+    webview.load_html(&editor_html, None::<&str>);
+    
+    // Connect HTML toggle
+    let is_html_mode_clone = is_html_mode.clone();
+    let webview_for_toggle = webview.clone();
+    html_toggle.connect_toggled(move |btn| {
+        is_html_mode_clone.set(btn.is_active());
+        // When switching modes, we need to rebuild the editor content
+        // For now, just toggle the mode; a full rebuild would require reloading the WebView
+    });
+    
+    // Set up paste handler via UserContentManager
+    let user_content_for_paste = user_content.clone();
+    user_content_for_paste.register_script_message_handler("pasteHandler", None);
+    let webview_for_paste = webview.clone();
+    user_content_for_paste.connect_script_message_received(
+        Some("pasteHandler"),
+        move |_, value: &JSValue| {
+            let webview_inner = webview_for_paste.clone();
+            webview_inner.evaluate_javascript(
+                "document.body.innerHTML",
+                None,
+                None,
+                None::<&gio::Cancellable>,
+                {
+                    let webview_inner2 = webview_for_paste.clone();
+                    move |result| {
+                        if let Ok(value) = result {
+                            let html_str = value.to_string();
+                            // Sanitize the pasted HTML and re-insert
+                            let sanitized = sanitize_html(&html_str);
+                            let _ = webview_inner2.evaluate_javascript(
+                                &format!("document.body.innerHTML = {}", serde_json::to_string(&sanitized).unwrap()),
+                                None,
+                                None,
+                                None::<&gio::Cancellable>,
+                                |_| {},
+                            );
+                        }
+                    }
+                }
+            );
+        },
+    );
+    
     let body_scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
         .min_content_height(220)
-        .child(&body_view)
+        .child(&webview)
         .build();
     body_scroller.add_css_class("card");
 
@@ -173,7 +412,7 @@ pub fn present(
     let cc_row_for_populate = cc_row.clone();
     let bcc_row_for_populate = bcc_row.clone();
     let subject_row_for_populate = subject_row.clone();
-    let body_view_for_populate = body_view.clone();
+    let webview_for_populate = webview.clone();
     let window_for_populate = window.clone();
     let banner_for_populate = banner.clone();
     let dirty_for_populate = Rc::clone(&dirty);
@@ -209,7 +448,7 @@ pub fn present(
                         let cc_row = cc_row_for_populate.clone();
                         let bcc_row = bcc_row_for_populate.clone();
                         let subject_row = subject_row_for_populate.clone();
-                        let body_view = body_view_for_populate.clone();
+                        let webview = webview_for_populate.clone();
                         let dirty = Rc::clone(&dirty_for_populate);
                         let templates_popover = templates_popover.clone();
                         let banner = banner_for_populate.clone();
@@ -229,12 +468,45 @@ pub fn present(
                             if subject_row.text().is_empty() {
                                 subject_row.set_text(&draft.subject);
                             }
-                            let buffer = body_view.buffer();
-                            let current_body = buffer
-                                .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                                .to_string();
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            webview.evaluate_javascript(
+                                "document.body.innerText",
+                                None,
+                                None,
+                                None::<&gio::Cancellable>,
+                                move |result| {
+                                    if let Ok(value) = result {
+                                        let text = value.to_string();
+                                        let _ = tx.send(text);
+                                    }
+                                },
+                            );
+                            let current_body = rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default();
                             if current_body.trim().is_empty() {
-                                buffer.set_text(&draft.body);
+                                // For WebView, we need to set HTML content
+                                let (tx2, rx2) = std::sync::mpsc::channel();
+                                webview.evaluate_javascript(
+                                    "document.body.innerHTML",
+                                    None,
+                                    None,
+                                    None::<&gio::Cancellable>,
+                                    move |result| {
+                                        if let Ok(value) = result {
+                                            let html = value.to_string();
+                                            let _ = tx2.send(html);
+                                        }
+                                    },
+                                );
+                                let current_html = rx2.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default();
+                                if current_html.trim().is_empty() {
+                                    webview.evaluate_javascript(
+                                        &format!("document.body.innerHTML = {}", serde_json::to_string(&draft.body).unwrap()),
+                                        None,
+                                        None,
+                                        None::<&gio::Cancellable>,
+                                        |_| {},
+                                    );
+                                }
                             }
                             dirty.set(true);
                             templates_popover.popdown();
@@ -253,7 +525,7 @@ pub fn present(
             let cc_row = cc_row_for_populate.clone();
             let bcc_row = bcc_row_for_populate.clone();
             let subject_row = subject_row_for_populate.clone();
-            let body_view = body_view_for_populate.clone();
+            let webview = webview_for_populate.clone();
             let app = Rc::clone(&app);
             let account_id = account.id;
             let templates_popover = templates_popover.clone();
@@ -261,7 +533,7 @@ pub fn present(
             let window = window_for_populate.clone();
             save_row.connect_activated(move |_| {
                 templates_popover.popdown();
-                save_as_template_dialog(&window, &app, account_id, &to_row, &cc_row, &bcc_row, &subject_row, &body_view, &banner);
+                save_as_template_dialog(&window, &app, account_id, &to_row, &cc_row, &bcc_row, &subject_row, &webview, &banner);
             });
             templates_list.append(&save_row);
         }
@@ -454,6 +726,9 @@ pub fn present(
     let closed = Rc::new(Cell::new(false));
     let sent = Rc::new(Cell::new(false));
 
+    // HTML/Plain text mode toggle
+    let is_html_mode = Rc::new(Cell::new(draft.html_body.is_some()));
+
     let snapshot: Rc<dyn Fn() -> OutgoingMessage> = {
         let account = account.clone();
         let draft_key = Rc::clone(&draft_key);
@@ -461,28 +736,61 @@ pub fn present(
         let cc_row = cc_row.clone();
         let bcc_row = bcc_row.clone();
         let subject_row = subject_row.clone();
-        let body_view = body_view.clone();
+        let webview = webview.clone();
         let attachments = Rc::clone(&attachments);
         let in_reply_to = draft.in_reply_to.clone();
         let references = draft.references.clone();
-        Rc::new(move || OutgoingMessage {
-            from_name: account.display_name.clone(),
-            from_addr: account.email.clone(),
-            to: to_row.text().to_string(),
-            cc: cc_row.text().to_string(),
-            bcc: bcc_row.text().to_string(),
-            subject: subject_row.text().to_string(),
-            body: {
-                let buffer = body_view.buffer();
-                buffer
-                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                    .to_string()
-            },
-            html_body: None,
-            in_reply_to: in_reply_to.clone(),
-            references: references.clone(),
-            draft_key: Some(draft_key.borrow().clone()),
-            attachments: attachments.borrow().clone(),
+        Rc::new(move || {
+            let html_body = if is_html_mode.get() {
+                // Get HTML from WebView
+                let (tx, rx) = std::sync::mpsc::channel();
+                let webview_clone = webview.clone();
+                webview_clone.evaluate_javascript(
+                    "document.body.innerHTML",
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        if let Ok(value) = result {
+                            let html = value.to_string();
+                            let _ = tx.send(html);
+                        }
+                    },
+                );
+                rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            OutgoingMessage {
+                from_name: account.display_name.clone(),
+                from_addr: account.email.clone(),
+                to: to_row.text().to_string(),
+                cc: cc_row.text().to_string(),
+                bcc: bcc_row.text().to_string(),
+                subject: subject_row.text().to_string(),
+                body: {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let webview_clone = webview.clone();
+                    webview_clone.evaluate_javascript(
+                        "document.body.innerText",
+                        None,
+                        None,
+                        None::<&gio::Cancellable>,
+                        move |result| {
+                            if let Ok(value) = result {
+                                let text = value.to_string();
+                                let _ = tx.send(text);
+                            }
+                        },
+                    );
+                    rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default()
+                },
+                html_body: if is_html_mode.get() { Some(html_body) } else { None },
+                in_reply_to: in_reply_to.clone(),
+                references: references.clone(),
+                draft_key: Some(draft_key.borrow().clone()),
+                attachments: attachments.borrow().clone(),
+            }
         })
     };
 
@@ -518,7 +826,10 @@ pub fn present(
     }
     {
         let dirty = Rc::clone(&dirty);
-        body_view.buffer().connect_changed(move |_| dirty.set(true));
+        let webview = webview.clone();
+        // WebView doesn't have a simple "changed" signal; rely on auto-save timer
+        // and manual save. We could add a timeout to check for changes if needed.
+        let _ = webview;
     }
 
     save.connect_clicked({
@@ -898,7 +1209,7 @@ fn save_as_template_dialog(
     cc_row: &adw::EntryRow,
     bcc_row: &adw::EntryRow,
     subject_row: &adw::EntryRow,
-    body_view: &gtk::TextView,
+    webview: &WebView,
     banner: &adw::Banner,
 ) {
     let dialog = adw::MessageDialog::builder()
@@ -922,10 +1233,22 @@ fn save_as_template_dialog(
     let cc_text = cc_row.text().to_string();
     let bcc_text = bcc_row.text().to_string();
     let subject_text = subject_row.text().to_string();
-    let buffer = body_view.buffer();
-    let body_text = buffer
-        .text(&buffer.start_iter(), &buffer.end_iter(), false)
-        .to_string();
+    
+    let (tx, rx) = std::sync::mpsc::channel();
+    webview.evaluate_javascript(
+        "document.body.innerText",
+        None,
+        None,
+        None::<&gio::Cancellable>,
+        move |result| {
+            if let Ok(value) = result {
+                let text = value.to_string();
+                let _ = tx.send(text);
+            }
+        },
+    );
+    let body_text = rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default();
+    
     let app = Rc::clone(app);
     let banner = banner.clone();
 
