@@ -19,6 +19,10 @@ pub struct ComposeAttachment {
     pub filename: String,
     pub mime_type: String,
     pub data: Vec<u8>,
+    /// Content-ID for inline images (e.g., `<image1@example.com>`).
+    /// When set, the attachment is rendered inline with `Content-Disposition: inline`
+    /// and can be referenced in HTML as `<img src="cid:image1@example.com">`.
+    pub cid: Option<String>,
 }
 
 impl ComposeAttachment {
@@ -27,6 +31,18 @@ impl ComposeAttachment {
             filename: filename.into(),
             mime_type: mime_type.into(),
             data,
+            cid: None,
+        }
+    }
+
+    /// Create an inline image attachment with a generated Content-ID.
+    pub fn inline_image(filename: impl Into<String>, mime_type: impl Into<String>, data: Vec<u8>) -> Self {
+        let cid = format!("{}@mailin.local", uuid::Uuid::new_v4().simple());
+        Self {
+            filename: filename.into(),
+            mime_type: mime_type.into(),
+            data,
+            cid: Some(cid),
         }
     }
 }
@@ -43,6 +59,10 @@ pub struct OutgoingMessage {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    /// Optional HTML body. When present alongside `body`, a `multipart/alternative`
+    /// is emitted (text/plain + text/html). If attachments are also present,
+    /// the structure becomes `multipart/mixed` containing `multipart/alternative`.
+    pub html_body: Option<String>,
     pub in_reply_to: Option<String>,
     /// Message IDs of the conversation, used for threading by receiving
     /// clients. Values may be given with or without angle brackets.
@@ -103,7 +123,7 @@ impl OutgoingMessage {
             .map(|value| value.trim_matches(['<', '>']).to_owned())
             .unwrap_or_else(|| format!("{}@{}", uuid::Uuid::new_v4(), domain));
 
-        let mut message = String::with_capacity(1024 + self.body.len());
+        let mut message = String::with_capacity(1024 + self.body.len() + self.html_body.as_ref().map_or(0, |s| s.len()));
         write_header(&mut message, "Date", &date);
         write_header(&mut message, "From", &format_mailbox(&from));
         write_header(&mut message, "To", &format_mailboxes(&to));
@@ -134,12 +154,50 @@ impl OutgoingMessage {
         }
 
         let body = normalize_crlf(&self.body);
-        if self.attachments.is_empty() {
+        let html_body = self.html_body.as_ref().map(|s| normalize_crlf(s));
+
+        // Determine MIME structure:
+        // - No attachments, no HTML: text/plain
+        // - HTML, no attachments: multipart/alternative
+        // - Attachments, no HTML: multipart/mixed with text/plain
+        // - Attachments + HTML: multipart/mixed with multipart/alternative
+        let has_html = html_body.is_some();
+        let has_attachments = !self.attachments.is_empty();
+
+        if !has_attachments && !has_html {
+            // Simple text/plain
             write_header(&mut message, "Content-Type", "text/plain; charset=utf-8");
             write_header(&mut message, "Content-Transfer-Encoding", "base64");
             message.push_str("\r\n");
             write_base64(&mut message, body.as_bytes());
-        } else {
+        } else if !has_attachments && has_html {
+            // multipart/alternative (text/plain + text/html)
+            let boundary = format!("mailin-alt-{}", uuid::Uuid::new_v4().simple());
+            write_header(
+                &mut message,
+                "Content-Type",
+                &format!("multipart/alternative; boundary=\"{boundary}\""),
+            );
+            message.push_str("\r\n");
+            message.push_str("This is a multi-part message in MIME format.\r\n");
+
+            // text/plain part
+            message.push_str(&format!("--{boundary}\r\n"));
+            message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+            message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+            write_base64(&mut message, body.as_bytes());
+
+            // text/html part
+            if let Some(html) = html_body {
+                message.push_str(&format!("--{boundary}\r\n"));
+                message.push_str("Content-Type: text/html; charset=utf-8\r\n");
+                message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+                write_base64(&mut message, html.as_bytes());
+            }
+
+            message.push_str(&format!("--{boundary}--\r\n"));
+        } else if has_attachments && !has_html {
+            // multipart/mixed with text/plain + attachments
             let boundary = format!("mailin-{}", uuid::Uuid::new_v4().simple());
             write_header(
                 &mut message,
@@ -149,23 +207,86 @@ impl OutgoingMessage {
             message.push_str("\r\n");
             message.push_str("This is a multi-part message in MIME format.\r\n");
 
+            // text/plain part
             message.push_str(&format!("--{boundary}\r\n"));
             message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
             message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
             write_base64(&mut message, body.as_bytes());
 
+            // Attachments
             for attachment in &self.attachments {
                 message.push_str(&format!("--{boundary}\r\n"));
                 let mime_type = sanitize_mime_type(&attachment.mime_type);
                 message.push_str(&format!("Content-Type: {mime_type}\r\n"));
                 message.push_str("Content-Transfer-Encoding: base64\r\n");
-                message.push_str(&format!(
-                    "Content-Disposition: attachment; {}\r\n\r\n",
-                    filename_parameter(&attachment.filename)
-                ));
+                if let Some(cid) = &attachment.cid {
+                    // Inline image with CID
+                    message.push_str(&format!("Content-ID: <{}>\r\n", cid));
+                    message.push_str("Content-Disposition: inline\r\n");
+                } else {
+                    message.push_str(&format!(
+                        "Content-Disposition: attachment; {}\r\n",
+                        filename_parameter(&attachment.filename)
+                    ));
+                }
+                message.push_str("\r\n");
                 write_base64(&mut message, &attachment.data);
             }
             message.push_str(&format!("--{boundary}--\r\n"));
+        } else {
+            // has_attachments && has_html: multipart/mixed containing multipart/alternative + attachments
+            let outer_boundary = format!("mailin-{}", uuid::Uuid::new_v4().simple());
+            let alt_boundary = format!("mailin-alt-{}", uuid::Uuid::new_v4().simple());
+
+            write_header(
+                &mut message,
+                "Content-Type",
+                &format!("multipart/mixed; boundary=\"{outer_boundary}\""),
+            );
+            message.push_str("\r\n");
+            message.push_str("This is a multi-part message in MIME format.\r\n");
+
+            // multipart/alternative part
+            message.push_str(&format!("--{outer_boundary}\r\n"));
+            message.push_str(&format!("Content-Type: multipart/alternative; boundary=\"{alt_boundary}\"\r\n\r\n"));
+            message.push_str("This is a multi-part message in MIME format.\r\n");
+
+            // text/plain part
+            message.push_str(&format!("--{alt_boundary}\r\n"));
+            message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+            message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+            write_base64(&mut message, body.as_bytes());
+
+            // text/html part
+            if let Some(html) = html_body {
+                message.push_str(&format!("--{alt_boundary}\r\n"));
+                message.push_str("Content-Type: text/html; charset=utf-8\r\n");
+                message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+                write_base64(&mut message, html.as_bytes());
+            }
+
+            message.push_str(&format!("--{alt_boundary}--\r\n"));
+
+            // Attachments
+            for attachment in &self.attachments {
+                message.push_str(&format!("--{outer_boundary}\r\n"));
+                let mime_type = sanitize_mime_type(&attachment.mime_type);
+                message.push_str(&format!("Content-Type: {mime_type}\r\n"));
+                message.push_str("Content-Transfer-Encoding: base64\r\n");
+                if let Some(cid) = &attachment.cid {
+                    // Inline image with CID
+                    message.push_str(&format!("Content-ID: <{}>\r\n", cid));
+                    message.push_str("Content-Disposition: inline\r\n");
+                } else {
+                    message.push_str(&format!(
+                        "Content-Disposition: attachment; {}\r\n",
+                        filename_parameter(&attachment.filename)
+                    ));
+                }
+                message.push_str("\r\n");
+                write_base64(&mut message, &attachment.data);
+            }
+            message.push_str(&format!("--{outer_boundary}--\r\n"));
         }
 
         Ok((message.into_bytes(), envelope))
@@ -208,6 +329,7 @@ pub fn draft_from_header(header: &MessageHeader, body: Option<&str>) -> Outgoing
         bcc: String::new(),
         subject: header.subject.clone(),
         body: body.unwrap_or_default().to_owned(),
+        html_body: None,
         in_reply_to: None,
         references: Vec::new(),
         draft_key: header.message_id.clone(),
@@ -244,6 +366,7 @@ pub fn template_draft(template: &crate::model::Template, vars: &std::collections
         bcc: String::new(),
         subject: apply_template(&template.subject, vars),
         body: apply_template(&template.body, vars),
+        html_body: None,
         in_reply_to: None,
         references: Vec::new(),
         draft_key: Some(new_draft_key("template")),

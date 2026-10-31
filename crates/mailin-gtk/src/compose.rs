@@ -478,6 +478,7 @@ pub fn present(
                     .text(&buffer.start_iter(), &buffer.end_iter(), false)
                     .to_string()
             },
+            html_body: None,
             in_reply_to: in_reply_to.clone(),
             references: references.clone(),
             draft_key: Some(draft_key.borrow().clone()),
@@ -800,6 +801,7 @@ fn reply_with(
         bcc: String::new(),
         subject: reply_subject(&message.subject),
         body: with_signature_prefix(&account.signature, &quoted_reply(message, body)),
+        html_body: None,
         in_reply_to: message.message_id.clone(),
         references,
         draft_key: None,

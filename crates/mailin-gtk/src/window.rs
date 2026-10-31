@@ -2628,6 +2628,7 @@ impl MainWindow {
                     bcc: env.bcc.join(", "),
                     subject: String::new(),
                     body: String::new(),
+                    html_body: None,
                     in_reply_to: None,
                     references: Vec::new(),
                     draft_key: None,

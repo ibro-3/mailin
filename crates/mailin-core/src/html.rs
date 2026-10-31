@@ -224,6 +224,173 @@ pub fn escape(text: &str) -> String {
     escaped
 }
 
+
+/// Sanitize HTML for safe composition.
+/// Removes scripts, event handlers, forms, and other unsafe elements/attributes.
+/// Allows a safe subset of HTML for formatted email composition.
+pub fn sanitize_html(input: &str) -> String {
+    use std::borrow::Cow;
+
+    // Quick check - if no suspicious content, return as-is
+    if !input.contains('<') {
+        return input.to_owned();
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut i = 0;
+    let chars: Vec<char> = input.chars().collect();
+
+    while i < chars.len() {
+        if chars[i] == '<' {
+            // Look ahead to see what kind of tag this is
+            if i + 1 < chars.len() && chars[i + 1] == '!' {
+                // Comment or doctype - skip to end
+                while i < chars.len() && chars[i] != '>' {
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1; // skip '>'
+                }
+                continue;
+            }
+
+            if i + 1 < chars.len() && chars[i + 1] == '/' {
+                // Closing tag - allow all closing tags
+                while i < chars.len() && chars[i] != '>' {
+                    output.push(chars[i]);
+                    i += 1;
+                }
+                if i < chars.len() {
+                    output.push(chars[i]);
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Opening tag - parse it
+            let mut tag_name = String::new();
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_alphabetic() {
+                tag_name.push(chars[j]);
+                j += 1;
+            }
+            let tag_lower = tag_name.to_lowercase();
+
+            // Block dangerous tags entirely
+            if matches!(
+                tag_lower.as_str(),
+                "script" | "iframe" | "frame" | "frameset" | "object" | "embed" |
+                "applet" | "form" | "input" | "button" | "select" | "textarea" |
+                "link" | "meta" | "base" | "style" | "svg" | "math" | "noscript"
+            ) {
+                // Skip this entire tag and its content
+                while i < chars.len() && chars[i] != '>' {
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+                // Skip content until closing tag
+                let close_tag = format!("</{}>", tag_lower);
+                let remaining: String = chars[i..].iter().collect();
+                if let Some(pos) = remaining.find(&close_tag) {
+                    i += pos + close_tag.len();
+                }
+                continue;
+            }
+
+            // Allow safe tags - copy the tag with sanitized attributes
+            let allowed_tags = [
+                "b", "i", "u", "em", "strong", "a", "p", "br", "div", "span",
+                "ul", "ol", "li", "blockquote", "pre", "code", "h1", "h2", "h3",
+                "h4", "h5", "h6", "img", "table", "thead", "tbody", "tr", "td", "th",
+                "hr", "small", "sub", "sup", "del", "ins", "mark", "cite", "q",
+            ];
+
+            if allowed_tags.contains(&tag_lower.as_str()) {
+                // Copy the tag with sanitized attributes
+                let mut tag_end = j;
+                let mut in_quotes = false;
+                let mut quote_char = '\0';
+                while tag_end < chars.len() {
+                    let c = chars[tag_end];
+                    if (c == '"' || c == '\'') && !in_quotes {
+                        in_quotes = true;
+                        quote_char = c;
+                    } else if c == quote_char && in_quotes {
+                        in_quotes = false;
+                        quote_char = '\0';
+                    } else if c == '>' && !in_quotes {
+                        tag_end += 1;
+                        break;
+                    }
+                    tag_end += 1;
+                }
+                // Copy the raw tag but filter attributes
+                let tag_content: String = chars[i..tag_end].iter().collect();
+                output.push_str(&sanitize_tag_attributes(&tag_content));
+                i = tag_end;
+            } else {
+                // Unknown tag - skip it (encode as text)
+                while i < chars.len() && chars[i] != '>' {
+                    i += 1;
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            }
+        } else {
+            output.push(chars[i]);
+            i += 1;
+        }
+    }
+    output
+}
+
+/// Sanitize attributes in an HTML tag - remove event handlers, javascript: URLs, etc.
+fn sanitize_tag_attributes(tag: &str) -> String {
+    // Simple approach: remove on* attributes and javascript: URLs
+    let mut result = String::new();
+    let mut i = 0;
+    let chars: Vec<char> = tag.chars().collect();
+
+    while i < chars.len() {
+        // Check for event handler attributes (on*)
+        if i + 2 < chars.len() && chars[i] == 'o' && chars[i + 1] == 'n' && chars[i + 2].is_alphabetic() {
+            // Skip this attribute
+            while i < chars.len() && chars[i] != ' ' && chars[i] != '>' && chars[i] != '/' {
+                if chars[i] == '"' || chars[i] == '\'' {
+                    let quote = chars[i];
+                    i += 1;
+                    while i < chars.len() && chars[i] != quote {
+                        i += 1;
+                    }
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // Check for javascript: URLs in href/src
+        if i + 10 < chars.len() {
+            let slice: String = chars[i..i + 11].iter().collect();
+            if slice.to_lowercase().starts_with("href=\"javascript:") ||
+               slice.to_lowercase().starts_with("src=\"javascript:") ||
+               slice.to_lowercase().starts_with("href='javascript:") ||
+               slice.to_lowercase().starts_with("src='javascript:") {
+                // Skip this attribute
+                while i < chars.len() && chars[i] != ' ' && chars[i] != '>' && chars[i] != '/' {
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
 #[cfg(test)]
 mod tests {
     use super::*;
