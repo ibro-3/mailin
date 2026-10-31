@@ -13,7 +13,7 @@
 use either::Either;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_imap::extensions::idle::IdleResponse;
@@ -22,13 +22,13 @@ use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
 use crate::account::{Account, AccountId, AuthMethod};
-use crate::client::{Event, Mailin};
+use crate::client::{ClientEvent, Event, Mailin};
 use crate::compose::OutgoingMessage;
 use crate::error::{Error, Result};
 use crate::imap::ImapSession;
 use crate::model::{
     Folder, FolderId, FolderRole, MessageId, OutboxEntry, OutboxState, OutgoingEnvelope,
-    ScheduledAction, SnoozePayload,
+    ScheduledAction, SnoozePayload, SyncStatus,
 };
 use crate::sync::{self, SyncMode};
 use secrecy::{ExposeSecret, SecretString};
@@ -66,6 +66,8 @@ impl Engine {
         let state = Arc::new(EngineState {
             mailbox,
             outbox: Arc::new(Notify::new()),
+            sync_status: Arc::new(RwLock::new(HashMap::new())),
+            last_sync_at: Arc::new(RwLock::new(HashMap::new())),
         });
         let (commands, receiver) = mpsc::unbounded_channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -232,6 +234,27 @@ impl Engine {
         });
     }
 
+    /// Get the current sync status for an account.
+    pub fn sync_status(&self, account_id: &AccountId) -> SyncStatus {
+        self.state
+            .sync_status
+            .read()
+            .unwrap()
+            .get(account_id)
+            .copied()
+            .unwrap_or(SyncStatus::Idle)
+    }
+
+    /// Get the last successful sync timestamp for an account.
+    pub fn last_sync_at(&self, account_id: &AccountId) -> Option<i64> {
+        self.state
+            .last_sync_at
+            .read()
+            .unwrap()
+            .get(account_id)
+            .copied()
+    }
+
     /// Store a message in the outbox and wake the sender.
     pub fn queue_and_send(
         &self,
@@ -277,6 +300,10 @@ impl Drop for Engine {
 struct EngineState {
     mailbox: Arc<Mailin>,
     outbox: Arc<Notify>,
+    /// Per-account sync status. Workers update this; UIs read via Mailin.
+    sync_status: Arc<RwLock<HashMap<AccountId, SyncStatus>>>,
+    /// Timestamp of the last successful sync per account.
+    last_sync_at: Arc<RwLock<HashMap<AccountId, i64>>>,
 }
 
 enum Command {
@@ -681,6 +708,14 @@ async fn account_worker(
                     account_id,
                     message: error.to_string(),
                 });
+                // Connection/TCP failures -> Offline, others -> Error
+                let is_offline = error.to_string().to_lowercase().contains("connection")
+                    || error.to_string().to_lowercase().contains("tcp")
+                    || error.to_string().to_lowercase().contains("timeout")
+                    || error.to_string().to_lowercase().contains("dns")
+                    || error.to_string().to_lowercase().contains("network");
+                let status = if is_offline { SyncStatus::Offline } else { SyncStatus::Error };
+                set_sync_status(&state, account_id, status);
                 tracing::warn!(%account_id, %error, "account session failed");
                 if started.elapsed() > Duration::from_secs(60) {
                     backoff = INITIAL_BACKOFF;
@@ -761,6 +796,7 @@ async fn run_session(
         Either::Right(t) => t.expose_secret(),
     };
     let mut session = ImapSession::connect(&account.imap, password_or_token, tls).await?;
+    set_sync_status(state, account.id, SyncStatus::Syncing);
     let remote = session.list_folders().await?;
     sync::refresh_folders(&state.mailbox, account.id, &remote)?;
 
@@ -771,6 +807,8 @@ async fn run_session(
         let mode = initial_mode(&inbox);
         sync_folder_logged(&mut session, state, inbox.id, mode).await;
     }
+    set_sync_status(state, account.id, SyncStatus::Connected);
+    set_last_sync_at(state, account.id, crate::now_unix());
 
     let mut last_full = Instant::now();
 
@@ -1724,6 +1762,28 @@ fn initial_mode(folder: &Folder) -> SyncMode {
     } else {
         SyncMode::Incremental
     }
+}
+
+/// Update the sync status for an account and emit the change event.
+fn set_sync_status(state: &Arc<EngineState>, account_id: AccountId, status: SyncStatus) {
+    let mut guard = state.sync_status.write().unwrap();
+    let changed = guard.get(&account_id).map_or(true, |old| *old != status);
+    if changed {
+        guard.insert(account_id, status);
+        state.mailbox.publish(ClientEvent::SyncStatusChanged {
+            account_id,
+            status,
+        });
+    }
+}
+
+/// Update the last successful sync timestamp for an account.
+fn set_last_sync_at(state: &Arc<EngineState>, account_id: AccountId, timestamp: i64) {
+    state
+        .last_sync_at
+        .write()
+        .unwrap()
+        .insert(account_id, timestamp);
 }
 
 async fn outbox_sender(state: Arc<EngineState>) {

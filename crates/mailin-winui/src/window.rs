@@ -29,6 +29,7 @@ use windows_core::{EventRevoker, Interface};
 use crate::account_dialog;
 use crate::app::AppState;
 use crate::compose;
+use crate::design_tokens;
 use crate::format;
 use crate::move_dialog;
 use crate::platform;
@@ -127,6 +128,8 @@ struct Widgets {
     outbox_retry_button: Button,
     outbox_discard_button: Button,
     outbox_edit_button: Button,
+    /// Sync status indicator (colored dot + text)
+    sync_status: TextBlock,
     /// Keyboard shortcuts help window (created on demand)
     shortcuts_window: std::cell::RefCell<Option<Window>>,
 }
@@ -1961,6 +1964,7 @@ impl MainWindow {
         let mut account_error = None;
         let mut new_messages = Vec::new();
         let mut outbox_changed = false;
+        let mut sync_status_update = None;
 
         {
             let mut events = events.lock().unwrap_or_else(|error| error.into_inner());
@@ -1980,6 +1984,12 @@ impl MainWindow {
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                     Ok(Event::OutboxChanged) => outbox_changed = true,
                     Ok(Event::AccountError { message, .. }) => account_error = Some(message),
+                    Ok(Event::SyncStatusChanged { account_id, status }) => {
+                        let state = self.state();
+                        if state.selection.account == Some(account_id) {
+                            sync_status_update = Some(status);
+                        }
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Lagged(_)) => {
                         // A slow UI is allowed to miss events: refresh everything
@@ -2036,6 +2046,19 @@ impl MainWindow {
         if let Some(message) = account_error {
             self.show_error(&message);
         }
+        if let Some(status) = sync_status_update {
+            let (text, brush) = match status {
+                mailin_core::model::SyncStatus::Idle => ("Idle", design_tokens::tokens().text_muted_brush().ok()),
+                mailin_core::model::SyncStatus::Syncing => ("Syncing…", design_tokens::tokens().accent_brush().ok()),
+                mailin_core::model::SyncStatus::Connected => ("Connected", design_tokens::tokens().success_brush().ok()),
+                mailin_core::model::SyncStatus::Offline => ("Offline", design_tokens::tokens().warning_brush().ok()),
+                mailin_core::model::SyncStatus::Error => ("Error", design_tokens::tokens().error_brush().ok()),
+            };
+            let _ = self.widgets.sync_status.SetText(text);
+            if let Some(brush) = brush {
+                let _ = self.widgets.sync_status.SetForeground(&brush);
+            }
+        }
     }
 
     // -------------------------------------------------------------- actions
@@ -2076,6 +2099,11 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let edit_account = ui::button("Edit account", Some("Edit account"), Some("Edit the selected account"))?;
     let compose = ui::button("Compose", Some("Compose"), Some("Create a new message (Ctrl+N)"))?;
     let sync = ui::button("Sync", Some("Sync"), Some("Synchronize mail (F5)"))?;
+    let sync_status = ui::text("Idle")?;
+    ui::margin_left(&sync_status, 8.0)?;
+    ui::vertical_alignment_center(&sync_status)?;
+    // Accessibility: live region so screen readers announce status changes
+    AutomationProperties::SetLiveSetting(&sync_status, mailin_winui_sys::AutomationLiveSetting::Polite)?;
     let spacer = ui::text("")?;
     ui::stretch_horizontal(&spacer)?;
     let search = ui::text_box("Search mail", Some("Search mail"))?;
@@ -2089,6 +2117,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::append(&toolbar, &edit_account)?;
     ui::append(&toolbar, &compose)?;
     ui::append(&toolbar, &sync)?;
+    ui::append(&toolbar, &sync_status)?;
     ui::append(&toolbar, &spacer)?;
     ui::append(&toolbar, &search)?;
     ui::append(&toolbar, &search_button)?;
@@ -2423,6 +2452,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             outbox_retry_button,
             outbox_discard_button,
             outbox_edit_button,
+            sync_status,
             shortcuts_window: std::cell::RefCell::new(None),
         },
     });

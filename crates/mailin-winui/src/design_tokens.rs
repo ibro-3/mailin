@@ -13,6 +13,16 @@ pub struct Colors {
     pub destructive: &'static str,
     /// Subtitle/text secondary opacity (0.0-1.0)
     pub subtitle_opacity: f64,
+    /// Muted text color
+    pub text_muted: &'static str,
+    /// Accent/primary color
+    pub accent: &'static str,
+    /// Success/positive color
+    pub success: &'static str,
+    /// Warning color
+    pub warning: &'static str,
+    /// Error/negative color
+    pub error: &'static str,
 }
 
 impl Colors {
@@ -21,6 +31,11 @@ impl Colors {
         Self {
             destructive: "#C42B1C",
             subtitle_opacity: 0.7,
+            text_muted: "#6B6B6B",
+            accent: "#0067C0",
+            success: "#107C10",
+            warning: "#CC7700",
+            error: "#C42B1C",
         }
     }
 
@@ -29,6 +44,11 @@ impl Colors {
         Self {
             destructive: "#FF0000",
             subtitle_opacity: 1.0,
+            text_muted: "#808080",
+            accent: "#0066CC",
+            success: "#008000",
+            warning: "#CC6600",
+            error: "#FF0000",
         }
     }
 }
@@ -191,6 +211,31 @@ impl DesignTokens {
     /// Get the destructive color brush.
     pub fn destructive_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.destructive)
+    }
+
+    /// Get the muted text color brush.
+    pub fn text_muted_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.text_muted)
+    }
+
+    /// Get the accent color brush.
+    pub fn accent_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.accent)
+    }
+
+    /// Get the success color brush.
+    pub fn success_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.success)
+    }
+
+    /// Get the warning color brush.
+    pub fn warning_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.warning)
+    }
+
+    /// Get the error color brush.
+    pub fn error_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.error)
     }
 
     /// Get a FontWeight for semi-bold.

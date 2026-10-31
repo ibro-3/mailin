@@ -133,6 +133,55 @@ impl FromStr for FolderRole {
     }
 }
 
+/// Sync status for an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncStatus {
+    /// No sync operation in progress.
+    Idle,
+    /// Actively synchronizing folders/messages.
+    Syncing,
+    /// Last sync completed successfully.
+    Connected,
+    /// Network/connection failure (offline).
+    Offline,
+    /// Sync failed with an error message.
+    Error,
+}
+
+impl Default for SyncStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+impl SyncStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Syncing => "syncing",
+            Self::Connected => "connected",
+            Self::Offline => "offline",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl FromStr for SyncStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, ()> {
+        Ok(match value {
+            "idle" => Self::Idle,
+            "syncing" => Self::Syncing,
+            "connected" => Self::Connected,
+            "offline" => Self::Offline,
+            "error" => Self::Error,
+            _ => return Err(()),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Folder {
     pub id: FolderId,

@@ -132,6 +132,25 @@ fn install_css() {
            background-color: alpha(@accent_color, 0.16);\
            border-radius: 8px;\
            padding: 6px;\
+         }\
+         @keyframes spin {\
+           to { transform: rotate(360deg); }\
+         }\
+         .sync-status-idle {\
+           color: @disabled_text_color;\
+         }\
+         .sync-status-syncing {\
+           color: @accent_color;\
+           animation: spin 1s linear infinite;\
+         }\
+         .sync-status-connected {\
+           color: @success_color;\
+         }\
+         .sync-status-offline {\
+           color: @warning_color;\
+         }\
+         .sync-status-error {\
+           color: @error_color;\
          }",
     );
     gtk::style_context_add_provider_for_display(

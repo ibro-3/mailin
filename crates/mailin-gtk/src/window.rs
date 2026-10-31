@@ -101,6 +101,7 @@ struct Widgets {
     reply_button: gtk::Button,
     reply_all_button: gtk::Button,
     forward_button: gtk::Button,
+    sync_status: gtk::Image,
 }
 
 /// An attachment whose bytes are needed before the save dialog can open.
@@ -187,7 +188,14 @@ impl MainWindow {
             .width_chars(18)
             .build();
         let sync_button = icon_button("view-refresh-symbolic", "Synchronize now (F5)");
+        
+        // Sync status indicator
+        let sync_status = gtk::Image::new();
+        sync_status.add_css_class("sync-status-idle");
+        sync_status.set_tooltip_text(Some("Sync status: Idle"));
+        
         header.pack_end(&sync_button);
+        header.pack_end(&sync_status);
         header.pack_end(&search);
 
         // ---------------------------------------------------------- sidebar
@@ -598,6 +606,7 @@ impl MainWindow {
                 reply_button,
                 reply_all_button,
                 forward_button,
+                sync_status,
             },
         });
 
@@ -2642,6 +2651,27 @@ impl MainWindow {
                     // Scheduled action completed, refresh folders and messages
                     folders_changed = true;
                     messages_changed = true;
+                }
+                Ok(ClientEvent::SyncStatusChanged { account_id, status }) => {
+                    // Update sync status indicator for the currently selected account
+                    let selection = self.selection.borrow();
+                    if selection.account == Some(account_id) {
+                        let sync_status = &self.widgets.sync_status;
+                        let (css_class, tooltip) = match status {
+                            mailin_core::model::SyncStatus::Idle => ("sync-status-idle", "Sync status: Idle"),
+                            mailin_core::model::SyncStatus::Syncing => ("sync-status-syncing", "Sync status: Syncing..."),
+                            mailin_core::model::SyncStatus::Connected => ("sync-status-connected", "Sync status: Connected"),
+                            mailin_core::model::SyncStatus::Offline => ("sync-status-offline", "Sync status: Offline"),
+                            mailin_core::model::SyncStatus::Error => ("sync-status-error", "Sync status: Error"),
+                        };
+                        sync_status.remove_css_class("sync-status-idle");
+                        sync_status.remove_css_class("sync-status-syncing");
+                        sync_status.remove_css_class("sync-status-connected");
+                        sync_status.remove_css_class("sync-status-offline");
+                        sync_status.remove_css_class("sync-status-error");
+                        sync_status.add_css_class(css_class);
+                        sync_status.set_tooltip_text(Some(tooltip));
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {

@@ -64,6 +64,11 @@ pub enum Event {
         account_id: AccountId,
         message: String,
     },
+    /// Sync status changed for an account.
+    SyncStatusChanged {
+        account_id: AccountId,
+        status: crate::model::SyncStatus,
+    },
 }
 
 /// Backward compatibility alias for front-ends that imported `client::Event as ClientEvent`.
@@ -303,6 +308,20 @@ impl Mailin {
             total += self.store.unread_total(&account.id)?;
         }
         Ok(total)
+    }
+
+    // ----------------------------------------------------------------- sync status
+
+    /// Get the current sync status for an account.
+    pub fn sync_status(&self, account: &AccountId) -> crate::model::SyncStatus {
+        // This is a synchronous read; the engine updates the store asynchronously.
+        // For now, return Idle; the Engine's sync_status method provides the real value.
+        crate::model::SyncStatus::Idle
+    }
+
+    /// Get the last successful sync timestamp for an account.
+    pub fn last_sync_at(&self, account: &AccountId) -> Option<i64> {
+        None
     }
 
     // ------------------------------------------------------------------ outbox
