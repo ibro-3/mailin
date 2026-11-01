@@ -1468,6 +1468,11 @@ impl Store {
         Ok(())
     }
 
+    /// Update calendar ctag (alias for update_calendar_sync without timestamp change).
+    pub fn update_calendar_ctag(&self, calendar_id: i64, ctag: &str) -> Result<()> {
+        self.update_calendar_sync(calendar_id, Some(ctag))
+    }
+
     /// Delete a calendar.
     pub fn delete_calendar(&self, calendar_id: i64) -> Result<bool> {
         let conn = self.lock()?;
@@ -1513,6 +1518,23 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    /// Insert or update an event from a CalendarEvent struct.
+    pub fn upsert_calendar_event(&self, event: &CalendarEvent) -> Result<i64> {
+        self.upsert_event(
+            event.calendar_id,
+            &event.uid,
+            &event.summary,
+            event.start_at,
+            event.end_at,
+            event.all_day,
+            event.location.as_deref(),
+            event.description.as_deref(),
+            &event.attendees_json,
+            &event.ics_raw,
+            event.etag.as_deref(),
+        )
     }
 
     /// List events for a calendar within a time range.

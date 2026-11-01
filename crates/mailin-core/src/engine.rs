@@ -176,6 +176,11 @@ impl Engine {
         self.send(Command::EmptyTrash(account_id));
     }
 
+    /// Sync calendars for an account using CalDAV.
+    pub fn sync_calendars(&self, account_id: AccountId) {
+        self.send(Command::SyncCalendars(account_id));
+    }
+
     /// Append or replace a draft in the account's Drafts folder. Reusing
     /// `draft.draft_key` means auto-saves overwrite the previous copy.
     pub fn save_draft(&self, account_id: AccountId, draft: OutgoingMessage) {
@@ -407,6 +412,7 @@ enum Command {
         folder_id: FolderId,
         subscribe: bool,
     },
+    SyncCalendars(AccountId),
     Shutdown,
 }
 
@@ -485,6 +491,7 @@ enum WorkerCommand {
         folder_id: FolderId,
         subscribe: bool,
     },
+    SyncCalendars,
     Stop,
 }
 
@@ -515,6 +522,10 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                     let worker = ensure_worker(&mut workers, &state, account_id);
                     let _ = worker.send(WorkerCommand::SyncFolder(folder_id));
                 }
+            }
+            Command::SyncCalendars(account_id) => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::SyncCalendars);
             }
             Command::FetchBody(message_id) => {
                 if let Some(account_id) = account_for_message(&state, message_id) {
@@ -1078,6 +1089,9 @@ async fn handle_command(
                 let mode = initial_mode(&folder);
                 sync_folder_logged(session, state, folder_id, mode).await;
             }
+        }
+        WorkerCommand::SyncCalendars => {
+            sync_calendars(session, state, account).await?;
         }
         WorkerCommand::FetchBody(message_id) => {
             fetch_body(session, state, message_id, false).await?;
@@ -1987,6 +2001,97 @@ fn set_last_sync_at(state: &Arc<EngineState>, account_id: AccountId, timestamp: 
         .write()
         .unwrap()
         .insert(account_id, timestamp);
+}
+
+/// Sync calendars for an account using CalDAV.
+async fn sync_calendars(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+) -> Result<()> {
+    use crate::caldav::{CalDavClient, parse_ical_event};
+
+    // Check if the account has CalDAV settings
+    let caldav_url = account.caldav_url.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let caldav_username = account.caldav_username.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let caldav_password = account.caldav_password.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    let (Some(url), Some(username), Some(password)) = (caldav_url, caldav_username, caldav_password) else {
+        // No CalDAV configured, skip silently
+        return Ok(());
+    };
+
+    let client = CalDavClient::new(url, username, password);
+
+    // Discover calendar home
+    let home_url = match client.discover_calendar_home() {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!(account = %account.email, %error, "CalDAV calendar home discovery failed");
+            return Ok(());
+        }
+    };
+
+    // List calendars
+    let calendars = match client.list_calendars(&home_url) {
+        Ok(calendars) => calendars,
+        Err(error) => {
+            tracing::warn!(account = %account.email, %error, "CalDAV calendar listing failed");
+            return Ok(());
+        }
+    };
+
+    for calendar in calendars {
+        // Get or create calendar in local store
+        let cal_id = match state.mailbox.store().upsert_calendar(
+            &account.id,
+            &calendar.href,
+            &calendar.display_name,
+            calendar.color.as_deref(),
+            calendar.ctag.as_deref(),
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(account = %account.email, %error, "could not upsert calendar");
+                continue;
+            }
+        };
+
+        // Sync events
+        let events = match client.sync_calendar(&calendar.href, calendar.ctag.as_deref()) {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(account = %account.email, calendar = %calendar.display_name, %error, "CalDAV calendar sync failed");
+                continue;
+            }
+        };
+
+        for event_info in events {
+            let event = match parse_ical_event(&event_info.ical, cal_id) {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::debug!(%error, "could not parse iCal event");
+                    continue;
+                }
+            };
+
+            let mut event = event;
+            event.etag = Some(event_info.etag);
+
+            if let Err(error) = state.mailbox.store().upsert_calendar_event(&event) {
+                tracing::warn!(%error, "could not upsert calendar event");
+            }
+        }
+
+        // Update ctag if we got one from the sync
+        if let Some(ref new_ctag) = calendar.ctag {
+            if let Err(error) = state.mailbox.store().update_calendar_ctag(cal_id, new_ctag) {
+                tracing::debug!(%error, "could not update calendar ctag");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn outbox_sender(state: Arc<EngineState>) {

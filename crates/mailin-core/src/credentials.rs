@@ -34,6 +34,15 @@ pub trait CredentialsStore: Send + Sync {
 
     /// Remove the armored secret key identified by `fingerprint`.
     fn delete_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<()>;
+
+    /// Store the CalDAV password for an account.
+    fn set_caldav_password(&self, account: &AccountId, secret: &SecretString) -> Result<()>;
+
+    /// Load the CalDAV password for an account.
+    fn get_caldav_password(&self, account: &AccountId) -> Result<Option<SecretString>>;
+
+    /// Remove the CalDAV password for an account.
+    fn delete_caldav_password(&self, account: &AccountId) -> Result<()>;
 }
 
 /// In-memory store for tests and for `--self-test` runs.
@@ -41,6 +50,7 @@ pub trait CredentialsStore: Send + Sync {
 pub struct MemoryCredentials {
     secrets: Mutex<HashMap<AccountId, SecretString>>,
     pgp_secrets: Mutex<HashMap<(AccountId, String), SecretString>>,
+    caldav_secrets: Mutex<HashMap<AccountId, SecretString>>,
 }
 
 impl MemoryCredentials {
@@ -95,6 +105,20 @@ impl CredentialsStore for MemoryCredentials {
     fn delete_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<()> {
         self.pgp_guard()?
             .remove(&(*account, fingerprint.to_owned()));
+        Ok(())
+    }
+
+    fn set_caldav_password(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
+        self.caldav_secrets.lock().map_err(|_| Error::LockPoisoned)?.insert(*account, secret.clone());
+        Ok(())
+    }
+
+    fn get_caldav_password(&self, account: &AccountId) -> Result<Option<SecretString>> {
+        Ok(self.caldav_secrets.lock().map_err(|_| Error::LockPoisoned)?.get(account).cloned())
+    }
+
+    fn delete_caldav_password(&self, account: &AccountId) -> Result<()> {
+        self.caldav_secrets.lock().map_err(|_| Error::LockPoisoned)?.remove(account);
         Ok(())
     }
 }
@@ -196,6 +220,34 @@ impl CredentialsStore for KeyringCredentials {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(Error::Credentials(e.to_string())),
         }
+    }
+
+    fn set_caldav_password(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
+        self.entry_caldav(account)?
+            .set_password(secret.expose_secret())
+            .map_err(|e| Error::Credentials(e.to_string()))
+    }
+
+    fn get_caldav_password(&self, account: &AccountId) -> Result<Option<SecretString>> {
+        match self.entry_caldav(account)?.get_password() {
+            Ok(secret) => Ok(Some(SecretString::new(secret.into()))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(Error::Credentials(e.to_string())),
+        }
+    }
+
+    fn delete_caldav_password(&self, account: &AccountId) -> Result<()> {
+        match self.entry_caldav(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(Error::Credentials(e.to_string())),
+        }
+    }
+}
+
+impl KeyringCredentials {
+    fn entry_caldav(&self, account: &AccountId) -> Result<keyring::Entry> {
+        keyring::Entry::new(&self.service, &format!("{}:caldav", account))
+            .map_err(|e| Error::Credentials(e.to_string()))
     }
 }
 

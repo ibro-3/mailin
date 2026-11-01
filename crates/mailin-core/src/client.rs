@@ -461,6 +461,23 @@ impl Mailin {
             .unwrap_or(false)
     }
 
+    /// Store the CalDAV password for an account in the keyring.
+    pub fn set_caldav_password(&self, account: &AccountId, password: &str) -> Result<()> {
+        self.credentials.set_caldav_password(account, &SecretString::new(password.into()))
+    }
+
+    /// Load the CalDAV password for an account from the keyring.
+    pub fn get_caldav_password(&self, account: &AccountId) -> Result<Option<String>> {
+        self.credentials
+            .get_caldav_password(account)
+            .map(|opt| opt.map(|s| s.expose_secret().to_owned()))
+    }
+
+    /// Remove the CalDAV password for an account from the keyring.
+    pub fn delete_caldav_password(&self, account: &AccountId) -> Result<()> {
+        self.credentials.delete_caldav_password(account)
+    }
+
     /// Build an outgoing message, applying PGP options. Returns the wire bytes
     /// and the SMTP envelope.
     pub fn build_outgoing(

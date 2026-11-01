@@ -223,6 +223,15 @@ pub struct Account {
     /// rendered for this account.
     #[serde(default)]
     pub remote_allowed_domains: Vec<String>,
+    /// CalDAV server URL (e.g., https://caldav.example.com/).
+    #[serde(default)]
+    pub caldav_url: Option<String>,
+    /// CalDAV username (if different from email).
+    #[serde(default)]
+    pub caldav_username: Option<String>,
+    /// CalDAV password (stored in keyring, not in config).
+    #[serde(skip)]
+    pub caldav_password: Option<String>,
 }
 
 impl Account {
@@ -241,6 +250,9 @@ impl Account {
             sync: AccountSyncSettings::default(),
             signature: String::new(),
             remote_allowed_domains: Vec::new(),
+            caldav_url: None,
+            caldav_username: None,
+            caldav_password: None,
         }
     }
 
