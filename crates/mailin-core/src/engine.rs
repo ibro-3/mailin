@@ -63,7 +63,7 @@ impl Engine {
     pub fn start(mailbox: Arc<Mailin>) -> Result<Self> {
         crate::tls::install_crypto_provider();
 
-        let state = Arc::new(EngineState {
+        let mut state = Arc::new(EngineState {
             mailbox: Arc::clone(&mailbox),
             outbox: Arc::new(Notify::new()),
             sync_status: Arc::new(RwLock::new(HashMap::new())),
@@ -81,7 +81,7 @@ impl Engine {
         // Initialize plugin system
         let data_dir = mailbox.store().data_dir();
         let plugin_system = runtime.block_on(async {
-            match crate::plugins::init_plugin_system(Arc::clone(&mailbox.store()), &data_dir).await {
+            match crate::plugins::init_plugin_system(mailbox.store(), &data_dir).await {
                 Ok(sys) => Some(sys),
                 Err(e) => {
                     tracing::warn!(%e, "Failed to initialize plugin system");
@@ -92,7 +92,7 @@ impl Engine {
 
         // Set plugin system on Mailin
         if let Some(ref sys) = plugin_system {
-            mailbox.set_plugin_system(Arc::clone(sys));
+            runtime.block_on(mailbox.set_plugin_system(Arc::clone(sys)));
         }
 
         // Store plugin system in state

@@ -260,6 +260,20 @@ pub fn on_selection_changed(
     Ok(selector.SelectionChanged(move |_, _| handler())?)
 }
 
+/// Attach a `Toggled` handler to a ToggleSwitch.
+pub fn on_toggle(
+    toggle: &mailin_winui_sys::ToggleSwitch,
+    handler: impl Fn(bool) + 'static,
+) -> Result<EventRevoker> {
+    let toggle: mailin_winui_sys::IToggleSwitch = toggle.cast()?;
+    Ok(toggle.Toggled(move |_, args| {
+        if let Ok(args) = args {
+            handler(args.IsOn().unwrap_or(false));
+        }
+        Ok(())
+    })?)
+}
+
 /// Create a vertically or horizontally stacked panel with a uniform gap.
 pub fn stack(orientation: Orientation, spacing: f64) -> Result<StackPanel> {
     let panel = StackPanel::new().context("could not create a stack panel")?;

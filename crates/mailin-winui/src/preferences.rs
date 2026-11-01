@@ -70,6 +70,8 @@ pub fn show_preferences(
     ui::append(&main_panel, &accounts_panel)?;
     let encryption_panel = create_encryption_section(state, events)?;
     ui::append(&main_panel, &encryption_panel)?;
+    let plugins_panel = create_plugins_section(state, events)?;
+    ui::append(&main_panel, &plugins_panel)?;
 
     ui::set_content(&dialog, &main_panel).context("could not attach the preferences content")?;
     dialog
@@ -423,6 +425,65 @@ fn create_encryption_section(state: &Arc<AppState>, events: &ui::Revokers) -> Re
             {
                 tracing::error!(%failure, "could not open the PGP key manager");
             }
+        })?);
+    }
+    Ok(panel)
+}
+
+fn create_plugins_section(state: &Arc<AppState>, events: &ui::Revokers) -> Result<StackPanel> {
+    let panel = ui::stack_md(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&panel, &ui::heading3("Plugins")?)?;
+    ui::append(
+        &panel,
+        &ui::body_text("Lua plugins extend Mailin with custom functionality. Enable or disable plugins here.")?,
+    )?;
+
+    let state_clone = Arc::clone(state);
+    let events_clone = events.clone();
+    let panel_clone = panel.clone();
+    
+    // Load plugins asynchronously
+    let state_for_load = Arc::clone(state);
+    let panel_for_load = panel.clone();
+    
+    // Since we can't easily do async here, we'll load plugins synchronously for now
+    // In a full implementation, this would be async
+    let plugins = state_for_load.mailin.list_plugins_blocking().unwrap_or_default();
+    
+    if plugins.is_empty() {
+        ui::append(
+            &panel,
+            &ui::body_text("No plugins installed. Place plugin directories in the plugins folder to install them.")?,
+        )?;
+        return Ok(panel);
+    }
+
+    for plugin in plugins {
+        let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+        let labels = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+        ui::append(&labels, &ui::body_text(&plugin.name)?)?;
+        ui::append(
+            &labels,
+            &ui::caption(&format!("v{} · {}", plugin.version, plugin.source_path))?,
+        )?;
+        ui::stretch_horizontal(&labels)?;
+        ui::append(&row, &labels)?;
+
+        let toggle = mailin_winui_sys::ToggleSwitch::new().context("could not create toggle")?;
+        toggle.SetIsOn(plugin.enabled)?;
+        let toggle_element: mailin_winui_sys::FrameworkElement = toggle.cast()?;
+        toggle_element.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
+        ui::append(&row, &toggle)?;
+        ui::append(&panel, &row)?;
+
+        let state = Arc::clone(state);
+        let name = plugin.name.clone();
+        events_clone.keep(ui::on_toggle(&toggle, move |enabled| {
+            let state = state.clone();
+            let name = name.clone();
+            // Use a simple thread pool or async runtime to call the async function
+            // For now, we'll use a blocking call
+            let _ = state.mailin.set_plugin_enabled_blocking(&name, enabled);
         })?);
     }
     Ok(panel)

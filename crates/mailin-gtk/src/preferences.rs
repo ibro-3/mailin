@@ -418,6 +418,57 @@ pub fn show_preferences(
     encryption_page.add(&pgp_group);
     dialog.add(&encryption_page);
 
+    // Plugins page: manage Lua plugins.
+    let plugins_page = adw::PreferencesPage::new();
+    plugins_page.set_title("Plugins");
+    plugins_page.set_icon_name(Some("application-x-addon-symbolic"));
+
+    let plugins_group = adw::PreferencesGroup::builder()
+        .title("Installed Plugins")
+        .description("Lua plugins extend Mailin with custom functionality. Enable or disable plugins here.")
+        .build();
+
+    // Load plugins asynchronously and populate the group
+    let app_for_plugins = Rc::clone(app);
+    let group_for_plugins = plugins_group.clone();
+    gtk::glib::spawn_future_local(async move {
+        let plugins = app_for_plugins.mailin.list_plugins().await;
+        if plugins.is_empty() {
+            let row = adw::ActionRow::builder()
+                .title("No plugins installed")
+                .subtitle("Place plugin directories in the plugins folder to install them.")
+                .build();
+            group_for_plugins.add(&row);
+        } else {
+            for plugin in plugins {
+                let row = adw::ActionRow::builder()
+                    .title(gtk::glib::markup_escape_text(&plugin.name))
+                    .subtitle(gtk::glib::markup_escape_text(&format!("v{} · {}", plugin.version, plugin.source_path)))
+                    .build();
+                let toggle = gtk::Switch::new();
+                toggle.set_active(plugin.enabled);
+                toggle.set_valign(gtk::Align::Center);
+                row.add_suffix(&toggle);
+
+                let app = app_for_plugins.clone();
+                let name = plugin.name.clone();
+                toggle.connect_state_set(move |_, enabled| {
+                    let app = app.clone();
+                    let name = name.clone();
+                    gtk::glib::spawn_future_local(async move {
+                        let _ = app.mailin.set_plugin_enabled(&name, enabled).await;
+                    });
+                    gtk::glib::Propagation::Proceed
+                });
+
+                group_for_plugins.add(&row);
+            }
+        }
+    });
+
+    plugins_page.add(&plugins_group);
+    dialog.add(&plugins_page);
+
     // Validate, persist and hand the new configuration back to the window.
     dialog.connect_closed({
         let config = config.clone();

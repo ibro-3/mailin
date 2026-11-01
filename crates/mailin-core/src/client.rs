@@ -480,18 +480,18 @@ impl Mailin {
     }
 
     /// Get the plugin system for managing Lua plugins.
-    pub fn plugin_system(&self) -> Option<Arc<crate::plugins::PluginSystem>> {
-        self.plugin_system.read().unwrap().clone()
+    pub async fn plugin_system(&self) -> Option<Arc<crate::plugins::PluginSystem>> {
+        self.plugin_system.read().await.clone()
     }
 
     /// Set the plugin system (called by Engine after initialization).
-    pub(crate) fn set_plugin_system(&self, system: Arc<crate::plugins::PluginSystem>) {
-        *self.plugin_system.write().unwrap() = Some(system);
+    pub async fn set_plugin_system(&self, system: Arc<crate::plugins::PluginSystem>) {
+        *self.plugin_system.write().await = Some(system);
     }
 
     /// List all loaded plugins.
     pub async fn list_plugins(&self) -> Vec<Plugin> {
-        if let Some(sys) = self.plugin_system() {
+        if let Some(sys) = self.plugin_system().await {
             sys.list_plugins().await
         } else {
             Vec::new()
@@ -500,7 +500,7 @@ impl Mailin {
 
     /// Enable/disable a plugin.
     pub async fn set_plugin_enabled(&self, name: &str, enabled: bool) -> Result<()> {
-        if let Some(sys) = self.plugin_system() {
+        if let Some(sys) = self.plugin_system().await {
             sys.set_enabled(name, enabled).await
         } else {
             Ok(())
@@ -509,11 +509,23 @@ impl Mailin {
 
     /// Unload a plugin.
     pub async fn unload_plugin(&self, name: &str) -> Result<()> {
-        if let Some(sys) = self.plugin_system() {
+        if let Some(sys) = self.plugin_system().await {
             sys.unload(name).await
         } else {
             Ok(())
         }
+    }
+
+    /// List all loaded plugins (blocking version).
+    pub fn list_plugins_blocking(&self) -> Vec<Plugin> {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(self.list_plugins())
+    }
+
+    /// Enable/disable a plugin (blocking version).
+    pub fn set_plugin_enabled_blocking(&self, name: &str, enabled: bool) -> Result<()> {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(self.set_plugin_enabled(name, enabled))
     }
 
     /// Build an outgoing message, applying PGP options. Returns the wire bytes

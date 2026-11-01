@@ -48,7 +48,8 @@ pub use model::{
     AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
     MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, PgpKey, PgpMime, PgpMimeKind, Plugin, Rule, RuleAction, RuleCondition,
     ScheduledAction, SignatureStatus, SnoozePayload, SyncStatus, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
-}
+};
+
 pub use plugins::PluginSystem;
 pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use store::{FolderUpsert, Store};
