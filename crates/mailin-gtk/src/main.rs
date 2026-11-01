@@ -7,6 +7,7 @@ mod compose;
 mod format;
 mod html;
 mod move_dialog;
+mod platform;
 mod preferences;
 mod window;
 
