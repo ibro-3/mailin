@@ -36,6 +36,10 @@ const SEARCH_DELAY: Duration = Duration::from_millis(250);
 const SEARCH_LIMIT: u32 = 200;
 const MAX_PAGE: u32 = 1_000;
 
+/// Responsive breakpoints (in CSS pixels, matching WinUI).
+const BREAKPOINT_MOBILE: f64 = 720.0;
+const BREAKPOINT_TABLET: f64 = 1024.0;
+
 #[derive(Debug, Default)]
 struct Selection {
     account: Option<AccountId>,
@@ -53,6 +57,19 @@ struct Selection {
     search_all_mail: bool,
     /// Number of headers requested for the current folder.
     limit: u32,
+    /// Current window width for responsive layout.
+    window_width: f64,
+    /// Whether we're in mobile layout (stack navigation).
+    is_mobile: bool,
+    /// Navigation stack for mobile message list -> reader navigation.
+    nav_stack: Vec<NavTarget>,
+}
+
+/// Navigation target for mobile stack navigation.
+#[derive(Debug, Clone)]
+enum NavTarget {
+    MessageList,
+    MessageReader(MessageId),
 }
 
 struct Widgets {
@@ -106,6 +123,12 @@ struct Widgets {
     reply_all_button: gtk::Button,
     forward_button: gtk::Button,
     sync_status: gtk::Image,
+    /// Hamburger button for mobile responsive layout.
+    hamburger_button: gtk::Button,
+    /// Back button for mobile navigation (reader -> message list).
+    back_button: gtk::Button,
+    /// Paned widget for message list / reader split.
+    split: adw::OverlaySplitView,
 }
 
 /// An attachment whose bytes are needed before the save dialog can open.
@@ -185,6 +208,24 @@ impl MainWindow {
             sidebar_toggle.update_property(&[Property::Label("Toggle folders")]);
         }
         header.pack_start(&sidebar_toggle);
+
+        // Hamburger button for mobile responsive layout
+        let hamburger_button = gtk::Button::builder()
+            .icon_name("open-menu-symbolic")
+            .tooltip_text("Menu")
+            .build();
+        hamburger_button.add_css_class("flat");
+        hamburger_button.set_visible(false); // Hidden by default, shown on mobile
+        header.pack_start(&hamburger_button);
+
+        // Back button for mobile navigation (message reader -> message list)
+        let back_button = gtk::Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back")
+            .build();
+        back_button.add_css_class("flat");
+        back_button.set_visible(false); // Hidden by default, shown on mobile when in reader view
+        header.pack_start(&back_button);
 
         let compose_button = icon_button("mail-message-new-symbolic", "New message (Ctrl+N)");
         header.pack_start(&compose_button);
@@ -629,6 +670,9 @@ impl MainWindow {
                 reply_all_button,
                 forward_button,
                 sync_status,
+                hamburger_button,
+                back_button,
+                split,
             },
         });
 
@@ -680,6 +724,48 @@ impl MainWindow {
             }
         });
         this.widgets.window.add_controller(key_controller);
+
+        // Responsive layout update function
+        let update_responsive_layout = {
+            let this = Rc::clone(this);
+            move || {
+                let width = this.widgets.window.default_width() as f64;
+                let is_mobile = width < BREAKPOINT_MOBILE;
+                let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
+                let is_desktop = width >= BREAKPOINT_TABLET;
+
+                let mut selection = this.selection.borrow_mut();
+                selection.window_width = width;
+                selection.is_mobile = is_mobile;
+
+                // Update hamburger button visibility
+                let hamburger = &this.widgets.hamburger_button;
+                hamburger.set_visible(is_mobile || is_tablet);
+
+                // Update responsive layout
+                if is_mobile {
+                    // Mobile: collapse sidebar and use navigation stack
+                    this.widgets.split.set_collapsed(true);
+                    this.widgets.split.set_show_sidebar(false);
+                } else if is_tablet {
+                    // Tablet: narrow sidebar, keep paned
+                    this.widgets.split.set_collapsed(false);
+                    this.widgets.split.set_show_sidebar(true);
+                    this.widgets.split.set_min_sidebar_width(200.0);
+                    this.widgets.split.set_max_sidebar_width(280.0);
+                } else {
+                    // Desktop: full layout
+                    this.widgets.split.set_collapsed(false);
+                    this.widgets.split.set_show_sidebar(true);
+                    this.widgets.split.set_min_sidebar_width(220.0);
+                    this.widgets.split.set_max_sidebar_width(320.0);
+                }
+            }
+        };
+
+        // Call it once initially
+        update_responsive_layout();
+
 
         // Account menu (edit/remove)
         let menu = gio::Menu::new();
@@ -848,6 +934,29 @@ impl MainWindow {
         this.widgets
             .message_menu_button
             .set_menu_model(Some(&message_menu));
+
+        // Hamburger button click handler (mobile sidebar toggle)
+        this.widgets.hamburger_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| {
+                let split = &this.widgets.split;
+                split.set_show_sidebar(!split.shows_sidebar());
+            }
+        });
+
+        // Back button click handler (mobile navigation: reader -> message list)
+        this.widgets.back_button.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| {
+                let mut selection = this.selection.borrow_mut();
+                if let Some(NavTarget::MessageReader(_)) = selection.nav_stack.pop() {
+                    // Go back to message list
+                    this.widgets.reader_stack.set_visible_child_name("list");
+                    let back_button = &this.widgets.back_button;
+                    back_button.set_visible(false);
+                }
+            }
+        });
 
         this.widgets.account_dropdown.connect_selected_notify({
             let this = Rc::clone(this);
@@ -2011,10 +2120,20 @@ impl MainWindow {
             return;
         }
 
+        let is_mobile = self.selection.borrow().is_mobile;
+
         self.selection.borrow_mut().message = Some(message.id);
         if self.remote_allowed.get() != Some(message.id) {
             self.remote_allowed.set(None);
         }
+
+        // Mobile: push to navigation stack and show back button
+        if is_mobile {
+            self.selection.borrow_mut().nav_stack.push(NavTarget::MessageReader(message.id));
+            let back_button = &self.widgets.back_button;
+            back_button.set_visible(true);
+        }
+
         self.widgets.reader_stack.set_visible_child_name("message");
         self.render_headers(message);
         self.render_attachments(message.id);
