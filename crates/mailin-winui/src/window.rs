@@ -17,10 +17,11 @@ use mailin_core::{
     html,
 };
 use mailin_winui_sys::{
-    Application, Button, CheckBox, ComboBox, ContentDialog, ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType,
-    IToggleButton, IXmlNodeSerializer, KeyboardAccelerator, Orientation, ResourceDictionary,
-    ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification, ToastNotificationManager,
-    ToastTemplateType, TypedEventHandler, VerticalAlignment, VirtualKey, VirtualKeyModifiers, Visibility, WebView2, Window, XamlRoot,
+    Application, Button, CheckBox, ComboBox, ContentDialog, ContentDialogButton, DispatcherQueue,
+    FrameworkElement, Grid, GridUnitType, IToggleButton, IXmlNodeSerializer, KeyboardAccelerator,
+    Orientation, ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox,
+    ToastNotification, ToastNotificationManager, ToastTemplateType, TypedEventHandler,
+    VerticalAlignment, VirtualKey, VirtualKeyModifiers, Visibility, WebView2, Window, XamlRoot,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -114,6 +115,9 @@ struct Widgets {
     remote_panel: StackPanel,
     remote_once: Button,
     remote_trust: Button,
+    pgp_panel: StackPanel,
+    pgp_status: TextBlock,
+    pgp_action: Button,
     attachments_panel: StackPanel,
     body_plain: ScrollViewer,
     body_text: TextBlock,
@@ -141,6 +145,8 @@ pub struct MainWindow {
     state: Mutex<State>,
     programmatic: AtomicBool,
     html_mode: AtomicBool,
+    /// Whether the current OpenPGP message has been unwrapped.
+    pgp_shown: AtomicBool,
     closed: AtomicBool,
     events: ui::Revokers,
     folder_events: ui::Revokers,
@@ -182,13 +188,14 @@ impl MainWindow {
             return;
         };
         // Use ToastGeneric template to support custom action buttons
-        let xml = match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastGeneric) {
-            Ok(xml) => xml,
-            Err(error) => {
-                tracing::warn!(%error, "failed to get the toast template");
-                return;
-            }
-        };
+        let xml =
+            match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastGeneric) {
+                Ok(xml) => xml,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to get the toast template");
+                    return;
+                }
+            };
 
         // Set up the visual content (title and body)
         let text_nodes = match xml.GetElementsByTagName("text") {
@@ -726,7 +733,7 @@ impl MainWindow {
         }
 
         let now = format::now_unix();
-        
+
         // Fetch thread roots
         let limit = self.state().selection.limit.max(self.page_size());
         let roots = match self.app.mailin.store().get_thread_roots(folder_id, limit) {
@@ -740,7 +747,7 @@ impl MainWindow {
         // Build flat list: roots + expanded replies
         let mut flat_messages = Vec::new();
         let expanded = self.state().expanded_threads.clone();
-        
+
         for root in &roots {
             flat_messages.push(root.clone());
             let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
@@ -946,6 +953,7 @@ impl MainWindow {
         }
         let _ = ui::set_visible(&self.widgets.reader_empty, false);
         let _ = ui::set_visible(&self.widgets.reader_content, true);
+        self.pgp_shown.store(false, Ordering::Relaxed);
         self.render_headers(&message);
         self.render_attachments(message.id);
         self.render_body(message.id);
@@ -1121,6 +1129,29 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.body_html, false);
         let _ = ui::set_visible(&self.widgets.remote_panel, false);
 
+        // OpenPGP messages are unwrapped on demand.
+        if let Ok(Some(pgp)) = self.app.mailin.pgp_mime(message_id) {
+            if self.pgp_shown.load(Ordering::Relaxed) {
+                self.decrypt_pgp_body(message_id);
+                return;
+            }
+            let encrypted = pgp.kind == mailin_core::PgpMimeKind::Encrypted;
+            let _ = self.widgets.pgp_status.SetText(if encrypted {
+                "This message is encrypted with OpenPGP. Decrypt it to read the content."
+            } else {
+                "This message is signed with OpenPGP. Verify it to check the signature and read the content."
+            });
+            let _ = ui::set_button_label(
+                &self.widgets.pgp_action,
+                if encrypted { "Decrypt" } else { "Verify" },
+            );
+            let _ = ui::set_enabled(&self.widgets.pgp_action, true);
+            let _ = ui::set_visible(&self.widgets.pgp_panel, true);
+            let _ = ui::set_enabled(&self.widgets.html_button, false);
+            return;
+        }
+        let _ = ui::set_visible(&self.widgets.pgp_panel, false);
+
         let Ok(body) = self.app.mailin.message_body(message_id) else {
             let _ = self
                 .widgets
@@ -1217,6 +1248,67 @@ impl MainWindow {
         }
     }
 
+    /// Decrypt or verify the selected message and show the unwrapped body.
+    fn decrypt_pgp_body(self: &Rc<Self>, message_id: MessageId) {
+        let html_mode = self.html_mode.load(Ordering::Relaxed);
+        let _ = ui::set_enabled(&self.widgets.pgp_action, false);
+        match self.app.mailin.decrypted_body(message_id) {
+            Ok((text, html, status)) => {
+                self.pgp_shown.store(true, Ordering::Relaxed);
+                let _ = self
+                    .widgets
+                    .pgp_status
+                    .SetText(&format!("OpenPGP signature: {}", signature_label(status)));
+                let _ = ui::set_visible(&self.widgets.pgp_action, false);
+
+                let has_text = text.as_deref().is_some_and(|text| !text.trim().is_empty());
+                let has_html = html.as_deref().is_some_and(|html| !html.trim().is_empty());
+                let want_html = has_html && html_mode;
+                let _ = ui::set_enabled(&self.widgets.html_button, has_html);
+                let _ = ui::set_button_label(
+                    &self.widgets.html_button,
+                    if want_html {
+                        "Show plain text"
+                    } else {
+                        "Show HTML"
+                    },
+                );
+
+                if want_html {
+                    let html_body = html.as_deref().unwrap_or_default();
+                    let dark = matches!(self.app.config().ui.theme, mailin_core::Theme::Dark);
+                    let document = html::document(html_body, false, dark, &[]);
+                    let _ = self.widgets.body_html.NavigateToString(&document);
+                    let _ = ui::set_visible(&self.widgets.body_html, true);
+                } else if has_text {
+                    let _ = self
+                        .widgets
+                        .body_text
+                        .SetText(text.as_deref().unwrap_or_default());
+                    let _ = ui::set_visible(&self.widgets.body_plain, true);
+                } else if has_html {
+                    let _ = self.widgets.body_text.SetText(
+                        "This message only provides an HTML body. Use the HTML button to show it.",
+                    );
+                    let _ = ui::set_visible(&self.widgets.body_plain, true);
+                } else {
+                    let _ = self
+                        .widgets
+                        .body_text
+                        .SetText("The decrypted message has no readable body.");
+                    let _ = ui::set_visible(&self.widgets.body_plain, true);
+                }
+            }
+            Err(error) => {
+                let _ = self
+                    .widgets
+                    .pgp_status
+                    .SetText(&format!("Could not open the message: {error}"));
+                let _ = ui::set_enabled(&self.widgets.pgp_action, true);
+            }
+        }
+    }
+
     /// `cid:` images from inline attachment data, ready for the HTML viewer.
     fn inline_images(&self, message_id: MessageId) -> Vec<(String, String)> {
         let attachments = self
@@ -1253,12 +1345,16 @@ impl MainWindow {
             .into_iter()
             .filter(|attachment| !attachment.is_inline)
             .collect();
-        
+
         // "Download all" button when multiple attachments
         if visible.len() > 1 {
             if let Ok(download_all_row) = ui::stack(Orientation::Horizontal, 8.0) {
                 ui::padding(&download_all_row, 4.0, 4.0, 4.0, 4.0)?;
-                let download_all = ui::button("Download all", Some("Download all"), Some("Download all attachments"))?;
+                let download_all = ui::button(
+                    "Download all",
+                    Some("Download all"),
+                    Some("Download all attachments"),
+                )?;
                 let this = Rc::clone(self);
                 let mid = message_id;
                 let visible_clone = visible.clone();
@@ -1272,7 +1368,7 @@ impl MainWindow {
                 let _ = ui::append(&self.widgets.attachments_panel, &download_all_row);
             }
         }
-        
+
         for attachment in &visible {
             if let Ok(row) = self.attachment_row(message_id, attachment.clone()) {
                 let _ = ui::append(&self.widgets.attachments_panel, &row);
@@ -1286,24 +1382,28 @@ impl MainWindow {
         message_id: MessageId,
         attachment: AttachmentMeta,
     ) -> Result<StackPanel> {
-        let is_image = attachment.mime_type.as_deref().map(|m| m.starts_with("image/")).unwrap_or(false);
+        let is_image = attachment
+            .mime_type
+            .as_deref()
+            .map(|m| m.starts_with("image/"))
+            .unwrap_or(false);
         let is_pdf = attachment.mime_type.as_deref() == Some("application/pdf");
         let is_large = attachment.size.map(|s| s > 40_000_000).unwrap_or(false);
-        
+
         let row = ui::stack(Orientation::Horizontal, 8.0)?;
         ui::padding(&row, 4.0, 4.0, 4.0, 4.0)?;
-        
+
         // Preview for images and PDFs
         if is_image || is_pdf {
             if let Ok(preview) = self.attachment_preview(message_id, attachment.clone()) {
                 ui::append(&row, &preview)?;
             }
         }
-        
+
         let name = ui::text(&attachment.display_name())?;
         ui::stretch_horizontal(&name)?;
         ui::append(&row, &name)?;
-        
+
         if let Some(size) = attachment.size {
             let size_text = format::file_size(size);
             let size_block = ui::text(&size_text)?;
@@ -1312,14 +1412,18 @@ impl MainWindow {
             }
             ui::append(&row, &size_block)?;
         }
-        
+
         if is_large {
             let warning = ui::text("⚠ Large file")?;
             let _ = warning.SetForeground(&ui::solid_brush("#D13438")?);
             ui::append(&row, &warning)?;
         }
-        
-        let save = ui::button("Save", Some(&format!("Save {}", attachment.display_name)), Some(&format!("Save attachment {}", attachment.display_name)))?;
+
+        let save = ui::button(
+            "Save",
+            Some(&format!("Save {}", attachment.display_name)),
+            Some(&format!("Save attachment {}", attachment.display_name)),
+        )?;
         let this = Rc::clone(self);
         let attachment = attachment.clone();
         let revoker = ui::on_click(&save, move || {
@@ -1338,10 +1442,14 @@ impl MainWindow {
         let container = ui::stack(Orientation::Vertical, 2.0)?;
         ui::min_width(&container, 60.0)?;
         ui::min_height(&container, 60.0)?;
-        
-        let is_image = attachment.mime_type.as_deref().map(|m| m.starts_with("image/")).unwrap_or(false);
+
+        let is_image = attachment
+            .mime_type
+            .as_deref()
+            .map(|m| m.starts_with("image/"))
+            .unwrap_or(false);
         let is_pdf = attachment.mime_type.as_deref() == Some("application/pdf");
-        
+
         if is_image {
             // Image preview - show thumbnail
             if let Ok(data) = self.app.mailin.attachment(message_id, &attachment.part_id) {
@@ -1365,22 +1473,22 @@ impl MainWindow {
             pdf_label.SetFontSize(10.0)?;
             ui::append(&container, &pdf_label)?;
         }
-        
+
         Ok(container)
     }
-    
+
     fn bytes_to_bitmap(bytes: &[u8]) -> Result<mailin_winui_sys::BitmapImage> {
         use mailin_winui_sys::{BitmapImage, InMemoryRandomAccessStream};
         use windows::Storage::Streams::DataWriter;
         use windows_core::Interface;
-        
+
         let stream = InMemoryRandomAccessStream::new()?;
         let writer = DataWriter::CreateDataWriter(&stream)?;
         writer.WriteBytes(bytes)?;
         writer.StoreAsync()?.get()?;
         writer.FlushAsync()?.get()?;
         stream.Seek(0)?;
-        
+
         let bitmap = BitmapImage::new()?;
         bitmap.SetSource(&stream)?;
         Ok(bitmap)
@@ -1575,7 +1683,9 @@ impl MainWindow {
             return;
         }
         // Mark as read by adding \Seen flag
-        self.app.engine.bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+        self.app
+            .engine
+            .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
         self.show_banner("Marked as read");
     }
 
@@ -1810,7 +1920,10 @@ impl MainWindow {
         let selected = &state.selected;
         let new_idx = if let Some(&last) = selected.iter().last() {
             // Find the index of the last selected message and go to previous
-            state.messages.iter().position(|m| m.id == last)
+            state
+                .messages
+                .iter()
+                .position(|m| m.id == last)
                 .map(|i| i.saturating_sub(1))
                 .unwrap_or(0)
         } else {
@@ -1841,7 +1954,10 @@ impl MainWindow {
         let selected = &state.selected;
         let new_idx = if let Some(&last) = selected.iter().last() {
             // Find the index of the last selected message and go to next
-            state.messages.iter().position(|m| m.id == last)
+            state
+                .messages
+                .iter()
+                .position(|m| m.id == last)
                 .map(|i| (i + 1).min(state.messages.len() - 1))
                 .unwrap_or(0)
         } else {
@@ -2211,11 +2327,21 @@ impl MainWindow {
         }
         if let Some(status) = sync_status_update {
             let (text, brush) = match status {
-                mailin_core::model::SyncStatus::Idle => ("Idle", design_tokens::tokens().text_muted_brush().ok()),
-                mailin_core::model::SyncStatus::Syncing => ("Syncing…", design_tokens::tokens().accent_brush().ok()),
-                mailin_core::model::SyncStatus::Connected => ("Connected", design_tokens::tokens().success_brush().ok()),
-                mailin_core::model::SyncStatus::Offline => ("Offline", design_tokens::tokens().warning_brush().ok()),
-                mailin_core::model::SyncStatus::Error => ("Error", design_tokens::tokens().error_brush().ok()),
+                mailin_core::model::SyncStatus::Idle => {
+                    ("Idle", design_tokens::tokens().text_muted_brush().ok())
+                }
+                mailin_core::model::SyncStatus::Syncing => {
+                    ("Syncing…", design_tokens::tokens().accent_brush().ok())
+                }
+                mailin_core::model::SyncStatus::Connected => {
+                    ("Connected", design_tokens::tokens().success_brush().ok())
+                }
+                mailin_core::model::SyncStatus::Offline => {
+                    ("Offline", design_tokens::tokens().warning_brush().ok())
+                }
+                mailin_core::model::SyncStatus::Error => {
+                    ("Error", design_tokens::tokens().error_brush().ok())
+                }
             };
             let _ = self.widgets.sync_status.SetText(text);
             if let Some(brush) = brush {
@@ -2252,27 +2378,42 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let title = ui::heading("Mailin", Some(20.0), Some(700))?;
     let account_combo = ui::combo(&[], 0, Some("Switch account"))?;
     ui::min_width(&account_combo, 220.0)?;
-    
+
     // Hamburger menu button (visible on mobile/tablet)
     let hamburger = ui::button("☰", Some("Menu"), Some("Open main menu"))?;
     ui::min_width(&hamburger, 40.0)?;
     ui::set_visible(&hamburger, false)?; // Hidden by default (desktop)
-    
-    let add_account = ui::button("Add account", Some("Add account"), Some("Add a new mail account (Ctrl+Shift+A)"))?;
-    let edit_account = ui::button("Edit account", Some("Edit account"), Some("Edit the selected account"))?;
-    let compose = ui::button("Compose", Some("Compose"), Some("Create a new message (Ctrl+N)"))?;
+
+    let add_account = ui::button(
+        "Add account",
+        Some("Add account"),
+        Some("Add a new mail account (Ctrl+Shift+A)"),
+    )?;
+    let edit_account = ui::button(
+        "Edit account",
+        Some("Edit account"),
+        Some("Edit the selected account"),
+    )?;
+    let compose = ui::button(
+        "Compose",
+        Some("Compose"),
+        Some("Create a new message (Ctrl+N)"),
+    )?;
     let sync = ui::button("Sync", Some("Sync"), Some("Synchronize mail (F5)"))?;
     let sync_status = ui::text("Idle")?;
     ui::margin_left(&sync_status, 8.0)?;
     ui::vertical_alignment_center(&sync_status)?;
     // Accessibility: live region so screen readers announce status changes
-    AutomationProperties::SetLiveSetting(&sync_status, mailin_winui_sys::AutomationLiveSetting::Polite)?;
+    AutomationProperties::SetLiveSetting(
+        &sync_status,
+        mailin_winui_sys::AutomationLiveSetting::Polite,
+    )?;
     let spacer = ui::text("")?;
     ui::stretch_horizontal(&spacer)?;
     let search = ui::text_box("Search mail", Some("Search mail"))?;
     ui::min_width(&search, 220.0)?;
     let search_button = ui::button("Search", Some("Search"), Some("Search messages (Ctrl+F)"))?;
-    
+
     ui::append(&toolbar, &hamburger)?;
     ui::append(&toolbar, &title)?;
     ui::append(&toolbar, &account_combo)?;
@@ -2307,7 +2448,11 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::margin_vertical(&welcome, 40.0)?;
     let welcome_title = ui::heading("Welcome to Mailin", Some(28.0), Some(700))?;
     let welcome_body = ui::text("Add a mail account to read and send mail.")?;
-    let welcome_add = ui::button("Add Account…", Some("Add Account"), Some("Add a new mail account"))?;
+    let welcome_add = ui::button(
+        "Add Account…",
+        Some("Add Account"),
+        Some("Add a new mail account"),
+    )?;
     ui::append(&welcome, &welcome_title)?;
     ui::append(&welcome, &welcome_body)?;
     ui::append(&welcome, &welcome_add)?;
@@ -2418,15 +2563,27 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
 
     let header = ui::stack(Orientation::Vertical, 6.0)?;
     let actions = ui::stack(Orientation::Horizontal, 6.0)?;
-    let html_button = ui::button("Show HTML", Some("Show HTML"), Some("Show the original HTML body"))?;
+    let html_button = ui::button(
+        "Show HTML",
+        Some("Show HTML"),
+        Some("Show the original HTML body"),
+    )?;
     let reply_button = ui::button("Reply", Some("Reply"), Some("Reply to sender (Ctrl+R)"))?;
-    let reply_all_button = ui::button("Reply all", Some("Reply all"), Some("Reply to all recipients (Ctrl+Shift+R)"))?;
+    let reply_all_button = ui::button(
+        "Reply all",
+        Some("Reply all"),
+        Some("Reply to all recipients (Ctrl+Shift+R)"),
+    )?;
     let forward_button = ui::button("Forward", Some("Forward"), Some("Forward message"))?;
     let actions_spacer = ui::text("")?;
     ui::stretch_horizontal(&actions_spacer)?;
     let flag_button = ui::button("Star", Some("Star"), Some("Toggle star/flag"))?;
     let read_button = ui::button("Mark read", Some("Mark read"), Some("Toggle read status"))?;
-    let archive_button = ui::button("Archive", Some("Archive"), Some("Archive message (Ctrl+Shift+E)"))?;
+    let archive_button = ui::button(
+        "Archive",
+        Some("Archive"),
+        Some("Archive message (Ctrl+Shift+E)"),
+    )?;
     let trash_button = ui::button("Trash", Some("Trash"), Some("Move to trash (Delete)"))?;
     let junk_button = ui::button("Junk", Some("Junk"), Some("Mark as junk (Ctrl+Shift+J)"))?;
     let outbox_retry_button = ui::button("Retry", Some("Retry"), Some("Retry sending"))?;
@@ -2463,13 +2620,33 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
 
     let remote_panel = ui::stack(Orientation::Horizontal, 8.0)?;
     let remote_text = ui::text("Remote content is blocked to protect your privacy.")?;
-    let remote_once = ui::button("Load once", Some("Load once"), Some("Load remote content for this message only"))?;
-    let remote_trust = ui::button("Always allow sender", Some("Always allow sender"), Some("Always load remote content from this sender"))?;
+    let remote_once = ui::button(
+        "Load once",
+        Some("Load once"),
+        Some("Load remote content for this message only"),
+    )?;
+    let remote_trust = ui::button(
+        "Always allow sender",
+        Some("Always allow sender"),
+        Some("Always load remote content from this sender"),
+    )?;
     ui::append(&remote_panel, &remote_text)?;
     ui::append(&remote_panel, &remote_once)?;
     ui::append(&remote_panel, &remote_trust)?;
     ui::set_visible(&remote_panel, false)?;
     ui::append(&header, &remote_panel)?;
+
+    // PGP: the body is replaced with a Decrypt/Verify action until the user
+    // asks for the content to be unwrapped.
+    let pgp_panel = ui::stack(Orientation::Vertical, 8.0)?;
+    let pgp_status = ui::text("")?;
+    let pgp_action = ui::button("Decrypt", Some("Decrypt"), Some("Decrypt this message"))?;
+    let pgp_controls = ui::stack(Orientation::Horizontal, 8.0)?;
+    ui::append(&pgp_controls, &pgp_action)?;
+    ui::append(&pgp_panel, &pgp_status)?;
+    ui::append(&pgp_panel, &pgp_controls)?;
+    ui::set_visible(&pgp_panel, false)?;
+    ui::append(&header, &pgp_panel)?;
 
     let attachments_panel = ui::stack(Orientation::Vertical, 4.0)?;
     ui::set_visible(&attachments_panel, false)?;
@@ -2503,33 +2680,31 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let hamburger_btn = hamburger.clone();
     let root_grid = root.clone();
     let toolbar_panel = toolbar.clone();
-    
-    let size_changed_token = window.SizeChanged(&TypedEventHandler::new(
-        move |_sender, args| {
-            if let Ok(args) = args {
-                let width = args.NewSize().unwrap_or_default().Width;
-                let is_mobile = width < BREAKPOINT_MOBILE;
-                let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
-                let is_desktop = width >= BREAKPOINT_TABLET;
-                
-                // Show/hide hamburger menu
-                let _ = hamburger_btn.SetVisibility(if is_mobile || is_tablet {
-                    Visibility::Visible
-                } else {
-                    Visibility::Collapsed
-                });
-                
-                // On mobile: collapse sidebar (column 0), show overlay when hamburger clicked
-                // On tablet: narrow sidebar
-                // On desktop: full three-pane layout
-                
-                // The Grid with star_column_min automatically handles min/max widths
-                // We just need to handle the hamburger overlay logic
-            }
-            Ok(())
+
+    let size_changed_token = window.SizeChanged(&TypedEventHandler::new(move |_sender, args| {
+        if let Ok(args) = args {
+            let width = args.NewSize().unwrap_or_default().Width;
+            let is_mobile = width < BREAKPOINT_MOBILE;
+            let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
+            let is_desktop = width >= BREAKPOINT_TABLET;
+
+            // Show/hide hamburger menu
+            let _ = hamburger_btn.SetVisibility(if is_mobile || is_tablet {
+                Visibility::Visible
+            } else {
+                Visibility::Collapsed
+            });
+
+            // On mobile: collapse sidebar (column 0), show overlay when hamburger clicked
+            // On tablet: narrow sidebar
+            // On desktop: full three-pane layout
+
+            // The Grid with star_column_min automatically handles min/max widths
+            // We just need to handle the hamburger overlay logic
         }
-    ));
-    
+        Ok(())
+    }));
+
     // Store the token to keep the handler alive
     let _ = size_changed_token;
 
@@ -2539,7 +2714,8 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let sidebar_scroller = folder_scroller.clone();
     let _hamburger_token = ui::on_click(&hamburger_btn_click, move || {
         // Toggle sidebar visibility on mobile
-        let is_visible = sidebar_scroller.Visibility().unwrap_or(Visibility::Visible) == Visibility::Visible;
+        let is_visible =
+            sidebar_scroller.Visibility().unwrap_or(Visibility::Visible) == Visibility::Visible;
         let _ = sidebar_scroller.SetVisibility(if is_visible {
             Visibility::Collapsed
         } else {
@@ -2558,6 +2734,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         }),
         programmatic: AtomicBool::new(false),
         html_mode: AtomicBool::new(state.config().ui.html_enabled),
+        pgp_shown: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         events: ui::Revokers::default(),
         folder_events: ui::Revokers::default(),
@@ -2599,6 +2776,9 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             remote_panel,
             remote_once,
             remote_trust,
+            pgp_panel,
+            pgp_status,
+            pgp_action,
             attachments_panel,
             body_plain,
             body_text,
@@ -2636,21 +2816,20 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             }
         },
     )?);
-    this.events
-        .keep(add_accelerator(
-            &root,
-            VirtualKey::F5,
-            None,
-            Some("Synchronize (F5)"),
-            {
-                let this = Rc::downgrade(&this);
-                move || {
-                    if let Some(this) = this.upgrade() {
-                        this.sync_now();
-                    }
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::F5,
+        None,
+        Some("Synchronize (F5)"),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.sync_now();
                 }
-            },
-        )?);
+            }
+        },
+    )?);
     this.events.keep(add_accelerator(
         &root,
         VirtualKey::A,
@@ -2665,15 +2844,20 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             }
         },
     )?);
-    this.events
-        .keep(add_accelerator(&root, VirtualKey::F1, None, Some("Show shortcuts help (F1)"), {
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::F1,
+        None,
+        Some("Show shortcuts help (F1)"),
+        {
             let this = Rc::downgrade(&this);
             move || {
                 if let Some(this) = this.upgrade() {
                     this.show_shortcuts_help();
                 }
             }
-        })?);
+        },
+    )?);
     // Bulk-selection shortcuts live on the message list itself rather than
     // the window: scoping them to the pane keeps Ctrl+A working as
     // "select all text" inside the search box and keeps Escape available to
@@ -2887,6 +3071,14 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
             }
         }
     })?);
+    this.events.keep(ui::on_click(&this.widgets.pgp_action, {
+        let this = Rc::clone(this);
+        move || {
+            if let Some(message_id) = this.state().selection.message {
+                this.decrypt_pgp_body(message_id);
+            }
+        }
+    })?);
     this.events.keep(ui::on_click(&this.widgets.remote_once, {
         let this = Rc::clone(this);
         move || {
@@ -3000,6 +3192,16 @@ fn install_control_resources() -> Result<()> {
 
 // ---------------------------------------------------------------- widgets
 
+fn signature_label(status: mailin_core::SignatureStatus) -> &'static str {
+    use mailin_core::SignatureStatus;
+    match status {
+        SignatureStatus::Valid => "valid",
+        SignatureStatus::Invalid => "invalid",
+        SignatureStatus::UnknownKey => "unknown key",
+        SignatureStatus::Error => "error",
+    }
+}
+
 fn role_marker(role: FolderRole) -> &'static str {
     match role {
         FolderRole::Inbox => "●",
@@ -3066,7 +3268,11 @@ fn message_row(
 ) -> Result<(Grid, Button, CheckBox, Option<StackPanel>)> {
     use MessageListDensity::{Compact, Cozy};
     let seen = message.is_seen();
-    let is_thread_root = message.thread_reply_count > 0 || (message.thread_root_key.as_ref().is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
+    let is_thread_root = message.thread_reply_count > 0
+        || (message
+            .thread_root_key
+            .as_ref()
+            .is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
     let depth = message.thread_depth;
 
     let (vertical_padding, horizontal_padding, spacing, show_snippet) = match density {
@@ -3087,7 +3293,7 @@ fn message_row(
     )?;
 
     let line = ui::stack(Orientation::Horizontal, 6.0)?;
-    
+
     // Thread expand/collapse chevron for thread roots
     if is_thread_root {
         let chevron = ui::text("▼")?;
@@ -3108,7 +3314,7 @@ fn message_row(
     }
     ui::stretch_horizontal(&sender)?;
     ui::append(&line, &sender)?;
-    
+
     // Reply count badge for thread roots
     if is_thread_root && message.thread_reply_count > 0 {
         let badge = ui::text(&format!(" ({})", message.thread_reply_count))?;
@@ -3145,7 +3351,11 @@ fn message_row(
         Some(&format!(
             "{}{}{}{} — {}",
             if seen { "" } else { "Unread. " },
-            if message.is_flagged() { "Starred. " } else { "" },
+            if message.is_flagged() {
+                "Starred. "
+            } else {
+                ""
+            },
             if message.has_attachments {
                 "Has attachments. "
             } else {
@@ -3228,11 +3438,7 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
     let subject_label = ui::text(&subject)?;
     ui::append(&column, &subject_label)?;
 
-    let button = ui::content_button(
-        &column,
-        Some(&format!("Outbox entry: {}", subject)),
-        None,
-    )?;
+    let button = ui::content_button(&column, Some(&format!("Outbox entry: {}", subject)), None)?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
     Ok(button)
 }

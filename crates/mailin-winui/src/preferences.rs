@@ -68,6 +68,8 @@ pub fn show_preferences(
     ui::append(&main_panel, &sync_panel)?;
     let accounts_panel = create_accounts_section()?;
     ui::append(&main_panel, &accounts_panel)?;
+    let encryption_panel = create_encryption_section(state, events)?;
+    ui::append(&main_panel, &encryption_panel)?;
 
     ui::set_content(&dialog, &main_panel).context("could not attach the preferences content")?;
     dialog
@@ -199,7 +201,10 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         mailin_core::config::ThreadMode::Flat => 1,
         mailin_core::config::ThreadMode::Nested => 2,
     };
-    let thread_mode = ui::combo(&["Off (flat list)", "Flat (grouped)", "Nested"], thread_mode_index)?;
+    let thread_mode = ui::combo(
+        &["Off (flat list)", "Flat (grouped)", "Nested"],
+        thread_mode_index,
+    )?;
     ui::append(&panel, &ui::field("Conversation view", &thread_mode)?)?;
 
     let (html_row, html) = ui::switch_row(
@@ -230,7 +235,11 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         1000 => 4,
         _ => 1,
     };
-    let page_size = ui::combo(&["50", "100", "200", "500", "1000"], page_size_index, Some("Messages per page"))?;
+    let page_size = ui::combo(
+        &["50", "100", "200", "500", "1000"],
+        page_size_index,
+        Some("Messages per page"),
+    )?;
     ui::append(&panel, &ui::field("Messages per page", &page_size)?)?;
 
     let (mark_read_row, mark_read) = ui::switch_row(
@@ -281,7 +290,11 @@ fn create_sync_section(config: &Config) -> Result<(StackPanel, SyncRows)> {
         600 => 5,
         _ => 6,
     };
-    let poll_interval = ui::combo(&["15", "30", "60", "120", "300", "600", "1800"], poll_index, Some("Poll interval (seconds)"))?;
+    let poll_interval = ui::combo(
+        &["15", "30", "60", "120", "300", "600", "1800"],
+        poll_index,
+        Some("Poll interval (seconds)"),
+    )?;
     ui::append(
         &panel,
         &ui::field("Poll interval (seconds)", &poll_interval)?,
@@ -354,6 +367,64 @@ fn create_accounts_section() -> Result<StackPanel> {
         "Account-specific settings like signatures and remote content trust are managed in the account settings dialog.",
     )?;
     ui::append(&panel, &desc)?;
+    Ok(panel)
+}
+
+fn create_encryption_section(state: &Arc<AppState>, events: &ui::Revokers) -> Result<StackPanel> {
+    let panel = ui::stack_md(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&panel, &ui::heading3("Encryption")?)?;
+    ui::append(
+        &panel,
+        &ui::body_text("Manage the OpenPGP keys used to encrypt, sign, decrypt and verify mail.")?,
+    )?;
+
+    let accounts = state.mailin.list_accounts().unwrap_or_default();
+    if accounts.is_empty() {
+        ui::append(
+            &panel,
+            &ui::body_text("Add an account to manage its PGP keys.")?,
+        )?;
+        return Ok(panel);
+    }
+
+    for account in accounts {
+        let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+        let labels = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+        let key_count = state
+            .mailin
+            .list_pgp_keys(&account.id)
+            .map(|keys| keys.len())
+            .unwrap_or(0);
+        ui::append(&labels, &ui::body_text(&account.email)?)?;
+        ui::append(
+            &labels,
+            &ui::caption(&match key_count {
+                1 => "1 key".to_owned(),
+                count => format!("{count} keys"),
+            })?,
+        )?;
+        ui::stretch_horizontal(&labels)?;
+        ui::append(&row, &labels)?;
+
+        let manage = ui::button(
+            "Manage Keys",
+            Some(&format!("Manage PGP keys for {}", account.email)),
+            Some("Open the key manager for this account"),
+        )?;
+        ui::append(&row, &manage)?;
+        ui::append(&panel, &row)?;
+
+        let state = Arc::clone(state);
+        let email = account.email.clone();
+        let account_id = account.id;
+        events.keep(ui::on_click(&manage, move || {
+            if let Err(failure) =
+                crate::pgp_keys::present(Arc::clone(&state), account_id, email.clone())
+            {
+                tracing::error!(%failure, "could not open the PGP key manager");
+            }
+        })?);
+    }
     Ok(panel)
 }
 

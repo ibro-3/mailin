@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use mailin_core::compose::{new_draft_key, recipient_addresses, with_signature_prefix};
+use mailin_core::compose::{PgpOptions, new_draft_key, recipient_addresses, with_signature_prefix};
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
 use mailin_winui_sys::{
     DispatcherQueue, Grid, Orientation, StackPanel, TextBlock, TextWrapping, Window,
@@ -47,8 +47,16 @@ pub fn present(
     let title = ui::heading2(&format!("New Message — {}", account.email))?;
     ui::stretch_horizontal(&title)?;
     ui::append(&header, &title)?;
-    let attach = ui::button("Attach files", Some("Attach files"), Some("Attach files to this message"))?;
-    let save = ui::button("Save Draft", Some("Save Draft"), Some("Save draft (auto-saves every 30 seconds)"))?;
+    let attach = ui::button(
+        "Attach files",
+        Some("Attach files"),
+        Some("Attach files to this message"),
+    )?;
+    let save = ui::button(
+        "Save Draft",
+        Some("Save Draft"),
+        Some("Save draft (auto-saves every 30 seconds)"),
+    )?;
     let send = ui::button("Send", Some("Send"), Some("Send message (Ctrl+Enter)"))?;
     ui::append(&header, &attach)?;
     ui::append(&header, &save)?;
@@ -81,6 +89,27 @@ pub fn present(
     ui::append(&form, &ui::field("Cc", &cc)?)?;
     ui::append(&form, &ui::field("Bcc", &bcc)?)?;
     ui::append(&form, &ui::field("Subject", &subject)?)?;
+
+    // PGP options: validated against the recipient keys and the account's
+    // secret keys when sending.
+    let (encrypt_row, encrypt_toggle) = ui::switch_row(
+        "Encrypt",
+        "Encrypt and sign the message for every recipient",
+        false,
+        Some("Encrypt message"),
+        Some("On"),
+        Some("Off"),
+    )?;
+    let (sign_row, sign_toggle) = ui::switch_row(
+        "Sign",
+        "Attach a detached OpenPGP signature",
+        false,
+        Some("Sign message"),
+        Some("On"),
+        Some("Off"),
+    )?;
+    ui::append(&form, &encrypt_row)?;
+    ui::append(&form, &sign_row)?;
 
     let body = ui::text_box("Write your message", Some("Message body"))?;
     body.SetAcceptsReturn(true)?;
@@ -242,7 +271,7 @@ pub fn present(
             Ok(())
         }
     }))?;
-    
+
     let body_drop = body_element.Drop(&TypedEventHandler::new({
         let list = attachment_list.clone();
         let title = attachments_title.clone();
@@ -291,7 +320,7 @@ pub fn present(
             Ok(())
         }
     }))?;
-    
+
     // Paste image from clipboard (Ctrl+V)
     let body_paste = body_element.Paste(&TypedEventHandler::new({
         let list = attachment_list.clone();
@@ -313,11 +342,19 @@ pub fn present(
                                             let width = bitmap.PixelWidth().unwrap_or(0);
                                             let height = bitmap.PixelHeight().unwrap_or(0);
                                             let dpi = bitmap.DpiX().unwrap_or(96.0) as u32;
-                                            
+
                                             // Create PNG from bitmap
-                                            use mailin_winui_sys::{InMemoryRandomAccessStream, BitmapEncoder, BitmapPixelFormat, BitmapAlphaMode};
+                                            use mailin_winui_sys::{
+                                                BitmapAlphaMode, BitmapEncoder, BitmapPixelFormat,
+                                                InMemoryRandomAccessStream,
+                                            };
                                             if let Ok(stream) = InMemoryRandomAccessStream::new() {
-                                                if let Ok(encoder) = BitmapEncoder::CreateAsync(mailin_winui_sys::BitmapEncoder::PngEncoderId(), &stream).get() {
+                                                if let Ok(encoder) = BitmapEncoder::CreateAsync(
+                                                    mailin_winui_sys::BitmapEncoder::PngEncoderId(),
+                                                    &stream,
+                                                )
+                                                .get()
+                                                {
                                                     encoder.SetPixelData(
                                                         BitmapPixelFormat::Bgra8,
                                                         BitmapAlphaMode::Premultiplied,
@@ -325,7 +362,7 @@ pub fn present(
                                                         height,
                                                         dpi,
                                                         dpi,
-                                                        &pixel_data
+                                                        &pixel_data,
                                                     )?;
                                                     if let Ok(_) = encoder.FlushAsync().get() {
                                                         stream.Seek(0)?;
@@ -346,7 +383,7 @@ pub fn present(
             Ok(())
         }
     }))?;
-    
+
     revokers.keep(body_drag_over);
     revokers.keep(body_drop);
     revokers.keep(body_paste);
@@ -370,6 +407,8 @@ pub fn present(
     })?);
 
     let on_sent: Arc<dyn Fn() + 'static> = Arc::new(on_sent);
+    let send_encrypt = encrypt_toggle.clone();
+    let send_sign = sign_toggle.clone();
     revokers.keep(ui::on_click(&send, {
         let window = window.clone();
         let app = Arc::clone(&app);
@@ -381,7 +420,39 @@ pub fn present(
         let banner = error.clone();
         move || {
             let outgoing = make_draft();
-            match outgoing.build() {
+            let pgp = PgpOptions {
+                encrypt: send_encrypt.IsOn().unwrap_or(false),
+                sign: send_sign.IsOn().unwrap_or(false),
+            };
+            if pgp.encrypt {
+                let mut recipients = Vec::new();
+                for field in [&outgoing.to, &outgoing.cc, &outgoing.bcc] {
+                    if let Ok(addresses) = recipient_addresses(field) {
+                        recipients.extend(addresses);
+                    }
+                }
+                match app.mailin.missing_pgp_keys(&account.id, &recipients) {
+                    Ok(missing) if !missing.is_empty() => {
+                        let _ =
+                            banner.SetText(&format!("No public key for: {}", missing.join(", ")));
+                        let _ = ui::set_visible(&banner, true);
+                        return;
+                    }
+                    Err(failure) => {
+                        let _ = banner.SetText(&format!("Could not check PGP keys: {failure}"));
+                        let _ = ui::set_visible(&banner, true);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if pgp.sign && !app.mailin.has_signing_key(&account.id) {
+                let _ = banner
+                    .SetText("No secret key available. Add one in Account Settings → Encryption.");
+                let _ = ui::set_visible(&banner, true);
+                return;
+            }
+            match app.mailin.build_outgoing(&account.id, &outgoing, pgp) {
                 Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
                     Ok(_) => {
                         sent.store(true, Ordering::Relaxed);
@@ -474,7 +545,11 @@ fn rebuild_attachments(
         if let Ok(remove) = ui::button(
             "Remove",
             Some(&format!("Remove attachment {}", attachment.filename)),
-            Some(&format!("Remove attachment {} ({})", attachment.filename, format::file_size(u32::try_from(attachment.data.len()).unwrap_or(u32::MAX)))),
+            Some(&format!(
+                "Remove attachment {} ({})",
+                attachment.filename,
+                format::file_size(u32::try_from(attachment.data.len()).unwrap_or(u32::MAX))
+            )),
         ) {
             let attachments = Arc::clone(attachments);
             let list = list.clone();
