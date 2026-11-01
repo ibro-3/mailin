@@ -60,6 +60,61 @@ pub enum Security {
     None,
 }
 
+/// Authentication method for IMAP/SMTP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthMethod {
+    /// Username/password authentication.
+    #[default]
+    Password,
+    /// OAuth2 / XOAUTH2 authentication.
+    OAuth2,
+}
+
+/// Identity provider used for OAuth2 authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OAuthProvider {
+    /// Google (Gmail and Google Workspace).
+    #[default]
+    Google,
+    /// Microsoft 365, Outlook.com and Exchange Online.
+    Microsoft,
+    /// Yahoo Mail.
+    Yahoo,
+    /// Fastmail.
+    Fastmail,
+    /// Any other provider; endpoints are read from `MAILIN_OAUTH_*` env vars.
+    Custom,
+}
+
+/// OAuth2 tokens for an account.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OAuth2Tokens {
+    /// Access token for XOAUTH2 authentication.
+    pub access_token: String,
+    /// Refresh token for obtaining new access tokens.
+    pub refresh_token: String,
+    /// Unix timestamp when the access token expires.
+    pub expires_at: i64,
+    /// Provider that issued the tokens.
+    pub provider: OAuthProvider,
+    /// Public OAuth2 client identifier used to obtain the tokens.
+    pub client_id: String,
+}
+
+impl OAuth2Tokens {
+    /// Check if the access token is expired or about to expire (within 5 minutes).
+    pub fn is_expired(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_default();
+        self.expires_at <= now + 300 // 5 minutes buffer
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerSettings {
     pub host: String,
@@ -67,6 +122,18 @@ pub struct ServerSettings {
     #[serde(default)]
     pub security: Security,
     pub username: String,
+    /// Authentication method (defaults to Password).
+    #[serde(default)]
+    pub auth_method: AuthMethod,
+    /// OAuth2 tokens (only used when auth_method is OAuth2).
+    #[serde(default, skip_serializing_if = "OAuth2Tokens::is_empty")]
+    pub oauth2: OAuth2Tokens,
+}
+
+impl OAuth2Tokens {
+    fn is_empty(&self) -> bool {
+        self.access_token.is_empty() && self.refresh_token.is_empty() && self.client_id.is_empty()
+    }
 }
 
 impl ServerSettings {
@@ -76,6 +143,8 @@ impl ServerSettings {
             port: 993,
             security: Security::Tls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 
@@ -85,6 +154,8 @@ impl ServerSettings {
             port: 143,
             security: Security::StartTls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 
@@ -94,6 +165,8 @@ impl ServerSettings {
             port: 465,
             security: Security::Tls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 
@@ -103,6 +176,8 @@ impl ServerSettings {
             port: 587,
             security: Security::StartTls,
             username: username.into(),
+            auth_method: AuthMethod::default(),
+            oauth2: OAuth2Tokens::default(),
         }
     }
 }
@@ -140,6 +215,23 @@ pub struct Account {
     pub smtp: ServerSettings,
     #[serde(default)]
     pub sync: AccountSyncSettings,
+    /// Signature appended to outgoing mail. The `-- ` separator is added by
+    /// the composer helpers, not stored here.
+    #[serde(default)]
+    pub signature: String,
+    /// Sender domains (bare, lowercase) whose remote content is always
+    /// rendered for this account.
+    #[serde(default)]
+    pub remote_allowed_domains: Vec<String>,
+    /// CalDAV server URL (e.g., https://caldav.example.com/).
+    #[serde(default)]
+    pub caldav_url: Option<String>,
+    /// CalDAV username (if different from email).
+    #[serde(default)]
+    pub caldav_username: Option<String>,
+    /// CalDAV password (stored in keyring, not in config).
+    #[serde(skip)]
+    pub caldav_password: Option<String>,
 }
 
 impl Account {
@@ -156,6 +248,11 @@ impl Account {
             imap,
             smtp,
             sync: AccountSyncSettings::default(),
+            signature: String::new(),
+            remote_allowed_domains: Vec::new(),
+            caldav_url: None,
+            caldav_username: None,
+            caldav_password: None,
         }
     }
 
@@ -169,6 +266,31 @@ impl Account {
     pub fn domain(&self) -> Option<&str> {
         let (_, domain) = self.email.rsplit_once('@')?;
         (!domain.is_empty()).then_some(domain)
+    }
+
+    /// Trust `domain` for remote content. The value is normalized to a bare
+    /// lowercase domain and deduplicated; returns `true` when it was added.
+    pub fn allow_remote_domain(&mut self, domain: &str) -> bool {
+        let domain = domain.trim().trim_start_matches('@').to_ascii_lowercase();
+        if domain.is_empty() || domain.contains(char::is_whitespace) || domain.contains('@') {
+            return false;
+        }
+        if self.remote_domain_allowed(&domain) {
+            return false;
+        }
+        self.remote_allowed_domains.push(domain);
+        true
+    }
+
+    /// Whether remote content from `domain` is trusted. Comparison ignores
+    /// case and a leading `@`.
+    pub fn remote_domain_allowed(&self, domain: &str) -> bool {
+        let domain = domain.trim().trim_start_matches('@');
+        !domain.is_empty()
+            && self
+                .remote_allowed_domains
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(domain))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -206,6 +328,11 @@ impl Account {
         }
         if self.display_name.trim().is_empty() {
             return Err(Error::InvalidAccount("display name is empty".to_owned()));
+        }
+        if self.signature.chars().count() > 4_096 {
+            return Err(Error::InvalidAccount(
+                "signature is longer than 4096 characters".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -270,5 +397,75 @@ mod tests {
         let id = AccountId::new();
         assert_eq!(AccountId::parse(&id.to_string()).expect("parse"), id);
         assert!(AccountId::parse("nope").is_err());
+    }
+
+    #[test]
+    fn legacy_account_json_without_new_fields_still_parses() {
+        let json = serde_json::json!({
+            "id": AccountId::new().to_string(),
+            "display_name": "Ada",
+            "email": "ada@example.com",
+            "imap": {
+                "host": "imap.example.com",
+                "port": 993,
+                "security": "tls",
+                "username": "ada@example.com",
+                "auth_method": "password",
+                "oauth2": {
+                    "provider": "google",
+                    "client_id": "",
+                    "access_token": "",
+                    "refresh_token": "",
+                    "expires_at": 0,
+                },
+            },
+            "smtp": {
+                "host": "smtp.example.com",
+                "port": 465,
+                "security": "tls",
+                "username": "ada@example.com",
+                "auth_method": "password",
+                "oauth2": {
+                    "provider": "google",
+                    "client_id": "",
+                    "access_token": "",
+                    "refresh_token": "",
+                    "expires_at": 0,
+                },
+            },
+            "sync": {
+                "folder_allowlist": [],
+                "poll_interval_secs": 60,
+                "background_sync": true,
+            },
+        })
+        .to_string();
+        let account: Account = serde_json::from_str(&json).expect("legacy account parses");
+        assert_eq!(account.signature, "");
+        assert!(account.remote_allowed_domains.is_empty());
+    }
+
+    #[test]
+    fn allow_remote_domain_normalizes_and_deduplicates() {
+        let mut acc = account();
+        assert!(acc.allow_remote_domain("News.Example.COM"));
+        assert!(acc.remote_domain_allowed("news.example.com"));
+        assert!(acc.remote_domain_allowed("@NEWS.example.com"));
+        // Already present, added with different casing.
+        assert!(!acc.allow_remote_domain("news.example.com"));
+        // Invalid values are ignored.
+        assert!(!acc.allow_remote_domain("  "));
+        assert!(!acc.allow_remote_domain("a@b.example"));
+        assert_eq!(
+            acc.remote_allowed_domains,
+            vec!["news.example.com".to_owned()]
+        );
+    }
+
+    #[test]
+    fn oversized_signature_is_rejected() {
+        let mut acc = account();
+        acc.signature = "sig\n".repeat(2_000);
+        assert!(acc.validate().is_err());
     }
 }

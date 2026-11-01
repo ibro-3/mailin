@@ -18,6 +18,28 @@ const HEADER_CHUNK: usize = 50;
 /// flags of new messages are still stored with their headers.
 const FLAG_REFRESH_LIMIT: usize = 50_000;
 
+/// Parse a comma-separated address list into individual email addresses.
+/// Handles "Name <email>" format and bare emails.
+pub(crate) fn parse_address_list(input: &str) -> Vec<String> {
+    let mut addresses = Vec::new();
+    for token in input.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        // Extract email from "Name <email>" format
+        let email = if let Some((_, rest)) = token.rsplit_once('<') {
+            rest.trim_end().trim_end_matches('>').trim().to_string()
+        } else {
+            token.to_string()
+        };
+        if !email.is_empty() && !email.contains(char::is_whitespace) {
+            addresses.push(email.to_lowercase());
+        }
+    }
+    addresses
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncMode {
     /// Add new messages, detect deletions and refresh flags.
@@ -82,6 +104,47 @@ pub(crate) async fn sync_folder(
     }
 
     let local = mailbox.store().message_uids(folder.id)?;
+
+    // CHANGEDSINCE flag-delta sync (CONDSTORE):
+    // If the server supports CONDSTORE and we have a previous modseq, fetch
+    // only the messages whose flags have changed since the last sync.
+    // This avoids the expensive full flag refresh on large folders.
+    if mode == SyncMode::Incremental
+        && session.supports_condstore()
+        && let Some(last_modseq) = state.highest_modseq
+    {
+        // Search for messages with MODSEQ changed since our last sync
+        // CHANGEDSINCE returns UIDs where any flag changed
+        match session.search(&format!("CHANGEDSINCE {last_modseq}")).await {
+            Ok(changed_uids) if !changed_uids.is_empty() => {
+                tracing::debug!(
+                    folder = %folder.name,
+                    count = changed_uids.len(),
+                    since_modseq = last_modseq,
+                    "CONDSTORE CHANGEDSINCE found flag changes"
+                );
+                // Fetch flags only for changed messages
+                let changed_vec: Vec<u32> = changed_uids.into_iter().collect();
+                let flag_updates = session.fetch_flags_for_uids(&changed_vec).await?;
+                mailbox.store().set_flags_many(folder.id, &flag_updates)?;
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    folder = %folder.name,
+                    since_modseq = last_modseq,
+                    "no flag changes since last sync"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    folder = %folder.name,
+                    error = %e,
+                    "CHANGEDSINCE search failed, falling back to full flag refresh"
+                );
+            }
+        }
+    }
+
     let remote = match mode {
         SyncMode::Full => session.search("ALL").await?,
         SyncMode::Incremental => {
@@ -113,6 +176,24 @@ pub(crate) async fn sync_folder(
             .iter()
             .filter(|result| result.created)
             .count();
+
+        // Seed contacts from new messages
+        for message in &messages {
+            let account_id = folder.account_id;
+            // From address
+            if let Some(addr) = &message.from_addr {
+                let name = message.from_name.as_deref().unwrap_or("");
+                let _ = mailbox.store().upsert_contact(&account_id, addr, name, false);
+            }
+            // To addresses
+            for addr in parse_address_list(&message.to_addrs) {
+                let _ = mailbox.store().upsert_contact(&account_id, &addr, "", false);
+            }
+            // Cc addresses
+            for addr in parse_address_list(&message.cc_addrs) {
+                let _ = mailbox.store().upsert_contact(&account_id, &addr, "", false);
+            }
+        }
     }
 
     let mut deleted = 0usize;
@@ -179,6 +260,7 @@ pub(crate) fn message_from_header(
         uid: header.uid,
         message_id: parsed.message_id.clone(),
         thread_key: parsed.thread_key.clone(),
+        thread_root_key: parsed.thread_key.clone(),
         subject: parsed.subject.clone(),
         from_name: parsed.from_name.clone(),
         from_addr: parsed.from_addr.clone(),

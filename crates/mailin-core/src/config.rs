@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use crate::account::{AccountId, Account};
 use crate::error::{Error, Result};
+use crate::model::FolderId;
 
 const APP_QUALIFIER: &str = "dev";
 const APP_ORGANISATION: &str = "mailin";
@@ -51,6 +54,23 @@ impl Paths {
         self.data_dir.join("mailin.db")
     }
 
+    /// Reconstruct Paths from the database file path.
+    /// Assumes standard layout: data_dir/mailin.db, sibling config_dir/config.toml
+    pub fn from_database_file(db_path: impl AsRef<Path>) -> Result<Self> {
+        let db_path = db_path.as_ref();
+        let data_dir = db_path.parent().ok_or_else(|| {
+            Error::Config("database file has no parent directory".into())
+        })?;
+        let root = data_dir.parent().ok_or_else(|| {
+            Error::Config("data directory has no parent directory".into())
+        })?;
+        Ok(Self {
+            config_dir: root.join("config"),
+            data_dir: data_dir.to_path_buf(),
+            cache_dir: root.join("cache"),
+        })
+    }
+
     /// Create the directories with user-only permissions.
     pub fn ensure(&self) -> Result<()> {
         for dir in [&self.config_dir, &self.data_dir, &self.cache_dir] {
@@ -70,6 +90,32 @@ pub enum Theme {
     Dark,
 }
 
+/// Row spacing and preview lines shown in the message list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MessageListDensity {
+    /// Three lines per row with generous padding.
+    #[default]
+    Comfortable,
+    /// Tighter padding, snippet still visible.
+    Cozy,
+    /// Minimal padding, no snippet: fits the most messages.
+    Compact,
+}
+
+/// Thread/conversation view mode for the message list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThreadMode {
+    /// Flat list, one row per message (legacy behavior).
+    #[default]
+    Off,
+    /// Group by conversation, expand/collapse threads.
+    Flat,
+    /// Group by conversation with nested indentation (future).
+    Nested,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiPreferences {
@@ -84,6 +130,14 @@ pub struct UiPreferences {
     pub mark_read_on_open: bool,
     /// Show a desktop notification when mail arrives in the background.
     pub notifications: bool,
+    /// Row spacing and preview lines in the message list.
+    pub message_list_density: MessageListDensity,
+    /// Thread/conversation view mode.
+    pub thread_mode: ThreadMode,
+    /// Enable quick actions (swipe on GTK, hover on WinUI) on message rows.
+    pub quick_actions: bool,
+    /// Which actions are available in the quick-actions overlay.
+    pub quick_action_items: Vec<QuickAction>,
 }
 
 impl Default for UiPreferences {
@@ -95,6 +149,56 @@ impl Default for UiPreferences {
             page_size: 100,
             mark_read_on_open: true,
             notifications: true,
+            message_list_density: MessageListDensity::default(),
+            thread_mode: ThreadMode::default(),
+            quick_actions: true,
+            quick_action_items: vec![
+                QuickAction::Archive,
+                QuickAction::Delete,
+                QuickAction::Flag,
+                QuickAction::MarkRead,
+            ],
+        }
+    }
+}
+
+/// A single action offered in the message-row quick-actions overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickAction {
+    Archive,
+    Delete,
+    Junk,
+    Flag,
+    Unflag,
+    MarkRead,
+    MarkUnread,
+}
+
+impl QuickAction {
+    /// Short label used on the button.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Archive => "Archive",
+            Self::Delete => "Delete",
+            Self::Junk => "Junk",
+            Self::Flag => "Flag",
+            Self::Unflag => "Unflag",
+            Self::MarkRead => "Read",
+            Self::MarkUnread => "Unread",
+        }
+    }
+
+    /// Icon name for the button.
+    pub const fn icon(self) -> &'static str {
+        match self {
+            Self::Archive => "folder-archive-symbolic",
+            Self::Delete => "user-trash-symbolic",
+            Self::Junk => "mail-mark-junk-symbolic",
+            Self::Flag => "starred-symbolic",
+            Self::Unflag => "non-starred-symbolic",
+            Self::MarkRead => "mail-read-symbolic",
+            Self::MarkUnread => "mail-unread-symbolic",
         }
     }
 }
@@ -130,12 +234,61 @@ impl Default for SyncPreferences {
     }
 }
 
+/// Search history entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistoryEntry {
+    pub query: String,
+    pub account_id: AccountId,
+    pub folder_id: Option<FolderId>,
+    pub timestamp: i64,
+}
+
 /// Application preferences. Accounts and credentials are *not* stored here.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub ui: UiPreferences,
     pub sync: SyncPreferences,
+    /// Search history (last 20 per account)
+    pub search: SearchHistory,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchHistory {
+    /// Per-account search history: account_id -> Vec<SearchHistoryEntry>
+    pub history: HashMap<AccountId, Vec<SearchHistoryEntry>>,
+}
+
+impl SearchHistory {
+    /// Get search history for an account (most recent first, max 20).
+    pub fn get(&self, account_id: &AccountId) -> Vec<SearchHistoryEntry> {
+        self.history
+            .get(account_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .take(20)
+            .collect()
+    }
+
+    /// Add a search query to history.
+    pub fn add(&mut self, account_id: AccountId, query: String, folder_id: Option<FolderId>) {
+        let entry = SearchHistoryEntry {
+            query,
+            account_id,
+            folder_id,
+            timestamp: crate::now_unix(),
+        };
+        let list = self.history.entry(account_id).or_default();
+        // Remove duplicates
+        list.retain(|e| e.query != entry.query);
+        // Insert at front
+        list.insert(0, entry);
+        // Trim to 20
+        if list.len() > 20 {
+            list.truncate(20);
+        }
+    }
 }
 
 impl Config {
@@ -229,6 +382,27 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::with_root(dir.path());
         assert_eq!(Config::load(&paths).expect("load"), Config::default());
+    }
+
+    #[test]
+    fn density_round_trips_through_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        let mut config = Config::default();
+        config.ui.message_list_density = MessageListDensity::Compact;
+        config.save(&paths).expect("save");
+        let loaded = Config::load(&paths).expect("load");
+        assert_eq!(loaded.ui.message_list_density, MessageListDensity::Compact);
+    }
+
+    #[test]
+    fn configs_written_before_density_keep_the_default() {
+        let config: Config = toml::from_str("[ui]\npage_size = 50\n").expect("config");
+        assert_eq!(
+            config.ui.message_list_density,
+            MessageListDensity::Comfortable
+        );
+        assert_eq!(config.ui.page_size, 50);
     }
 
     #[test]

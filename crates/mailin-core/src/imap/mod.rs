@@ -19,11 +19,32 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
-use crate::account::{Security, ServerSettings};
+use crate::account::{AuthMethod, Security, ServerSettings};
 use crate::error::{Error, Result};
 use crate::model::FolderRole;
 
 use self::parse::ParsedHeader;
+
+/// XOAUTH2 authenticator for async_imap.
+///
+/// Implements the `async_imap::Authenticator` trait to provide the
+/// XOAUTH2 authentication string format expected by the server.
+struct Xoauth2Authenticator {
+    user: String,
+    access_token: String,
+}
+
+impl async_imap::Authenticator for &Xoauth2Authenticator {
+    type Response = String;
+
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        // XOAUTH2 format: user=<user>\x01auth=Bearer <token>\x01\x01
+        format!(
+            "user={}\x01auth=Bearer {}\x01\x01",
+            self.user, self.access_token
+        )
+    }
+}
 
 /// Abstraction over the two stream flavours used for IMAP so that
 /// `async_imap::Session` can be a single type.
@@ -115,6 +136,10 @@ pub(crate) struct ImapSession {
     inner: Session<ImapStream>,
     condstore: bool,
     idle: bool,
+    /// RFC 6851 MOVE support.
+    supports_move: bool,
+    /// RFC 4315 UIDPLUS support.
+    supports_uidplus: bool,
 }
 
 impl fmt::Debug for ImapSession {
@@ -122,6 +147,8 @@ impl fmt::Debug for ImapSession {
         f.debug_struct("ImapSession")
             .field("condstore", &self.condstore)
             .field("idle", &self.idle)
+            .field("supports_move", &self.supports_move)
+            .field("supports_uidplus", &self.supports_uidplus)
             .finish_non_exhaustive()
     }
 }
@@ -166,10 +193,27 @@ impl ImapSession {
         };
 
         let client = async_imap::Client::new(stream);
-        let mut session = client
-            .login(&settings.username, password)
-            .await
-            .map_err(|(e, _)| Error::Imap(format!("login failed: {e}")))?;
+
+        // Authenticate based on the configured method
+        let mut session = if settings.auth_method == AuthMethod::OAuth2
+            && !settings.oauth2.access_token.is_empty()
+        {
+            // Use XOAUTH2 authentication
+            let authenticator = Xoauth2Authenticator {
+                user: settings.username.clone(),
+                access_token: settings.oauth2.access_token.clone(),
+            };
+            client
+                .authenticate("XOAUTH2", &authenticator)
+                .await
+                .map_err(|(e, _)| Error::Imap(format!("XOAUTH2 authentication failed: {e}")))?
+        } else {
+            // Use traditional password authentication
+            client
+                .login(&settings.username, password)
+                .await
+                .map_err(|(e, _)| Error::Imap(format!("login failed: {e}")))?
+        };
 
         let capabilities = session.capabilities().await.ok();
         let condstore = capabilities
@@ -178,11 +222,19 @@ impl ImapSession {
         let idle = capabilities
             .as_ref()
             .is_some_and(|caps| caps.has_str("IDLE"));
+        let supports_move = capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.has_str("MOVE"));
+        let supports_uidplus = capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.has_str("UIDPLUS"));
 
         Ok(Self {
             inner: session,
             condstore,
             idle,
+            supports_move,
+            supports_uidplus,
         })
     }
 
@@ -194,15 +246,31 @@ impl ImapSession {
         self.idle
     }
 
+    pub(crate) fn supports_move(&self) -> bool {
+        self.supports_move
+    }
+
+    pub(crate) fn supports_uidplus(&self) -> bool {
+        self.supports_uidplus
+    }
+
     pub(crate) fn into_session(self) -> Session<ImapStream> {
         self.inner
     }
 
-    pub(crate) fn from_session(inner: Session<ImapStream>, condstore: bool, idle: bool) -> Self {
+    pub(crate) fn from_session(
+        inner: Session<ImapStream>,
+        condstore: bool,
+        idle: bool,
+        supports_move: bool,
+        supports_uidplus: bool,
+    ) -> Self {
         Self {
             inner,
             condstore,
             idle,
+            supports_move,
+            supports_uidplus,
         }
     }
 
@@ -302,6 +370,31 @@ impl ImapSession {
         Ok(flags)
     }
 
+    /// Fetch flags for a specific set of UIDs, used by CHANGEDSINCE flag-delta sync.
+    pub async fn fetch_flags_for_uids(&mut self, uids: &[u32]) -> Result<Vec<(u32, Vec<String>)>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let set = uid_set(uids);
+        let mut stream = self
+            .inner
+            .uid_fetch(&set, "(UID FLAGS)")
+            .await
+            .map_err(|e| Error::Imap(format!("UID FETCH (flags) failed: {e}")))?;
+        let mut flags = Vec::new();
+        loop {
+            let fetch = stream
+                .try_next()
+                .await
+                .map_err(|e| Error::Imap(format!("UID FETCH (flags) failed: {e}")))?;
+            let Some(fetch) = fetch else { break };
+            if let Some(uid) = fetch.uid {
+                flags.push((uid, fetch.flags().map(flag_to_string).collect()));
+            }
+        }
+        Ok(flags)
+    }
+
     pub async fn fetch_body(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
         let mut stream = self
             .inner
@@ -322,20 +415,39 @@ impl ImapSession {
 
     /// Add and remove flags on the server. Both lists may be empty.
     pub async fn store_flags(&mut self, uid: u32, add: &[String], remove: &[String]) -> Result<()> {
+        self.store_flags_many(&[uid], add, remove).await
+    }
+
+    /// Add and remove flags for many messages with at most two `UID STORE`
+    /// commands instead of one round-trip per message.
+    pub async fn store_flags_many(
+        &mut self,
+        uids: &[u32],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
         if !add.is_empty() {
-            self.store_flags_command(uid, "+", add).await?;
+            self.store_flags_command(uids, "+", add).await?;
         }
         if !remove.is_empty() {
-            self.store_flags_command(uid, "-", remove).await?;
+            self.store_flags_command(uids, "-", remove).await?;
         }
         Ok(())
     }
 
-    async fn store_flags_command(&mut self, uid: u32, mode: &str, flags: &[String]) -> Result<()> {
+    async fn store_flags_command(
+        &mut self,
+        uids: &[u32],
+        mode: &str,
+        flags: &[String],
+    ) -> Result<()> {
         let query = format!("{mode}FLAGS.SILENT ({})", flags.join(" "));
         let mut stream = self
             .inner
-            .uid_store(uid.to_string(), &query)
+            .uid_store(uid_set(uids), &query)
             .await
             .map_err(|e| Error::Imap(format!("UID STORE failed: {e}")))?;
         while stream
@@ -347,6 +459,79 @@ impl ImapSession {
         Ok(())
     }
 
+    /// Move messages to another mailbox.
+    ///
+    /// Uses RFC 6851 `UID MOVE` when the server supports it and falls back to
+    /// `UID COPY` + `\Deleted` + `EXPUNGE` otherwise.
+    pub async fn move_messages(&mut self, uids: &[u32], target: &str) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set = uid_set(uids);
+        if self.supports_move {
+            return self
+                .inner
+                .uid_mv(&set, target)
+                .await
+                .map_err(|e| Error::Imap(format!("UID MOVE to {target} failed: {e}")));
+        }
+
+        self.inner
+            .uid_copy(&set, target)
+            .await
+            .map_err(|e| Error::Imap(format!("UID COPY to {target} failed: {e}")))?;
+        self.delete_messages(uids).await
+    }
+
+    /// Copy messages to another mailbox without removing from source.
+    pub async fn copy_messages(&mut self, uids: &[u32], target: &str) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set = uid_set(uids);
+        self.inner
+            .uid_copy(&set, target)
+            .await
+            .map_err(|e| Error::Imap(format!("UID COPY to {target} failed: {e}")))
+    }
+
+    /// Mark messages `\Deleted` and expunge them from the selected mailbox.
+    pub async fn delete_messages(&mut self, uids: &[u32]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        self.store_flags_command(uids, "+", &["\\Deleted".to_owned()])
+            .await?;
+        if self.supports_uidplus {
+            let mut stream = Box::pin(
+                self.inner
+                    .uid_expunge(uid_set(uids))
+                    .await
+                    .map_err(|e| Error::Imap(format!("UID EXPUNGE failed: {e}")))?,
+            );
+            while stream
+                .try_next()
+                .await
+                .map_err(|e| Error::Imap(format!("UID EXPUNGE failed: {e}")))?
+                .is_some()
+            {}
+        } else {
+            let mut stream = Box::pin(
+                self.inner
+                    .expunge()
+                    .await
+                    .map_err(|e| Error::Imap(format!("EXPUNGE failed: {e}")))?,
+            );
+            while stream
+                .try_next()
+                .await
+                .map_err(|e| Error::Imap(format!("EXPUNGE failed: {e}")))?
+                .is_some()
+            {}
+        }
+        Ok(())
+    }
+
     /// Append a raw message, for example a copy of an outgoing message to the
     /// Sent folder.
     pub async fn append(&mut self, mailbox: &str, flags: &str, raw: &[u8]) -> Result<()> {
@@ -354,6 +539,46 @@ impl ImapSession {
             .append(mailbox, Some(flags), None, raw)
             .await
             .map_err(|e| Error::Imap(format!("APPEND to {mailbox} failed: {e}")))
+    }
+
+    /// Create a new folder on the IMAP server.
+    pub async fn create_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .create(name)
+            .await
+            .map_err(|e| Error::Imap(format!("CREATE {name} failed: {e}")))
+    }
+
+    /// Rename a folder on the IMAP server.
+    pub async fn rename_folder(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        self.inner
+            .rename(old_name, new_name)
+            .await
+            .map_err(|e| Error::Imap(format!("RENAME {old_name} -> {new_name} failed: {e}")))
+    }
+
+    /// Delete a folder on the IMAP server.
+    pub async fn delete_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .delete(name)
+            .await
+            .map_err(|e| Error::Imap(format!("DELETE {name} failed: {e}")))
+    }
+
+    /// Subscribe to a folder on the IMAP server.
+    pub async fn subscribe_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .subscribe(name)
+            .await
+            .map_err(|e| Error::Imap(format!("SUBSCRIBE {name} failed: {e}")))
+    }
+
+    /// Unsubscribe from a folder on the IMAP server.
+    pub async fn unsubscribe_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .unsubscribe(name)
+            .await
+            .map_err(|e| Error::Imap(format!("UNSUBSCRIBE {name} failed: {e}")))
     }
 }
 

@@ -1,0 +1,244 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: read
+  id-token: write  # Needed for artifact attestation / OIDC signing
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # ============================================================
+  # Flatpak bundle (Linux)
+  # ============================================================
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Flatpak Builder and Runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak-builder
+          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y flathub org.gnome.Platform//50 org.gnome.Sdk//50 org.freedesktop.Sdk.Extension.rust-stable//25.08
+
+      - name: Build Flatpak Bundle
+        run: |
+          flatpak-builder --force-clean --install-deps-from=flathub \
+            packaging/flatpak/build-dir packaging/flatpak/dev.mailin.Mailin.json
+          flatpak build-bundle \
+            --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
+            packaging/flatpak/build-dir \
+            mailin-${{ github.ref_name }}.flatpak \
+            dev.mailin.Mailin
+
+      - name: Validate Flatpak
+        run: |
+          flatpak-builder-lint manifest packaging/flatpak/dev.mailin.Mailin.json
+          appstreamcli validate --no-net packaging/flatpak/dev.mailin.Mailin.metainfo.xml
+          desktop-file-validate packaging/flatpak/dev.mailin.Mailin.desktop
+
+      - name: Upload Flatpak Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailin-flatpak
+          path: mailin-*.flatpak
+          retention-days: 30
+
+  # ============================================================
+  # Windows: self-contained zip + MSIX + Inno Setup installer
+  # ============================================================
+  windows:
+    name: Windows artifacts
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      MAILIN_WINDOWSAPPSDK_BOOTSTRAP: ${{ runner.temp }}/Microsoft.WindowsAppRuntime.Bootstrap.dll
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: x86_64-pc-windows-msvc
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Windows App SDK Runtime
+        run: |
+          $url = "https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe"
+          $out = "$env:TEMP\windowsappruntimeinstall-x64.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Start-Process -FilePath $out -ArgumentList "/install", "/quiet", "/norestart" -Wait
+
+      - name: Download App SDK Bootstrap DLL
+        run: |
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.windowsappsdk.foundation/1.8.260803002/microsoft.windowsappsdk.foundation.1.8.260803002.nupkg"
+          $out = "$env:TEMP\foundation.nupkg"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Expand-Archive -Path $out -DestinationPath "$env:TEMP\foundation" -Force
+          Copy-Item "$env:TEMP\foundation\runtimes\win-x64\native\Microsoft.WindowsAppRuntime.Bootstrap.dll" $env:MAILIN_WINDOWSAPPSDK_BOOTSTRAP
+
+      - name: Install Inno Setup
+        run: choco install innosetup --version=6.2.2 -y
+
+      - name: Build and Package (xtask package-win)
+        run: cargo xtask package-win
+        env:
+          MAILIN_WINDOWSAPPSDK_BOOTSTRAP: ${{ env.MAILIN_WINDOWSAPPSDK_BOOTSTRAP }}
+
+      # ========================================================
+      # Code Signing (uncomment and configure for production)
+      # ========================================================
+      # - name: Sign Windows Binaries
+      #   if: env.SIGNTOOL_CERT_THUMBPRINT != ''
+      #   env:
+      #     SIGNTOOL_CERT_THUMBPRINT: ${{ secrets.SIGNTOOL_CERT_THUMBPRINT }}
+      #     SIGNTOOL_TIMESTAMP_URL: ${{ secrets.SIGNTOOL_TIMESTAMP_URL }}
+      #   run: |
+      #     $cert = "Cert:\CurrentUser\My\$env:SIGNTOOL_CERT_THUMBPRINT"
+      #     $files = Get-ChildItem target/dist/*.exe, target/dist/*.msix
+      #     foreach ($file in $files) {
+      #       signtool sign /sha1 $env:SIGNTOOL_CERT_THUMBPRINT /tr $env:SIGNTOOL_TIMESTAMP_URL /td sha256 /fd sha256 $file.FullName
+      #     }
+      # - name: Sign MSIX Package
+      #   if: env.SIGNTOOL_CERT_THUMBPRINT != ''
+      #   env:
+      #     SIGNTOOL_CERT_THUMBPRINT: ${{ secrets.SIGNTOOL_CERT_THUMBPRINT }}
+      #     SIGNTOOL_TIMESTAMP_URL: ${{ secrets.SIGNTOOL_TIMESTAMP_URL }}
+      #   run: |
+      #     signtool sign /sha1 $env:SIGNTOOL_CERT_THUMBPRINT /tr $env:SIGNTOOL_TIMESTAMP_URL /td sha256 /fd sha256 target/dist/*.msix
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          Get-ChildItem target/dist/*.zip, target/dist/*.msix, target/dist/*.exe | ForEach-Object {
+            $hash = Get-FileHash -Algorithm SHA256 -Path $_.FullName
+            "$($hash.Hash)  $($_.Name)" | Out-File -FilePath "target/dist/SHA256SUMS" -Append -Encoding utf8
+          }
+          Get-Content target/dist/SHA256SUMS
+
+      - name: Report Binary Sizes
+        run: |
+          Get-ChildItem target/dist/*.zip, target/dist/*.msix, target/dist/*.exe | ForEach-Object {
+            $sizeMB = [math]::Round($_.Length / 1MB, 2)
+            Write-Host "::notice title=Binary size::$($_.Name) = $sizeMB MB"
+          }
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailin-windows
+          path: |
+            target/dist/*.zip
+            target/dist/*.msix
+            target/dist/*.exe
+            target/dist/SHA256SUMS
+          retention-days: 30
+
+  # ============================================================
+  # Artifact Attestation (Sigstore/cosign)
+  # ============================================================
+  attest:
+    name: Artifact Attestation
+    needs: [flatpak, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download Flatpak Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-flatpak
+          path: artifacts/flatpak
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-windows
+          path: artifacts/windows
+
+      - name: Generate SLSA Provenance
+        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+        with:
+          base64-subjects: "${{ hashFiles('artifacts/**/*') }}"
+          provenance-name: mailin-provenance.intoto.jsonl
+
+      - name: Upload Attestation
+        uses: actions/upload-artifact@v4
+        with:
+          name: mailin-attestation
+          path: mailin-provenance.intoto.jsonl
+          retention-days: 90
+
+  # ============================================================
+  # GitHub Release
+  # ============================================================
+  release:
+    name: Create GitHub Release
+    needs: [flatpak, windows, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download Flatpak Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-flatpak
+          path: artifacts/flatpak
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-windows
+          path: artifacts/windows
+
+      - name: Download Attestation
+        uses: actions/download-artifact@v4
+        with:
+          name: mailin-attestation
+          path: artifacts/attestation
+
+      - name: List Artifacts
+        run: ls -la artifacts/flatpak/ artifacts/windows/ artifacts/attestation/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Mailin ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artifacts/flatpak/mailin-*.flatpak
+            artifacts/windows/mailin-winui-*-x86_64.zip
+            artifacts/windows/mailin-*-x86_64.msix
+            artifacts/windows/mailin-setup-*.exe
+            artifacts/windows/SHA256SUMS
+            artifacts/attestation/mailin-provenance.intoto.jsonl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

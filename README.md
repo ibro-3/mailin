@@ -8,15 +8,18 @@ A native desktop email client with one shared Rust core and two native front-end
 Mailin speaks IMAP and SMTP, keeps a local SQLite cache for offline reading, and
 never stores passwords outside the OS keyring.
 
-> **Status:** early, but usable on Linux. Milestones 0–6 are done: workspace,
+> **Status:** early, but usable on Linux. Milestones 0–7 are done: workspace,
 > CI, configuration, credential storage, SQLite schema, full text search,
 > outbox, the IMAP/SMTP engine (folder discovery, incremental sync, IDLE,
 > sending), the GTK shell (three-pane window, account wizard, reader), GTK
 > polish (HTML mail, remote-content blocking, attachments, compose, desktop
-> notifications and Flatpak packaging), the WinUI 3 binding spike, and the WinUI
+> notifications and Flatpak packaging), the WinUI 3 binding spike, the WinUI
 > product shell (three panes, account wizard, reader, HTML policy, attachments,
-> compose, search and the core event pump). Packaging, hardening and
-> accessibility are next (see the roadmap below).
+> compose, search and the core event pump), Windows packaging (self-contained
+> zip, MSIX, Inno Setup installer), supply-chain hardening (cargo-deny), HTML
+> policy edge-case tests, secrets as SecretString end-to-end, accessibility
+> (GTK: a11y labels, keyboard nav, shortcuts overlay; WinUI: keyboard
+> accelerators), CONDSTORE CHANGEDSINCE flag-delta sync with fallback.
 
 ## Layout
 
@@ -103,6 +106,27 @@ into `target/winui-bindgen/` and rewrites
 `crates/mailin-winui-sys/filter.txt`. Commit both the filter and the generated
 file when the projection changes.
 
+### Windows Installation (Release Artifacts)
+
+CI produces three Windows artifacts for each release tag (see `.github/workflows/release.yml`):
+
+1. **Self-contained zip** — `mailin-winui-<version>-x86_64.zip`
+   - Contains `mailin-winui.exe`, `Microsoft.WindowsAppRuntime.Bootstrap.dll`, and the Windows App SDK runtime installer
+   - Extract anywhere; run the runtime installer once (requires Administrator), then run `mailin-winui.exe`
+   - The bootstrap DLL must be next to the executable
+
+2. **Unsigned MSIX** — `mailin-<version>-x86_64.msix`
+   - Sideload with `Add-AppxPackage mailin-<version>-x86_64.msix` (PowerShell, requires Administrator)
+   - ⚠️ Unsigned packages trigger SmartScreen; click "More info" → "Run anyway"
+   - Integrates with Start Menu and Settings → Apps
+
+3. **Inno Setup installer** — `mailin-setup-<version>.exe`
+   - Classic installer with Start Menu shortcut, desktop icon option, and uninstaller
+   - Runs the Windows App SDK runtime installer automatically if needed
+   - Run `mailin-setup-<version>.exe` and follow the wizard
+
+All artifacts include SHA-256 checksums in `SHA256SUMS`.
+
 ## Testing
 
 ```sh
@@ -145,7 +169,7 @@ and config file are created with `0600` permissions on Unix.
 | 4 | GTK polish: HTML mail, attachments, compose, notifications, Flatpak ✅ |
 | 5 | WinUI 3 binding spike: projection, bootstrapping, window, WebView2 ✅ |
 | 6 | WinUI front-end parity ✅ |
-| 7 | Packaging, hardening, accessibility, performance |
+| 7 | Packaging, hardening, accessibility, performance ✅ |
 
 ## Design notes
 

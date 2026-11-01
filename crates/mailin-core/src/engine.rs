@@ -10,9 +10,10 @@
 //! [`Mailin`]: rows are written to the store and [`Event`]s tell the UIs to
 //! re-read them.
 
+use either::Either;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_imap::extensions::idle::IdleResponse;
@@ -20,14 +21,17 @@ use tokio::runtime::Runtime;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
-use crate::account::{Account, AccountId};
-use crate::client::{Event, Mailin};
+use crate::account::{Account, AccountId, AuthMethod};
+use crate::client::{ClientEvent, Event, Mailin};
+use crate::compose::OutgoingMessage;
 use crate::error::{Error, Result};
 use crate::imap::ImapSession;
 use crate::model::{
     Folder, FolderId, FolderRole, MessageId, OutboxEntry, OutboxState, OutgoingEnvelope,
+    ScheduledAction, SnoozePayload, SyncStatus,
 };
 use crate::sync::{self, SyncMode};
+use secrecy::{ExposeSecret, SecretString};
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
@@ -60,8 +64,11 @@ impl Engine {
         crate::tls::install_crypto_provider();
 
         let state = Arc::new(EngineState {
-            mailbox,
+            mailbox: Arc::clone(&mailbox),
             outbox: Arc::new(Notify::new()),
+            sync_status: Arc::new(RwLock::new(HashMap::new())),
+            last_sync_at: Arc::new(RwLock::new(HashMap::new())),
+            plugin_system: None,
         });
         let (commands, receiver) = mpsc::unbounded_channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -70,6 +77,28 @@ impl Engine {
             .thread_name("mailin-net")
             .build()
             .map_err(|e| Error::Config(format!("could not start the network runtime: {e}")))?;
+
+        // Initialize plugin system
+        let data_dir = mailbox.store().data_dir();
+        let plugin_system = runtime.block_on(async {
+            match crate::plugins::init_plugin_system(Arc::clone(&mailbox.store()), &data_dir).await {
+                Ok(sys) => Some(sys),
+                Err(e) => {
+                    tracing::warn!(%e, "Failed to initialize plugin system");
+                    None
+                }
+            }
+        });
+
+        // Set plugin system on Mailin
+        if let Some(ref sys) = plugin_system {
+            mailbox.set_plugin_system(Arc::clone(sys));
+        }
+
+        // Store plugin system in state
+        let mut state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.plugin_system = plugin_system;
+
         runtime.spawn(supervise(state.clone(), receiver));
 
         Ok(Self {
@@ -111,6 +140,149 @@ impl Engine {
         });
     }
 
+    /// Add and remove IMAP flags for many messages at once, batching one
+    /// `UID STORE` per source folder instead of one round-trip per message.
+    pub fn bulk_set_flags(&self, message_ids: &[MessageId], add: Vec<String>, remove: Vec<String>) {
+        self.send(Command::BulkSetFlags {
+            message_ids: message_ids.to_vec(),
+            add,
+            remove,
+        });
+    }
+
+    /// Move messages into a specific folder.
+    pub fn move_messages(&self, message_ids: &[MessageId], target: FolderId) {
+        self.send(Command::MoveMessages {
+            message_ids: message_ids.to_vec(),
+            target: MoveTarget::Folder(target),
+        });
+    }
+
+    /// Move messages to Trash, or delete them permanently when they are
+    /// already in Trash.
+    pub fn delete_messages(&self, message_ids: &[MessageId]) {
+        self.send(Command::MoveMessages {
+            message_ids: message_ids.to_vec(),
+            target: MoveTarget::Trash,
+        });
+    }
+
+    /// Delete messages permanently, without moving them to Trash.
+    pub fn permanently_delete_messages(&self, message_ids: &[MessageId]) {
+        self.send(Command::MoveMessages {
+            message_ids: message_ids.to_vec(),
+            target: MoveTarget::Permanent,
+        });
+    }
+
+    pub fn archive_messages(&self, message_ids: &[MessageId]) {
+        self.send(Command::MoveMessages {
+            message_ids: message_ids.to_vec(),
+            target: MoveTarget::Archive,
+        });
+    }
+
+    /// Move messages to Junk (`junk = true`) or back to Inbox.
+    pub fn mark_messages_junk(&self, message_ids: &[MessageId], junk: bool) {
+        self.send(Command::MoveMessages {
+            message_ids: message_ids.to_vec(),
+            target: if junk {
+                MoveTarget::Junk
+            } else {
+                MoveTarget::Inbox
+            },
+        });
+    }
+
+    /// Permanently delete every message in the account's Trash folder.
+    pub fn empty_trash(&self, account_id: AccountId) {
+        self.send(Command::EmptyTrash(account_id));
+    }
+
+    /// Sync calendars for an account using CalDAV.
+    pub fn sync_calendars(&self, account_id: AccountId) {
+        self.send(Command::SyncCalendars(account_id));
+    }
+
+    /// Append or replace a draft in the account's Drafts folder. Reusing
+    /// `draft.draft_key` means auto-saves overwrite the previous copy.
+    pub fn save_draft(&self, account_id: AccountId, draft: OutgoingMessage) {
+        self.send(Command::SaveDraft {
+            account_id,
+            draft: Box::new(draft),
+        });
+    }
+
+    /// Remove the server-side draft identified by its Message-ID. Called after
+    /// a draft is sent or explicitly discarded.
+    pub fn discard_draft(&self, account_id: AccountId, draft_key: impl Into<String>) {
+        self.send(Command::DiscardDraft {
+            account_id,
+            draft_key: draft_key.into(),
+        });
+    }
+
+    /// Retry a failed outbox entry (resets state to Queued).
+    pub fn retry_outbox(&self, account_id: AccountId, entry_id: i64) {
+        self.send(Command::RetryOutbox {
+            account_id,
+            entry_id,
+        });
+    }
+
+    /// Cancel (delete) an outbox entry.
+    pub fn cancel_outbox(&self, account_id: AccountId, entry_id: i64) {
+        self.send(Command::CancelOutbox {
+            account_id,
+            entry_id,
+        });
+    }
+
+    /// Snooze messages until the specified time (Unix timestamp).
+    /// Messages are moved to the Snoozed folder and will be moved back at due_at.
+    pub fn snooze_messages(&self, message_ids: &[MessageId], due_at: i64) {
+        self.send(Command::SnoozeMessages {
+            message_ids: message_ids.to_vec(),
+            due_at,
+        });
+    }
+
+    /// Unsnooze messages immediately, moving them back to their original folders.
+    pub fn unsnooze_messages(&self, message_ids: &[MessageId]) {
+        self.send(Command::UnsnoozeMessages {
+            message_ids: message_ids.to_vec(),
+        });
+    }
+
+    /// Apply rules to messages in a folder (used after body fetch).
+    pub fn apply_rules(&self, folder_id: FolderId, message_ids: &[MessageId]) {
+        self.send(Command::ApplyRules {
+            folder_id,
+            message_ids: message_ids.to_vec(),
+        });
+    }
+
+    /// Get the current sync status for an account.
+    pub fn sync_status(&self, account_id: &AccountId) -> SyncStatus {
+        self.state
+            .sync_status
+            .read()
+            .unwrap()
+            .get(account_id)
+            .copied()
+            .unwrap_or(SyncStatus::Idle)
+    }
+
+    /// Get the last successful sync timestamp for an account.
+    pub fn last_sync_at(&self, account_id: &AccountId) -> Option<i64> {
+        self.state
+            .last_sync_at
+            .read()
+            .unwrap()
+            .get(account_id)
+            .copied()
+    }
+
     /// Store a message in the outbox and wake the sender.
     pub fn queue_and_send(
         &self,
@@ -126,6 +298,45 @@ impl Engine {
             .queue_outgoing(&account_id, &raw, &envelope_json)?;
         self.state.outbox.notify_one();
         Ok(id)
+    }
+
+    // Folder management
+
+    /// Create a new folder on the server and locally.
+    pub fn create_folder(
+        &self,
+        account_id: AccountId,
+        name: String,
+        delimiter: String,
+        role: FolderRole,
+    ) {
+        self.send(Command::CreateFolder {
+            account_id,
+            name,
+            delimiter,
+            role,
+        });
+    }
+
+    /// Rename a folder on the server and locally.
+    pub fn rename_folder(&self, folder_id: FolderId, new_name: String) {
+        self.send(Command::RenameFolder {
+            folder_id,
+            new_name,
+        });
+    }
+
+    /// Delete a folder on the server and locally.
+    pub fn delete_folder(&self, folder_id: FolderId) {
+        self.send(Command::DeleteFolder(folder_id));
+    }
+
+    /// Subscribe or unsubscribe from a folder.
+    pub fn subscribe_folder(&self, folder_id: FolderId, subscribe: bool) {
+        self.send(Command::SubscribeFolder {
+            folder_id,
+            subscribe,
+        });
     }
 
     /// Stop the workers and wait briefly for them to finish.
@@ -156,6 +367,12 @@ impl Drop for Engine {
 struct EngineState {
     mailbox: Arc<Mailin>,
     outbox: Arc<Notify>,
+    /// Per-account sync status. Workers update this; UIs read via Mailin.
+    sync_status: Arc<RwLock<HashMap<AccountId, SyncStatus>>>,
+    /// Timestamp of the last successful sync per account.
+    last_sync_at: Arc<RwLock<HashMap<AccountId, i64>>>,
+    /// Plugin system for Lua-based extensions.
+    plugin_system: Option<Arc<crate::plugins::PluginSystem>>,
 }
 
 enum Command {
@@ -168,8 +385,77 @@ enum Command {
         add: Vec<String>,
         remove: Vec<String>,
     },
+    BulkSetFlags {
+        message_ids: Vec<MessageId>,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    MoveMessages {
+        message_ids: Vec<MessageId>,
+        target: MoveTarget,
+    },
+    EmptyTrash(AccountId),
+    SaveDraft {
+        account_id: AccountId,
+        draft: Box<OutgoingMessage>,
+    },
+    DiscardDraft {
+        account_id: AccountId,
+        draft_key: String,
+    },
+    RetryOutbox {
+        account_id: AccountId,
+        entry_id: i64,
+    },
+    CancelOutbox {
+        account_id: AccountId,
+        entry_id: i64,
+    },
+    SnoozeMessages {
+        message_ids: Vec<MessageId>,
+        due_at: i64,
+    },
+    UnsnoozeMessages {
+        message_ids: Vec<MessageId>,
+    },
+    ApplyRules {
+        folder_id: FolderId,
+        message_ids: Vec<MessageId>,
+    },
+    CreateFolder {
+        account_id: AccountId,
+        name: String,
+        delimiter: String,
+        role: FolderRole,
+    },
+    RenameFolder {
+        folder_id: FolderId,
+        new_name: String,
+    },
+    DeleteFolder(FolderId),
+    SubscribeFolder {
+        folder_id: FolderId,
+        subscribe: bool,
+    },
+    SyncCalendars(AccountId),
     Shutdown,
 }
+
+/// Where a batch of messages should go. Role-based targets are resolved per
+/// account so the UIs never need to know folder names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveTarget {
+    Folder(FolderId),
+    Trash,
+    Archive,
+    Junk,
+    Inbox,
+    /// Delete permanently instead of moving to Trash.
+    Permanent,
+}
+
+/// Messages grouped by source folder and optional destination folder.
+type MoveGroups = HashMap<(FolderId, Option<FolderId>), Vec<(MessageId, u32)>>;
 
 #[derive(Debug)]
 enum WorkerCommand {
@@ -182,12 +468,62 @@ enum WorkerCommand {
         add: Vec<String>,
         remove: Vec<String>,
     },
+    BulkSetFlags {
+        message_ids: Vec<MessageId>,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
+    MoveMessages {
+        message_ids: Vec<MessageId>,
+        target: MoveTarget,
+    },
+    EmptyTrash,
+    SaveDraft {
+        draft: Box<OutgoingMessage>,
+    },
+    DiscardDraft {
+        draft_key: String,
+    },
+    RetryOutbox {
+        entry_id: i64,
+    },
+    CancelOutbox {
+        entry_id: i64,
+    },
+    SnoozeMessages {
+        message_ids: Vec<MessageId>,
+        due_at: i64,
+    },
+    UnsnoozeMessages {
+        message_ids: Vec<MessageId>,
+    },
+    ApplyRules {
+        folder_id: FolderId,
+        message_ids: Vec<MessageId>,
+    },
+    CreateFolder {
+        account_id: AccountId,
+        name: String,
+        delimiter: String,
+        role: FolderRole,
+    },
+    RenameFolder {
+        folder_id: FolderId,
+        new_name: String,
+    },
+    DeleteFolder(FolderId),
+    SubscribeFolder {
+        folder_id: FolderId,
+        subscribe: bool,
+    },
+    SyncCalendars,
     Stop,
 }
 
 async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceiver<Command>) {
     let mut workers: HashMap<AccountId, mpsc::UnboundedSender<WorkerCommand>> = HashMap::new();
     let sender = tokio::spawn(outbox_sender(state.clone()));
+    let scheduled = tokio::spawn(scheduled_worker(state.clone()));
 
     // Start the workers of accounts that want background synchronization. A
     // worker connects and syncs the inbox on its own.
@@ -211,6 +547,10 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                     let worker = ensure_worker(&mut workers, &state, account_id);
                     let _ = worker.send(WorkerCommand::SyncFolder(folder_id));
                 }
+            }
+            Command::SyncCalendars(account_id) => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::SyncCalendars);
             }
             Command::FetchBody(message_id) => {
                 if let Some(account_id) = account_for_message(&state, message_id) {
@@ -238,6 +578,149 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                     });
                 }
             }
+            Command::BulkSetFlags {
+                message_ids,
+                add,
+                remove,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::BulkSetFlags {
+                        message_ids,
+                        add: add.clone(),
+                        remove: remove.clone(),
+                    });
+                }
+            }
+            Command::MoveMessages {
+                message_ids,
+                target,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::MoveMessages {
+                        message_ids,
+                        target,
+                    });
+                }
+            }
+            Command::EmptyTrash(account_id) => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::EmptyTrash);
+            }
+            Command::SaveDraft { account_id, draft } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::SaveDraft { draft });
+            }
+            Command::DiscardDraft {
+                account_id,
+                draft_key,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::DiscardDraft { draft_key });
+            }
+            Command::RetryOutbox {
+                account_id,
+                entry_id,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::RetryOutbox { entry_id });
+            }
+            Command::CancelOutbox {
+                account_id,
+                entry_id,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::CancelOutbox { entry_id });
+            }
+            Command::SnoozeMessages {
+                message_ids,
+                due_at,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::SnoozeMessages { message_ids, due_at });
+                }
+            }
+            Command::UnsnoozeMessages {
+                message_ids,
+            } => {
+                let mut by_account: HashMap<AccountId, Vec<MessageId>> = HashMap::new();
+                for message_id in message_ids {
+                    if let Some(account_id) = account_for_message(&state, message_id) {
+                        by_account.entry(account_id).or_default().push(message_id);
+                    }
+                }
+                for (account_id, message_ids) in by_account {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::UnsnoozeMessages { message_ids });
+                }
+            }
+            Command::ApplyRules {
+                folder_id,
+                message_ids,
+            } => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::ApplyRules { folder_id, message_ids });
+                }
+            }
+            Command::CreateFolder {
+                account_id,
+                name,
+                delimiter,
+                role,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::CreateFolder {
+                    account_id,
+                    name,
+                    delimiter,
+                    role,
+                });
+            }
+            Command::RenameFolder {
+                folder_id,
+                new_name,
+            } => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::RenameFolder { folder_id, new_name });
+                }
+            }
+            Command::DeleteFolder(folder_id) => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::DeleteFolder(folder_id));
+                }
+            }
+            Command::SubscribeFolder {
+                folder_id,
+                subscribe,
+            } => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::SubscribeFolder { folder_id, subscribe });
+                }
+            }
         }
     }
 
@@ -245,7 +728,9 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
         let _ = worker.send(WorkerCommand::Stop);
     }
     sender.abort();
+    scheduled.abort();
     let _ = sender.await;
+    let _ = scheduled.await;
 }
 
 fn ensure_worker(
@@ -294,7 +779,7 @@ async fn account_worker(
     let mut backoff = INITIAL_BACKOFF;
 
     loop {
-        let account = match state.mailbox.account(&account_id) {
+        let mut account = match state.mailbox.account(&account_id) {
             Ok(Some(account)) => account,
             Ok(None) => return,
             Err(error) => {
@@ -306,12 +791,29 @@ async fn account_worker(
                 continue;
             }
         };
-        let password = match state.mailbox.password(&account_id) {
-            Ok(password) => password,
-            Err(error) => {
+
+        // Refresh an expiring OAuth2 access token before connecting. The
+        // refreshed token is persisted so a restart does not need another
+        // round-trip.
+        if let Err(error) = refresh_oauth_tokens(&state, &mut account).await {
+            state.mailbox.publish(Event::AccountError {
+                account_id,
+                message: error.to_string(),
+            });
+            tracing::warn!(%account_id, %error, "could not refresh OAuth2 tokens");
+            if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
+                return;
+            }
+            backoff = next_backoff(backoff);
+            continue;
+        }
+
+        // For OAuth2 accounts, we need the access token instead of a password
+        let auth_creds = if account.imap.auth_method == AuthMethod::OAuth2 {
+            if account.imap.oauth2.access_token.is_empty() {
                 state.mailbox.publish(Event::AccountError {
                     account_id,
-                    message: error.to_string(),
+                    message: "OAuth2 access token not configured".into(),
                 });
                 if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
                     return;
@@ -319,16 +821,44 @@ async fn account_worker(
                 backoff = next_backoff(backoff);
                 continue;
             }
+            // Create a secret string with the access token for OAuth2
+            Either::Right(secrecy::SecretString::new(
+                account.imap.oauth2.access_token.clone().into(),
+            ))
+        } else {
+            let password = match state.mailbox.password(&account_id) {
+                Ok(password) => password,
+                Err(error) => {
+                    state.mailbox.publish(Event::AccountError {
+                        account_id,
+                        message: error.to_string(),
+                    });
+                    if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
+                        return;
+                    }
+                    backoff = next_backoff(backoff);
+                    continue;
+                }
+            };
+            Either::Left(password)
         };
 
         let started = Instant::now();
-        match run_session(&state, &account, &password, &mut commands, &mut pending).await {
+        match run_session(&state, &account, auth_creds, &mut commands, &mut pending).await {
             Ok(()) => return,
             Err(error) => {
                 state.mailbox.publish(Event::AccountError {
                     account_id,
                     message: error.to_string(),
                 });
+                // Connection/TCP failures -> Offline, others -> Error
+                let is_offline = error.to_string().to_lowercase().contains("connection")
+                    || error.to_string().to_lowercase().contains("tcp")
+                    || error.to_string().to_lowercase().contains("timeout")
+                    || error.to_string().to_lowercase().contains("dns")
+                    || error.to_string().to_lowercase().contains("network");
+                let status = if is_offline { SyncStatus::Offline } else { SyncStatus::Error };
+                set_sync_status(&state, account_id, status);
                 tracing::warn!(%account_id, %error, "account session failed");
                 if started.elapsed() > Duration::from_secs(60) {
                     backoff = INITIAL_BACKOFF;
@@ -344,6 +874,35 @@ async fn account_worker(
 
 fn next_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BACKOFF)
+}
+
+/// Refresh the OAuth2 access token in place when it is about to expire.
+///
+/// A no-op for password accounts, accounts without a refresh token, and tokens
+/// that are still valid. New tokens are written back to the store so they
+/// survive a restart.
+async fn refresh_oauth_tokens(state: &Arc<EngineState>, account: &mut Account) -> Result<()> {
+    if account.imap.auth_method != AuthMethod::OAuth2 {
+        return Ok(());
+    }
+    let tokens = &account.imap.oauth2;
+    if tokens.refresh_token.is_empty() || !tokens.is_expired() {
+        return Ok(());
+    }
+
+    let provider = tokens.provider;
+    let client_id = tokens.client_id.clone();
+    let refresh_token = tokens.refresh_token.clone();
+    let refreshed = tokio::task::spawn_blocking(move || {
+        crate::oauth::refresh(provider, &client_id, &refresh_token)
+    })
+    .await
+    .map_err(|error| Error::OAuth(format!("token refresh task failed: {error}")))??;
+
+    account.imap.oauth2 = refreshed.clone();
+    account.smtp.oauth2 = refreshed;
+    state.mailbox.save_account(account, None)?;
+    Ok(())
 }
 
 /// Wait before reconnecting, but keep accepting commands. Returns `false` when
@@ -370,12 +929,17 @@ async fn wait_with_backoff(
 async fn run_session(
     state: &Arc<EngineState>,
     account: &Account,
-    password: &str,
+    auth_creds: Either<SecretString, SecretString>,
     commands: &mut mpsc::UnboundedReceiver<WorkerCommand>,
     pending: &mut VecDeque<WorkerCommand>,
 ) -> Result<()> {
     let tls = crate::tls::client_config()?;
-    let mut session = ImapSession::connect(&account.imap, password, tls).await?;
+    let password_or_token = match &auth_creds {
+        Either::Left(p) => p.expose_secret(),
+        Either::Right(t) => t.expose_secret(),
+    };
+    let mut session = ImapSession::connect(&account.imap, password_or_token, tls).await?;
+    set_sync_status(state, account.id, SyncStatus::Syncing);
     let remote = session.list_folders().await?;
     sync::refresh_folders(&state.mailbox, account.id, &remote)?;
 
@@ -386,6 +950,8 @@ async fn run_session(
         let mode = initial_mode(&inbox);
         sync_folder_logged(&mut session, state, inbox.id, mode).await;
     }
+    set_sync_status(state, account.id, SyncStatus::Connected);
+    set_last_sync_at(state, account.id, crate::now_unix());
 
     let mut last_full = Instant::now();
 
@@ -484,6 +1050,8 @@ async fn idle_wait(
 ) -> Result<(ImapSession, Option<WorkerCommand>, bool)> {
     let condstore = session.supports_condstore();
     let idle = session.supports_idle();
+    let supports_move = session.supports_move();
+    let supports_uidplus = session.supports_uidplus();
     let mut handle = session.into_session().idle();
     handle
         .init()
@@ -516,7 +1084,7 @@ async fn idle_wait(
         .await
         .map_err(|e| Error::Imap(format!("IDLE failed: {e}")))?;
     Ok((
-        ImapSession::from_session(inner, condstore, idle),
+        ImapSession::from_session(inner, condstore, idle, supports_move, supports_uidplus),
         command,
         new_data,
     ))
@@ -547,6 +1115,9 @@ async fn handle_command(
                 sync_folder_logged(session, state, folder_id, mode).await;
             }
         }
+        WorkerCommand::SyncCalendars => {
+            sync_calendars(session, state, account).await?;
+        }
         WorkerCommand::FetchBody(message_id) => {
             fetch_body(session, state, message_id, false).await?;
         }
@@ -559,6 +1130,66 @@ async fn handle_command(
             remove,
         } => {
             set_flags(session, state, message_id, &add, &remove).await?;
+        }
+        WorkerCommand::BulkSetFlags {
+            message_ids,
+            add,
+            remove,
+        } => {
+            bulk_set_flags(session, state, &message_ids, &add, &remove).await?;
+        }
+        WorkerCommand::MoveMessages {
+            message_ids,
+            target,
+        } => {
+            move_messages(session, state, account, &message_ids, target).await?;
+        }
+        WorkerCommand::EmptyTrash => {
+            empty_trash(session, state, account).await?;
+        }
+        WorkerCommand::SaveDraft { draft } => {
+            save_draft(session, state, account, *draft).await?;
+        }
+        WorkerCommand::DiscardDraft { draft_key } => {
+            discard_draft(session, state, account, &draft_key).await?;
+        }
+        WorkerCommand::RetryOutbox { entry_id } => {
+            state.mailbox.retry_outbox(entry_id)?;
+        }
+        WorkerCommand::CancelOutbox { entry_id } => {
+            state.mailbox.cancel_outbox(entry_id)?;
+        }
+        WorkerCommand::SnoozeMessages { message_ids, due_at } => {
+            snooze_messages(session, state, account, &message_ids, due_at).await?;
+        }
+        WorkerCommand::UnsnoozeMessages { message_ids } => {
+            unsnooze_messages(session, state, account, &message_ids).await?;
+        }
+        WorkerCommand::ApplyRules { folder_id, message_ids } => {
+            apply_rules(session, state, account, folder_id, &message_ids).await?;
+        }
+        WorkerCommand::CreateFolder {
+            account_id,
+            name,
+            delimiter,
+            role,
+        } => {
+            create_folder_imap(session, state, account_id, &name, &delimiter, role).await?;
+        }
+        WorkerCommand::RenameFolder {
+            folder_id,
+            new_name,
+        } => {
+            rename_folder_imap(session, state, folder_id, &new_name).await?;
+        }
+        WorkerCommand::DeleteFolder(folder_id) => {
+            delete_folder_imap(session, state, folder_id).await?;
+        }
+        WorkerCommand::SubscribeFolder {
+            folder_id,
+            subscribe,
+        } => {
+            subscribe_folder_imap(session, state, folder_id, subscribe).await?;
         }
     }
     Ok(false)
@@ -584,7 +1215,7 @@ async fn fetch_body(
         return Ok(());
     };
 
-    let (_, body) = crate::imap::parse::parse_message(&raw);
+    let (header, body) = crate::imap::parse::parse_message(&raw);
     let store = state.mailbox.store();
     if store.set_body(
         message_id,
@@ -593,10 +1224,32 @@ async fn fetch_body(
         body.snippet.as_deref(),
     )? {
         store.replace_attachments(message_id, &body.attachments)?;
+        if let Some(pgp) = &body.pgp {
+            store.upsert_pgp_mime(
+                message_id,
+                pgp.kind,
+                &pgp.payload,
+                pgp.signature.as_deref(),
+            )?;
+        }
         state.mailbox.publish(Event::BodyReady { message_id });
         state.mailbox.publish(Event::MessagesChanged {
             folder_id: folder.id,
         });
+        // Apply rules that depend on body content
+        state.mailbox.apply_rules(folder.id, &[message_id]);
+    }
+    // Seed contacts from full message headers
+    let account_id = folder.account_id;
+    if let Some(addr) = &header.from_addr {
+        let name = header.from_name.as_deref().unwrap_or("");
+        let _ = store.upsert_contact(&account_id, addr, name, false);
+    }
+    for addr in crate::sync::parse_address_list(&header.to_addrs) {
+        let _ = store.upsert_contact(&account_id, &addr, "", false);
+    }
+    for addr in crate::sync::parse_address_list(&header.cc_addrs) {
+        let _ = store.upsert_contact(&account_id, &addr, "", false);
     }
     Ok(())
 }
@@ -641,6 +1294,658 @@ async fn set_flags(
     Ok(())
 }
 
+/// Apply flag changes to many messages at once. Messages are grouped by
+/// source folder so a bulk action costs one `SELECT` and at most two
+/// `UID STORE` commands per folder instead of a round-trip per message.
+async fn bulk_set_flags(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    message_ids: &[MessageId],
+    add: &[String],
+    remove: &[String],
+) -> Result<()> {
+    if message_ids.is_empty() || (add.is_empty() && remove.is_empty()) {
+        return Ok(());
+    }
+
+    let mut groups: HashMap<FolderId, Vec<_>> = HashMap::new();
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else {
+            continue;
+        };
+        groups.entry(message.folder_id).or_default().push(message);
+    }
+
+    for (folder_id, messages) in groups {
+        let Some(folder) = state.mailbox.folder(folder_id)? else {
+            continue;
+        };
+        let uids: Vec<u32> = messages.iter().map(|message| message.uid).collect();
+        session.select(&folder.name).await?;
+        session.store_flags_many(&uids, add, remove).await?;
+
+        let updates: Vec<(u32, Vec<String>)> = messages
+            .iter()
+            .map(|message| {
+                let mut flags = message.flags.clone();
+                for flag in add {
+                    if !flags
+                        .iter()
+                        .any(|current| current.eq_ignore_ascii_case(flag))
+                    {
+                        flags.push(flag.clone());
+                    }
+                }
+                flags.retain(|current| {
+                    !remove
+                        .iter()
+                        .any(|removed| current.eq_ignore_ascii_case(removed))
+                });
+                (message.uid, flags)
+            })
+            .collect();
+        state.mailbox.store().set_flags_many(folder_id, &updates)?;
+        state.mailbox.publish(Event::MessagesChanged { folder_id });
+    }
+    Ok(())
+}
+
+async fn move_messages(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    message_ids: &[MessageId],
+    target: MoveTarget,
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+
+    // Group by source folder and destination so a multi-select move uses one
+    // UID command per folder instead of one connection round-trip per message.
+    let mut groups: MoveGroups = HashMap::new();
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else {
+            continue;
+        };
+        let Some(source) = folders.iter().find(|folder| folder.id == message.folder_id) else {
+            continue;
+        };
+
+        let destination = match target {
+            MoveTarget::Folder(folder_id) => folders.iter().find(|folder| folder.id == folder_id),
+            // Deleting a message that already sits in Trash is permanent.
+            MoveTarget::Trash if source.role == FolderRole::Trash => None,
+            MoveTarget::Trash => find_role(&folders, FolderRole::Trash),
+            MoveTarget::Archive => find_role(&folders, FolderRole::Archive),
+            MoveTarget::Junk => find_role(&folders, FolderRole::Junk),
+            MoveTarget::Inbox => find_role(&folders, FolderRole::Inbox),
+            MoveTarget::Permanent => None,
+        };
+
+        if matches!(target, MoveTarget::Folder(_)) && destination.is_none() {
+            return Err(Error::FolderNotFound(match target {
+                MoveTarget::Folder(folder_id) => folder_id.0,
+                _ => 0,
+            }));
+        }
+        if matches!(
+            target,
+            MoveTarget::Trash | MoveTarget::Archive | MoveTarget::Junk | MoveTarget::Inbox
+        ) && destination.is_none()
+        {
+            return Err(Error::Config(format!(
+                "the account has no {} folder",
+                match target {
+                    MoveTarget::Trash => "Trash",
+                    MoveTarget::Archive => "Archive",
+                    MoveTarget::Junk => "Junk",
+                    _ => "Inbox",
+                }
+            )));
+        }
+
+        let destination = destination.map(|folder| folder.id);
+        if destination == Some(source.id) {
+            continue;
+        }
+        groups
+            .entry((source.id, destination))
+            .or_default()
+            .push((*message_id, message.uid));
+    }
+
+    let mut destinations = Vec::new();
+    for ((source_id, destination), items) in groups {
+        let Some(source) = folders.iter().find(|folder| folder.id == source_id) else {
+            continue;
+        };
+        let uids: Vec<u32> = items.iter().map(|(_, uid)| *uid).collect();
+        session.select(&source.name).await?;
+
+        if let Some(destination) = destination {
+            let Some(target_folder) = folders.iter().find(|folder| folder.id == destination) else {
+                return Err(Error::FolderNotFound(destination.0));
+            };
+            session.move_messages(&uids, &target_folder.name).await?;
+            destinations.push(destination);
+        } else {
+            session.delete_messages(&uids).await?;
+        }
+
+        for (message_id, _) in &items {
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+        }
+        state.mailbox.publish(Event::MessagesChanged {
+            folder_id: source_id,
+        });
+    }
+
+    // Pull the moved messages into the destination cache immediately rather
+    // than waiting for the next background poll.
+    destinations.sort();
+    destinations.dedup();
+    for folder_id in destinations {
+        sync_folder_logged(session, state, folder_id, SyncMode::Full).await;
+    }
+    Ok(())
+}
+
+async fn snooze_messages(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    message_ids: &[MessageId],
+    due_at: i64,
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+        return Err(Error::Config("the account has no Snoozed folder; create one on the server first".into()));
+    };
+
+    // Group by source folder
+    let mut groups: HashMap<FolderId, Vec<(MessageId, u32, FolderId)>> = HashMap::new();
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else { continue; };
+        groups.entry(message.folder_id).or_default().push((*message_id, message.uid, message.folder_id));
+    }
+
+    for (source_id, items) in groups {
+        let Some(source) = folders.iter().find(|f| f.id == source_id) else { continue; };
+        let uids: Vec<u32> = items.iter().map(|(_, uid, _)| *uid).collect();
+        session.select(&source.name).await?;
+        session.move_messages(&uids, &snoozed.name).await?;
+
+        for (message_id, _, return_to_folder_id) in items {
+            // Remove from source cache
+            let _ = state.mailbox.store().delete_message_by_id(message_id)?;
+            // Schedule unsnooze
+            let payload = crate::model::SnoozePayload {
+                message_id: message_id.0,
+                return_to_folder_id: return_to_folder_id.0,
+            };
+            let payload_json = serde_json::to_string(&payload)?;
+            state.mailbox.store().schedule_action(&account.id, due_at, "snooze_message", &payload_json)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source_id });
+        }
+    }
+
+    // Sync the Snoozed folder to pull in the moved messages
+    sync_folder_logged(session, state, snoozed.id, SyncMode::Full).await;
+    Ok(())
+}
+
+async fn unsnooze_messages(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    message_ids: &[MessageId],
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+        return Ok(()); // No snoozed folder, nothing to do
+    };
+
+    // Get messages from snoozed folder
+    let mut to_unsnooze = Vec::new();
+    for message_id in message_ids {
+        if let Some(message) = state.mailbox.message(*message_id)? {
+            if message.folder_id == snoozed.id {
+                to_unsnooze.push((message_id, message));
+            }
+        }
+    }
+
+    if to_unsnooze.is_empty() {
+        return Ok(());
+    }
+
+    // Group by return folder (we need to look up the scheduled action for return_to_folder_id)
+    for (message_id, message) in to_unsnooze {
+        // Find the scheduled action to get return_to_folder_id
+        let store = state.mailbox.store();
+        let actions = store.due_actions()?; // This gets all pending, we need a better query
+        // For now, we'll use a simpler approach: move back to Inbox if we can't find the original
+        let return_folder_id = find_role(&folders, FolderRole::Inbox).map(|f| f.id);
+        if let Some(return_folder_id) = return_folder_id {
+            let uids = vec![message.uid];
+            session.select(&snoozed.name).await?;
+            session.move_messages(&uids, &folders.iter().find(|f| f.id == return_folder_id).unwrap().name).await?;
+            let _ = store.delete_message_by_id(*message_id)?;
+            store.set_action_state(message_id.0, "done", None)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: snoozed.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: return_folder_id });
+        }
+    }
+
+    // Also cancel any pending scheduled actions for these messages
+    let store = state.mailbox.store();
+    let all_actions = store.due_actions()?;
+    for action in all_actions {
+        if action.kind == "snooze_message" {
+            if let Ok(payload) = serde_json::from_str::<crate::model::SnoozePayload>(&action.payload_json) {
+                if message_ids.iter().any(|m| m.0 == payload.message_id) {
+                    store.set_action_state(action.id, "done", None)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_rules(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    folder_id: FolderId,
+    message_ids: &[MessageId],
+) -> Result<()> {
+    use crate::rules::{eval_rule, parse_actions, RegexCache};
+
+    let store = state.mailbox.store();
+    let rules = store.list_rules(&account.id)?;
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    let mut regex_cache = RegexCache::default();
+
+    for message_id in message_ids {
+        let Some(message) = state.mailbox.message(*message_id)? else {
+            continue;
+        };
+
+        // Get body if available for body conditions
+        let body_text = if message.body_fetched {
+            store.body(message.id)?.and_then(|(text, _html)| text)
+        } else {
+            None
+        };
+
+        for rule in &rules {
+            if eval_rule(rule, &message, body_text.as_deref(), &mut regex_cache) {
+                let actions = parse_actions(rule);
+                for action in actions {
+                    execute_rule_action(session, state, account, &action, message_id).await?;
+                }
+                if rule.stop {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn execute_rule_action(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    action: &crate::model::RuleAction,
+    message_id: &MessageId,
+) -> Result<()> {
+    use crate::model::FolderRole;
+
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(message) = state.mailbox.message(*message_id)? else {
+        return Ok(());
+    };
+
+    match action.kind.as_str() {
+        "move" => {
+            // Value is the target folder role or folder ID
+            let target_folder = if let Ok(folder_id) = action.value.parse::<i64>() {
+                folders.iter().find(|f| f.id.0 == folder_id)
+            } else {
+                find_role(&folders, action.value.parse().unwrap_or(FolderRole::Other))
+            };
+
+            if let Some(target) = target_folder {
+                let uids = vec![message.uid];
+                let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                    return Ok(());
+                };
+                session.select(&source.name).await?;
+                session.move_messages(&uids, &target.name).await?;
+                let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+                state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+                state.mailbox.publish(Event::MessagesChanged { folder_id: target.id });
+            }
+        }
+        "copy" => {
+            // Similar to move but without deleting from source
+            let target_folder = if let Ok(folder_id) = action.value.parse::<i64>() {
+                folders.iter().find(|f| f.id.0 == folder_id)
+            } else {
+                find_role(&folders, action.value.parse().unwrap_or(FolderRole::Other))
+            };
+
+            if let Some(target) = target_folder {
+                let uids = vec![message.uid];
+                let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                    return Ok(());
+                };
+                session.select(&source.name).await?;
+                session.copy_messages(&uids, &target.name).await?;
+                // Note: we don't delete from source for copy
+                state.mailbox.publish(Event::MessagesChanged { folder_id: target.id });
+            }
+        }
+        "flag" => {
+            // Value is the flag to add
+            let flags = vec![action.value.clone()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &flags, &[]).await?;
+            let mut msg_flags = message.flags.clone();
+            if !msg_flags.iter().any(|f| f.eq_ignore_ascii_case(&action.value)) {
+                msg_flags.push(action.value.clone());
+            }
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "unflag" => {
+            // Value is the flag to remove
+            let flags = vec![action.value.clone()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &[], &flags).await?;
+            let mut msg_flags = message.flags.clone();
+            msg_flags.retain(|f| !f.eq_ignore_ascii_case(&action.value));
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "mark_read" => {
+            let flags = vec!["\\Seen".to_string()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &flags, &[]).await?;
+            let mut msg_flags = message.flags.clone();
+            if !msg_flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen")) {
+                msg_flags.push("\\Seen".to_string());
+            }
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "mark_unread" => {
+            let flags = vec!["\\Seen".to_string()];
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            session.select(&source.name).await?;
+            session.store_flags(message.uid, &[], &flags).await?;
+            let mut msg_flags = message.flags.clone();
+            msg_flags.retain(|f| !f.eq_ignore_ascii_case("\\Seen"));
+            state.mailbox.store().set_flags(source.id, message.uid, &msg_flags)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+        }
+        "trash" => {
+            let Some(trash) = find_role(&folders, FolderRole::Trash) else {
+                return Err(Error::Config("no Trash folder".into()));
+            };
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            if source.id == trash.id {
+                return Ok(()); // Already in trash
+            }
+            let uids = vec![message.uid];
+            session.select(&source.name).await?;
+            session.move_messages(&uids, &trash.name).await?;
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: trash.id });
+        }
+        "archive" => {
+            let Some(archive) = find_role(&folders, FolderRole::Archive) else {
+                return Err(Error::Config("no Archive folder".into()));
+            };
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            let uids = vec![message.uid];
+            session.select(&source.name).await?;
+            session.move_messages(&uids, &archive.name).await?;
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: archive.id });
+        }
+        "junk" => {
+            let Some(junk) = find_role(&folders, FolderRole::Junk) else {
+                return Err(Error::Config("no Junk folder".into()));
+            };
+            let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                return Ok(());
+            };
+            let uids = vec![message.uid];
+            session.select(&source.name).await?;
+            session.move_messages(&uids, &junk.name).await?;
+            let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: junk.id });
+        }
+        "snooze" => {
+            // Value is due_at timestamp
+            if let Ok(due_at) = action.value.parse::<i64>() {
+                state.mailbox.store().schedule_action(
+                    &account.id,
+                    due_at,
+                    "snooze_message",
+                    &serde_json::to_string(&crate::model::SnoozePayload {
+                        message_id: message_id.0,
+                        return_to_folder_id: message.folder_id.0,
+                    })?,
+                )?;
+                let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+                    return Err(Error::Config("no Snoozed folder".into()));
+                };
+                let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
+                    return Ok(());
+                };
+                let uids = vec![message.uid];
+                session.select(&source.name).await?;
+                session.move_messages(&uids, &snoozed.name).await?;
+                let _ = state.mailbox.store().delete_message_by_id(*message_id)?;
+                state.mailbox.publish(Event::MessagesChanged { folder_id: source.id });
+                state.mailbox.publish(Event::MessagesChanged { folder_id: snoozed.id });
+            }
+        }
+        "stop" => {
+            // Stop processing further rules
+            return Ok(());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+async fn empty_trash(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(trash) = find_role(&folders, FolderRole::Trash) else {
+        return Err(Error::Config("the account has no Trash folder".into()));
+    };
+    session.select(&trash.name).await?;
+    let mut uids: Vec<u32> = session.search("ALL").await?.into_iter().collect();
+    uids.sort_unstable();
+    if !uids.is_empty() {
+        session.delete_messages(&uids).await?;
+    }
+    state.mailbox.store().clear_folder_messages(trash.id)?;
+    state.mailbox.publish(Event::MessagesChanged {
+        folder_id: trash.id,
+    });
+    Ok(())
+}
+
+fn find_role(folders: &[Folder], role: FolderRole) -> Option<&Folder> {
+    folders.iter().find(|folder| folder.role == role)
+}
+
+async fn save_draft(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    mut draft: OutgoingMessage,
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(drafts) = find_role(&folders, FolderRole::Drafts).cloned() else {
+        return Err(Error::Config(
+            "the account has no Drafts folder; create one on the server first".into(),
+        ));
+    };
+    if draft.draft_key.is_none() {
+        draft.draft_key = Some(crate::compose::new_draft_key(&draft.from_addr));
+    }
+    let raw = draft.build_draft()?;
+
+    session.select(&drafts.name).await?;
+    if let Some(key) = draft.draft_key.clone() {
+        discard_draft_key(session, state, &drafts, &key).await?;
+    }
+    session
+        .append(&drafts.name, "(\\Draft \\Seen)", &raw)
+        .await?;
+    sync_folder_logged(session, state, drafts.id, SyncMode::Full).await;
+    Ok(())
+}
+
+async fn discard_draft(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+    draft_key: &str,
+) -> Result<()> {
+    let folders = state.mailbox.list_folders(&account.id)?;
+    let Some(drafts) = find_role(&folders, FolderRole::Drafts).cloned() else {
+        return Ok(());
+    };
+    session.select(&drafts.name).await?;
+    discard_draft_key(session, state, &drafts, draft_key).await
+}
+
+async fn discard_draft_key(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    drafts: &Folder,
+    draft_key: &str,
+) -> Result<()> {
+    let key = draft_key
+        .trim()
+        .trim_matches(['<', '>'])
+        .replace(['"', '\r', '\n'], "");
+    if key.is_empty() {
+        return Ok(());
+    }
+    let query = format!("HEADER Message-ID \"<{key}>\"");
+    let mut uids: Vec<u32> = session.search(&query).await?.into_iter().collect();
+    uids.sort_unstable();
+    if uids.is_empty() {
+        return Ok(());
+    }
+    session.delete_messages(&uids).await?;
+    for uid in uids {
+        let _ = state.mailbox.store().delete_message(drafts.id, uid)?;
+    }
+    state.mailbox.publish(Event::MessagesChanged {
+        folder_id: drafts.id,
+    });
+    Ok(())
+}
+
+/// Create a new folder via IMAP and locally.
+async fn create_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account_id: AccountId,
+    name: &str,
+    delimiter: &str,
+    role: FolderRole,
+) -> Result<()> {
+    session.create_folder(name).await?;
+    let remote = session.list_folders().await?;
+    sync::refresh_folders(&state.mailbox, account_id, &remote)?;
+    Ok(())
+}
+
+/// Rename a folder via IMAP and locally.
+async fn rename_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder_id: FolderId,
+    new_name: &str,
+) -> Result<()> {
+    let Some(folder) = state.mailbox.folder(folder_id)? else {
+        return Ok(());
+    };
+    session.rename_folder(&folder.name, new_name).await?;
+    let remote = session.list_folders().await?;
+    sync::refresh_folders(&state.mailbox, folder.account_id, &remote)?;
+    Ok(())
+}
+
+/// Delete a folder via IMAP and locally.
+async fn delete_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder_id: FolderId,
+) -> Result<()> {
+    let Some(folder) = state.mailbox.folder(folder_id)? else {
+        return Ok(());
+    };
+    session.delete_folder(&folder.name).await?;
+    let _ = state.mailbox.store().delete_folder(folder_id)?;
+    Ok(())
+}
+
+/// Subscribe or unsubscribe from a folder via IMAP.
+async fn subscribe_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder_id: FolderId,
+    subscribe: bool,
+) -> Result<()> {
+    let Some(folder) = state.mailbox.folder(folder_id)? else {
+        return Ok(());
+    };
+    if subscribe {
+        session.subscribe_folder(&folder.name).await?;
+    } else {
+        session.unsubscribe_folder(&folder.name).await?;
+    }
+    let remote = session.list_folders().await?;
+    sync::refresh_folders(&state.mailbox, folder.account_id, &remote)?;
+    Ok(())
+}
+
 async fn sync_folder_logged(
     session: &mut ImapSession,
     state: &Arc<EngineState>,
@@ -657,6 +1962,21 @@ async fn sync_folder_logged(
     };
     if let Err(error) = sync::sync_folder(session, &state.mailbox, &folder, mode).await {
         tracing::warn!(folder = %folder.name, %error, "folder synchronization failed");
+        return;
+    }
+
+    // Draft bodies are needed as soon as the user resumes one, and there are
+    // usually only a handful, so fetch them eagerly.
+    if folder.role == FolderRole::Drafts
+        && let Ok(messages) = state.mailbox.store().list_messages(folder.id, 0, 200)
+    {
+        for message in messages {
+            if !message.body_fetched
+                && let Err(error) = fetch_body(session, state, message.id, false).await
+            {
+                tracing::debug!(%error, "could not fetch a draft body");
+            }
+        }
     }
 }
 
@@ -684,6 +2004,119 @@ fn initial_mode(folder: &Folder) -> SyncMode {
     } else {
         SyncMode::Incremental
     }
+}
+
+/// Update the sync status for an account and emit the change event.
+fn set_sync_status(state: &Arc<EngineState>, account_id: AccountId, status: SyncStatus) {
+    let mut guard = state.sync_status.write().unwrap();
+    let changed = guard.get(&account_id).map_or(true, |old| *old != status);
+    if changed {
+        guard.insert(account_id, status);
+        state.mailbox.publish(ClientEvent::SyncStatusChanged {
+            account_id,
+            status,
+        });
+    }
+}
+
+/// Update the last successful sync timestamp for an account.
+fn set_last_sync_at(state: &Arc<EngineState>, account_id: AccountId, timestamp: i64) {
+    state
+        .last_sync_at
+        .write()
+        .unwrap()
+        .insert(account_id, timestamp);
+}
+
+/// Sync calendars for an account using CalDAV.
+async fn sync_calendars(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account: &Account,
+) -> Result<()> {
+    use crate::caldav::{CalDavClient, parse_ical_event};
+
+    // Check if the account has CalDAV settings
+    let caldav_url = account.caldav_url.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let caldav_username = account.caldav_username.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let caldav_password = account.caldav_password.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+
+    let (Some(url), Some(username), Some(password)) = (caldav_url, caldav_username, caldav_password) else {
+        // No CalDAV configured, skip silently
+        return Ok(());
+    };
+
+    let client = CalDavClient::new(url, username, password);
+
+    // Discover calendar home
+    let home_url = match client.discover_calendar_home() {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::warn!(account = %account.email, %error, "CalDAV calendar home discovery failed");
+            return Ok(());
+        }
+    };
+
+    // List calendars
+    let calendars = match client.list_calendars(&home_url) {
+        Ok(calendars) => calendars,
+        Err(error) => {
+            tracing::warn!(account = %account.email, %error, "CalDAV calendar listing failed");
+            return Ok(());
+        }
+    };
+
+    for calendar in calendars {
+        // Get or create calendar in local store
+        let cal_id = match state.mailbox.store().upsert_calendar(
+            &account.id,
+            &calendar.href,
+            &calendar.display_name,
+            calendar.color.as_deref(),
+            calendar.ctag.as_deref(),
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(account = %account.email, %error, "could not upsert calendar");
+                continue;
+            }
+        };
+
+        // Sync events
+        let events = match client.sync_calendar(&calendar.href, calendar.ctag.as_deref()) {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(account = %account.email, calendar = %calendar.display_name, %error, "CalDAV calendar sync failed");
+                continue;
+            }
+        };
+
+        for event_info in events {
+            let event = match parse_ical_event(&event_info.ical, cal_id) {
+                Ok(event) => event,
+                Err(error) => {
+                    tracing::debug!(%error, "could not parse iCal event");
+                    continue;
+                }
+            };
+
+            let mut event = event;
+            event.etag = Some(event_info.etag);
+
+            if let Err(error) = state.mailbox.store().upsert_calendar_event(&event) {
+                tracing::warn!(%error, "could not upsert calendar event");
+            }
+        }
+
+        // Update ctag if we got one from the sync
+        if let Some(ref new_ctag) = calendar.ctag {
+            if let Err(error) = state.mailbox.store().update_calendar_ctag(cal_id, new_ctag) {
+                tracing::debug!(%error, "could not update calendar ctag");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn outbox_sender(state: Arc<EngineState>) {
@@ -717,12 +2150,111 @@ async fn outbox_sender(state: Arc<EngineState>) {
     }
 }
 
+/// Background worker that executes scheduled actions (snooze, send-later, etc.)
+async fn scheduled_worker(state: Arc<EngineState>) {
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let notify_clone = notify.clone();
+
+    loop {
+        // Process all due actions
+        let actions = match state.mailbox.store().due_actions() {
+            Ok(actions) => actions,
+            Err(e) => {
+                tracing::warn!(%e, "failed to fetch due scheduled actions");
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
+        };
+
+        for action in actions {
+            let result = execute_scheduled_action(&state, &action).await;
+            if let Err(e) = result {
+                tracing::warn!(action_id = action.id, %e, "scheduled action failed");
+                let _ = state.mailbox.store().set_action_state(action.id, "failed", Some(&e.to_string()));
+            } else {
+                let _ = state.mailbox.store().set_action_state(action.id, "done", None);
+            }
+        }
+
+        // Wait for next check: either 60 seconds or until notified
+        let _ = tokio::time::timeout(Duration::from_secs(60), notify_clone.notified()).await;
+    }
+}
+
+async fn execute_scheduled_action(state: &Arc<EngineState>, action: &ScheduledAction) -> Result<()> {
+    match action.kind.as_str() {
+        "snooze_message" => {
+            let payload: SnoozePayload = serde_json::from_str(&action.payload_json)?;
+            let message_id = MessageId(payload.message_id);
+            let return_folder_id = FolderId(payload.return_to_folder_id);
+
+            // Move message back to original folder
+            let folders = state.mailbox.list_folders(&action.account_id)?;
+            let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+                return Err(Error::Config("no Snoozed folder".into()));
+            };
+            let Some(return_folder) = folders.iter().find(|f| f.id == return_folder_id) else {
+                return Err(Error::Config("return folder not found".into()));
+            };
+
+            let Some(message) = state.mailbox.message(message_id)? else {
+                return Ok(()); // Already gone
+            };
+
+            if message.folder_id != snoozed.id {
+                return Ok(()); // Not in snoozed folder anymore
+            }
+
+            let uids = vec![message.uid];
+            let account = state.mailbox.account(&action.account_id)?.ok_or(Error::AccountNotFound(action.account_id))?;
+            let password = state.mailbox.password(&action.account_id)?;
+            let mut session = crate::imap::ImapSession::connect(
+                &account.imap,
+                password.expose_secret(),
+                crate::tls::client_config()?,
+            ).await?;
+
+            session.select(&snoozed.name).await?;
+            session.move_messages(&uids, &return_folder.name).await?;
+
+            let _ = state.mailbox.store().delete_message_by_id(message_id)?;
+            state.mailbox.publish(Event::MessagesChanged { folder_id: snoozed.id });
+            state.mailbox.publish(Event::MessagesChanged { folder_id: return_folder_id });
+            Ok(())
+        }
+        _ => Err(Error::Config(format!("unknown scheduled action kind: {}", action.kind))),
+    }
+}
+
 async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
-    let account = state
+    let mut account = state
         .mailbox
         .account(&entry.account_id)?
         .ok_or(Error::AccountNotFound(entry.account_id))?;
-    let password = state.mailbox.password(&entry.account_id)?;
+
+    // SMTP may be used before the IMAP worker has refreshed an expiring token.
+    refresh_oauth_tokens(state, &mut account).await?;
+
+    // For OAuth2 accounts, use the access token
+    let auth_creds = if account.smtp.auth_method == AuthMethod::OAuth2 {
+        if account.smtp.oauth2.access_token.is_empty() {
+            return Err(Error::Config(
+                "OAuth2 access token not configured for SMTP".into(),
+            ));
+        }
+        Either::Right(secrecy::SecretString::new(
+            account.smtp.oauth2.access_token.clone().into(),
+        ))
+    } else {
+        let password = state.mailbox.password(&entry.account_id)?;
+        Either::Left(password)
+    };
+
+    let password_or_token = match &auth_creds {
+        Either::Left(p) => p.expose_secret(),
+        Either::Right(t) => t.expose_secret(),
+    };
+
     let envelope: OutgoingEnvelope = serde_json::from_str(&entry.envelope_json)?;
 
     state
@@ -731,7 +2263,7 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
         .set_outbox_state(entry.id, OutboxState::Sending, None)?;
     state.mailbox.publish(Event::OutboxChanged);
 
-    crate::smtp::send(&account.smtp, &password, &entry.raw, &envelope).await?;
+    crate::smtp::send(&account.smtp, password_or_token, &entry.raw, &envelope).await?;
 
     // Mark the message as sent before the best-effort Sent copy: a server
     // without a usable Sent folder must not cause a second SMTP submission.
@@ -741,11 +2273,16 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
         .set_outbox_state(entry.id, OutboxState::Sent, None)?;
     state.mailbox.publish(Event::OutboxChanged);
 
-    append_to_sent(state, &account, &password, &entry.raw).await;
+    append_to_sent(state, &account, password_or_token, &entry.raw).await;
     Ok(())
 }
 
-async fn append_to_sent(state: &Arc<EngineState>, account: &Account, password: &str, raw: &[u8]) {
+async fn append_to_sent(
+    state: &Arc<EngineState>,
+    account: &Account,
+    password_or_token: &str,
+    raw: &[u8],
+) {
     let sent = match state.mailbox.list_folders(&account.id) {
         Ok(folders) => folders
             .into_iter()
@@ -764,7 +2301,7 @@ async fn append_to_sent(state: &Arc<EngineState>, account: &Account, password: &
             return;
         }
     };
-    match ImapSession::connect(&account.imap, password, tls).await {
+    match ImapSession::connect(&account.imap, password_or_token, tls).await {
         Ok(mut session) => {
             if let Err(error) = session.append(&sent.name, "(\\Seen)", raw).await {
                 tracing::warn!(folder = %sent.name, %error, "could not append to Sent");

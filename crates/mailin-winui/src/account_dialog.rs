@@ -1,4 +1,4 @@
-//! The "Add Account" wizard.
+//! The "Add/Edit Account" wizard.
 //!
 //! It mirrors the GTK wizard: identity fields, explicit IMAP and SMTP settings,
 //! live server suggestions derived from the address domain, and the same
@@ -8,8 +8,13 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use mailin_core::autoconfig::{self, Suggestion};
-use mailin_core::{Account, AccountId, Security, ServerSettings};
+use mailin_core::{
+    Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
+    ServerSettings,
+};
 use mailin_winui_sys::{ComboBox, Grid, PasswordBox, TextBlock, TextBox, Window};
+use secrecy::SecretString;
+use windows_core::Interface;
 
 use crate::app::AppState;
 use crate::ui;
@@ -21,6 +26,8 @@ struct Draft {
     display_name: String,
     email: String,
     password: String,
+    auth_method: AuthMethod,
+    oauth2: OAuth2Tokens,
     imap: ServerDraft,
     smtp: ServerDraft,
 }
@@ -34,9 +41,17 @@ struct ServerDraft {
 }
 
 impl Draft {
-    fn build(&self) -> std::result::Result<Account, String> {
-        if self.password.is_empty() {
-            return Err("Enter the account password.".to_owned());
+    fn build(&self, require_password: bool) -> std::result::Result<Account, String> {
+        if require_password {
+            match self.auth_method {
+                AuthMethod::Password if self.password.is_empty() => {
+                    return Err("Enter the account password.".to_owned());
+                }
+                AuthMethod::OAuth2 if self.oauth2.access_token.is_empty() => {
+                    return Err("Sign in with the provider to obtain an access token.".to_owned());
+                }
+                _ => {}
+            }
         }
 
         let email = self.email.trim();
@@ -46,8 +61,14 @@ impl Draft {
             self.display_name.trim()
         };
 
-        let imap = self.imap.build(email, "IMAP")?;
-        let smtp = self.smtp.build(email, "SMTP")?;
+        let mut imap = self.imap.build(email, "IMAP")?;
+        let mut smtp = self.smtp.build(email, "SMTP")?;
+        if self.auth_method == AuthMethod::OAuth2 {
+            imap.auth_method = AuthMethod::OAuth2;
+            imap.oauth2 = self.oauth2.clone();
+            smtp.auth_method = AuthMethod::OAuth2;
+            smtp.oauth2 = self.oauth2.clone();
+        }
         let account = Account::new(display_name, email, imap, smtp);
         account.validate().map_err(|error| error.to_string())?;
         Ok(account)
@@ -71,6 +92,8 @@ impl ServerDraft {
             port,
             security: self.security,
             username: username.to_owned(),
+            auth_method: AuthMethod::Password,
+            oauth2: OAuth2Tokens::default(),
         })
     }
 }
@@ -79,6 +102,10 @@ struct FormRows {
     name: TextBox,
     email: TextBox,
     password: PasswordBox,
+    auth_method: ComboBox,
+    oauth_provider: ComboBox,
+    oauth_client_id: TextBox,
+    oauth_tokens: Arc<Mutex<OAuth2Tokens>>,
     imap_host: TextBox,
     imap_port: TextBox,
     imap_user: TextBox,
@@ -87,14 +114,26 @@ struct FormRows {
     smtp_port: TextBox,
     smtp_user: TextBox,
     smtp_security: ComboBox,
+    signature: TextBox,
+    trust_list: mailin_winui_sys::ListView,
+    allowlist: Arc<Mutex<Vec<String>>>,
 }
 
 impl FormRows {
     fn draft(&self) -> Draft {
+        let mut oauth2 = self
+            .oauth_tokens
+            .lock()
+            .map(|tokens| tokens.clone())
+            .unwrap_or_default();
+        oauth2.provider = provider_at(ui::selected_index(&self.oauth_provider));
+        oauth2.client_id = ui::text_value(&self.oauth_client_id);
         Draft {
             display_name: ui::text_value(&self.name),
             email: ui::text_value(&self.email),
             password: ui::password_value(&self.password),
+            auth_method: auth_at(ui::selected_index(&self.auth_method)),
+            oauth2,
             imap: ServerDraft {
                 host: ui::text_value(&self.imap_host),
                 port: ui::text_value(&self.imap_port),
@@ -120,77 +159,378 @@ struct SuggestionWidgets {
     smtp_security: ComboBox,
 }
 
-/// Open the wizard. `on_saved` runs after the account has been stored and the
-/// first synchronization has been requested.
-pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Result<Window> {
+/// Mode for the account dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountDialogMode {
+    /// Add a new account.
+    Add,
+    /// Edit an existing account.
+    Edit,
+}
+
+/// Present the account dialog for adding or editing an account.
+///
+/// In edit mode, the form is pre-filled with the existing account's settings.
+/// The password field is left empty; if the user enters a new password, it will
+/// be updated. If left empty, the existing password is kept.
+pub fn present(
+    app: Arc<AppState>,
+    mode: AccountDialogMode,
+    existing_account: Option<Account>,
+    on_saved: impl Fn(AccountId) + 'static,
+) -> Result<Window> {
+    let (title_text, subtitle_text, save_label) = match mode {
+        AccountDialogMode::Add => (
+            "Add Account",
+            "Connect an IMAP and SMTP mailbox",
+            "Add Account",
+        ),
+        AccountDialogMode::Edit => ("Edit Account", "Update account settings", "Save Changes"),
+    };
+
     let revokers = ui::Revokers::default();
     let root = Grid::new().context("could not create the wizard layout")?;
     ui::auto_row(&root)?;
     ui::star_row(&root)?;
     ui::auto_row(&root)?;
 
-    let title = ui::heading("Add Account", Some(24.0), Some(700))?;
-    ui::margin(&title, 20.0, 16.0, 20.0, 4.0)?;
-    ui::set_row(&title, 0)?;
-    ui::append(&root, &title)?;
+    let header = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+    let title = ui::heading1(title_text)?;
+    ui::margin_horizontal(&title, 20.0)?;
+    ui::margin_vertical(&title, 10.0)?;
+    let subtitle = ui::text(subtitle_text)?;
+    ui::margin_horizontal(&subtitle, 20.0)?;
+    ui::margin(&subtitle, 20.0, 0.0, 20.0, 8.0)?;
+    ui::append(&header, &title)?;
+    ui::append(&header, &subtitle)?;
+    ui::set_row(&header, 0)?;
+    ui::append(&root, &header)?;
 
-    let form = ui::stack(mailin_winui_sys::Orientation::Vertical, 14.0)?;
-    ui::margin(&form, 20.0, 8.0, 20.0, 16.0)?;
+    let form = ui::stack_lg(mailin_winui_sys::Orientation::Vertical)?;
+    ui::margin_lg(&form)?;
+    ui::margin_vertical(&form, 8.0)?;
 
-    let identity = ui::heading("Account", Some(16.0), Some(600))?;
+    let identity = ui::subheading("Account")?;
     ui::append(&form, &identity)?;
 
     let name = ui::text_box("Ada Lovelace")?;
     let email = ui::text_box("ada@example.com")?;
     let password = ui::password_box("Password")?;
+    let auth_method = ui::combo(&["Password", "OAuth2 (recommended)"], 0)?;
+    let password_field = ui::field("Password", &password)?;
     ui::append(&form, &ui::field("Display name", &name)?)?;
     ui::append(&form, &ui::field("Email address", &email)?)?;
-    ui::append(&form, &ui::field("Password", &password)?)?;
+    ui::append(&form, &ui::field("Authentication", &auth_method)?)?;
+    ui::append(&form, &password_field)?;
 
-    let incoming = ui::heading("Incoming mail (IMAP)", Some(16.0), Some(600))?;
+    // OAuth2 sign-in section, hidden while password authentication is active.
+    let oauth_panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical)?;
+    let oauth_provider = ui::combo(&provider_labels(), 0, Some("OAuth2 provider"))?;
+    let oauth_client_id = ui::text_box("OAuth2 client ID", Some("OAuth2 client ID"))?;
+    let oauth_sign_in = ui::button("Sign in with browser…", Some("Sign in with browser"), Some("Sign in with your mail provider via browser"))?;
+    let oauth_status = ui::text("")?;
+    // Live region for sign-in status announcements
+    AutomationProperties::SetLiveSetting(&oauth_status, mailin_winui_sys::AutomationLiveSetting::Polite)?;
+    ui::append(
+        &oauth_panel,
+        &ui::subheading("OAuth2 sign-in")?,
+    )?;
+    ui::append(&oauth_panel, &ui::field("Provider", &oauth_provider)?)?;
+    ui::append(
+        &oauth_panel,
+        &ui::field("OAuth2 client ID", &oauth_client_id)?,
+    )?;
+    ui::append(&oauth_panel, &oauth_sign_in)?;
+    ui::append(&oauth_panel, &oauth_status)?;
+    ui::set_visible(&oauth_panel, false)?;
+    ui::append(&form, &oauth_panel)?;
+
+    let incoming = ui::subheading("Incoming mail (IMAP)")?;
     ui::append(&form, &incoming)?;
-    let imap_host = ui::text_box("imap.example.com")?;
-    let imap_port = ui::text_box("993")?;
-    let imap_user = ui::text_box("Leave empty to use the email address")?;
-    let imap_security = ui::combo(&["TLS", "STARTTLS", "None"], 0)?;
+    let imap_host = ui::text_box("imap.example.com", Some("IMAP server"))?;
+    let imap_port = ui::text_box("993", Some("Port"))?;
+    let imap_user = ui::text_box("Leave empty to use the email address", Some("Username"))?;
+    let imap_security = ui::combo(&["TLS", "STARTTLS", "None"], 0, Some("Encryption"))?;
     ui::append(&form, &ui::field("IMAP server", &imap_host)?)?;
     ui::append(&form, &ui::field("Port", &imap_port)?)?;
     ui::append(&form, &ui::field("Username", &imap_user)?)?;
     ui::append(&form, &ui::field("Encryption", &imap_security)?)?;
 
-    let outgoing = ui::heading("Outgoing mail (SMTP)", Some(16.0), Some(600))?;
+    let outgoing = ui::subheading("Outgoing mail (SMTP)")?;
     ui::append(&form, &outgoing)?;
-    let smtp_host = ui::text_box("smtp.example.com")?;
-    let smtp_port = ui::text_box("465")?;
-    let smtp_user = ui::text_box("Leave empty to use the email address")?;
-    let smtp_security = ui::combo(&["TLS", "STARTTLS", "None"], 0)?;
+    let smtp_host = ui::text_box("smtp.example.com", Some("SMTP server"))?;
+    let smtp_port = ui::text_box("465", Some("Port"))?;
+    let smtp_user = ui::text_box("Leave empty to use the email address", Some("Username"))?;
+    let smtp_security = ui::combo(&["TLS", "STARTTLS", "None"], 0, Some("Encryption"))?;
     ui::append(&form, &ui::field("SMTP server", &smtp_host)?)?;
     ui::append(&form, &ui::field("Port", &smtp_port)?)?;
     ui::append(&form, &ui::field("Username", &smtp_user)?)?;
     ui::append(&form, &ui::field("Encryption", &smtp_security)?)?;
 
+    // Signature: plain text, shown under the composer's `-- ` separator.
+    let signature_heading = ui::subheading("Signature")?;
+    let signature = ui::text_box("", Some("Signature"))?;
+    signature.SetPlaceholderText(
+        "Appended to messages you send. Mailin adds the “-- ” separator for you.",
+    )?;
+    signature.SetAcceptsReturn(true)?;
+    signature.SetTextWrapping(mailin_winui_sys::TextWrapping::Wrap)?;
+    signature.SetHeight(120.0)?;
+    ui::append(&form, &signature_heading)?;
+    ui::append(&form, &signature)?;
+
+    // Remote-content allowlist: domains whose images and resources always load.
+    let trust_heading = ui::subheading("Trusted senders for remote content")?;
+    let trust_desc = ui::body_text(
+        "Messages from these domains always load remote content, regardless of the global setting.",
+    )?;
+    ui::append(&form, &trust_heading)?;
+    ui::append(&form, &trust_desc)?;
+    let trust_list =
+        mailin_winui_sys::ListView::new().context("could not create the trust list")?;
+    trust_list.SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
+    trust_list.SetHeight(120.0)?;
+    ui::append(&form, &trust_list)?;
+
     let scroller = ui::scroll(&form)?;
     ui::set_row(&scroller, 1)?;
     ui::append(&root, &scroller)?;
 
-    let footer = ui::stack(mailin_winui_sys::Orientation::Horizontal, 8.0)?;
-    ui::margin(&footer, 20.0, 10.0, 20.0, 16.0)?;
+    let footer = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+    ui::margin_lg(&footer)?;
+    ui::margin_vertical(&footer, 8.0)?;
     let error: TextBlock = ui::text("")?;
+    // Live region for validation/connection error announcements
+    AutomationProperties::SetLiveSetting(&error, mailin_winui_sys::AutomationLiveSetting::Assertive)?;
     ui::set_visible(&error, false)?;
     ui::append(&footer, &error)?;
     let spacer = ui::text("")?;
     ui::stretch_horizontal(&spacer)?;
     ui::append(&footer, &spacer)?;
-    let cancel = ui::button("Cancel")?;
-    let save = ui::button("Add Account")?;
+
+    let test = ui::button("Test Connection", Some("Test Connection"), Some("Test IMAP and SMTP connection"))?;
+    let cancel = ui::button("Cancel", Some("Cancel"), Some("Cancel without saving"))?;
+    let save = ui::button(save_label, Some("Save account"), Some("Save account settings"))?;
+
+    // Remove button for edit mode
+    let remove = match mode {
+        AccountDialogMode::Edit => Some(ui::destructive_button(
+            "Remove Account",
+            Some("Remove Account"),
+            Some("Permanently delete this account and all its data"),
+        )?),
+        AccountDialogMode::Add => None,
+    };
+
+    if let Some(remove) = &remove {
+        ui::append(&footer, remove)?;
+    }
+    ui::append(&footer, &test)?;
     ui::append(&footer, &cancel)?;
     ui::append(&footer, &save)?;
     ui::set_row(&footer, 2)?;
     ui::append(&root, &footer)?;
 
     let window = Window::new().context("could not create the wizard window")?;
-    window.SetTitle("Add Account")?;
+    window.SetTitle(title_text)?;
     window.SetContent(&root)?;
+
+    let oauth_tokens: Arc<Mutex<OAuth2Tokens>> = Arc::new(Mutex::new(OAuth2Tokens::default()));
+    let previous_provider = Arc::new(Mutex::new(OAuthProvider::default()));
+    let allowlist: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(
+        existing_account
+            .as_ref()
+            .map(|account| account.remote_allowed_domains.clone())
+            .unwrap_or_default(),
+    ));
+
+    // Trust list container: a vertical stack of rows (domain + remove button)
+    let trust_container = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&form, &trust_container)?;
+
+    // Helper to rebuild the trust list UI
+    fn repopulate_trust_list(
+        trust_container: &mailin_winui_sys::StackPanel,
+        allowlist: &Arc<Mutex<Vec<String>>>,
+    ) {
+        let children = trust_container.Children().expect("Children");
+        let _ = children.Clear();
+        for domain in allowlist.lock().unwrap().iter() {
+            let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+            let label = ui::text(domain)?;
+            label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
+            ui::stretch_horizontal(&label)?;
+            ui::append(&row, &label)?;
+            let remove = ui::button(
+                "Remove",
+                Some(&format!("Stop trusting {domain}")),
+                Some(&format!("Remove {domain} from trusted senders")),
+            )?;
+            let tokens = design_tokens::tokens();
+            remove.SetPadding(mailin_winui_sys::Thickness::new(
+                tokens.spacing.xs,
+                2.0,
+                tokens.spacing.xs,
+                2.0,
+            ))?;
+            ui::append(&row, &remove)?;
+            children.Append(&row)?;
+
+            let allowlist = Arc::clone(allowlist);
+            let trust_container = trust_container.clone();
+            let domain = domain.clone();
+            ui::on_click(&remove, move || {
+                allowlist.lock().unwrap().retain(|entry| entry != &domain);
+                repopulate_trust_list(&trust_container, &allowlist);
+            })?;
+        }
+    }
+    repopulate_trust_list(&trust_container, &allowlist)?;
+
+    // Pre-fill form if editing
+    if let Some(account) = existing_account.clone() {
+        let _ = name.SetText(&account.display_name);
+        let _ = email.SetText(&account.email);
+        // Password left empty - user can enter new one to change it
+
+        let oauth = account.imap.auth_method == AuthMethod::OAuth2;
+        ui::select_index(&auth_method, auth_index(account.imap.auth_method));
+        let _ = ui::set_visible(&oauth_panel, oauth);
+        let _ = ui::set_visible(&password_field, !oauth);
+        if oauth {
+            if let Ok(mut tokens) = oauth_tokens.lock() {
+                *tokens = account.imap.oauth2.clone();
+            }
+            ui::select_index(
+                &oauth_provider,
+                provider_index(account.imap.oauth2.provider),
+            );
+            let _ = oauth_client_id.SetText(&account.imap.oauth2.client_id);
+            let _ = oauth_status.SetText("Signed in. Sign in again to replace the token.");
+            let _ = ui::set_visible(&oauth_status, true);
+            if let Ok(mut previous) = previous_provider.lock() {
+                *previous = account.imap.oauth2.provider;
+            }
+        }
+
+        let _ = imap_host.SetText(&account.imap.host);
+        let _ = imap_port.SetText(&account.imap.port.to_string());
+        let _ = imap_user.SetText(&account.imap.username);
+        ui::select_index(&imap_security, security_index(account.imap.security));
+
+        let _ = smtp_host.SetText(&account.smtp.host);
+        let _ = smtp_port.SetText(&account.smtp.port.to_string());
+        let _ = smtp_user.SetText(&account.smtp.username);
+        ui::select_index(&smtp_security, security_index(account.smtp.security));
+
+        // Disable email field in edit mode (account identity shouldn't change)
+        let _ = ui::set_enabled(&email, false);
+
+        // Pre-fill signature
+        let _ = signature.SetText(&account.signature);
+
+        // Pre-fill trust list (already populated from allowlist above)
+    }
+
+    revokers.keep(ui::on_selection_changed(&auth_method, {
+        let oauth_panel = oauth_panel.clone();
+        let password_field = password_field.clone();
+        let auth_method = auth_method.clone();
+        move || {
+            let oauth = ui::selected_index(&auth_method) == 1;
+            let _ = ui::set_visible(&oauth_panel, oauth);
+            let _ = ui::set_visible(&password_field, !oauth);
+        }
+    })?);
+
+    revokers.keep(ui::on_selection_changed(&oauth_provider, {
+        let oauth_provider = oauth_provider.clone();
+        let oauth_client_id = oauth_client_id.clone();
+        let oauth_tokens = Arc::clone(&oauth_tokens);
+        let previous_provider = Arc::clone(&previous_provider);
+        move || {
+            let provider = provider_at(ui::selected_index(&oauth_provider));
+            let previous = previous_provider
+                .lock()
+                .map(|mut slot| std::mem::replace(&mut *slot, provider))
+                .unwrap_or_default();
+            if let Ok(mut tokens) = oauth_tokens.lock()
+                && tokens.provider != provider
+            {
+                tokens.access_token.clear();
+                tokens.refresh_token.clear();
+                tokens.expires_at = 0;
+                tokens.provider = provider;
+            }
+            let current = ui::text_value(&oauth_client_id);
+            if current.trim().is_empty() || current == previous.default_client_id() {
+                let _ = oauth_client_id.SetText(&provider.default_client_id());
+            }
+        }
+    })?);
+
+    revokers.keep(ui::on_click(&oauth_sign_in, {
+        let window = window.clone();
+        let email = email.clone();
+        let oauth_provider = oauth_provider.clone();
+        let oauth_client_id = oauth_client_id.clone();
+        let oauth_status = oauth_status.clone();
+        let oauth_tokens = Arc::clone(&oauth_tokens);
+        move || {
+            let provider = provider_at(ui::selected_index(&oauth_provider));
+            let client_id = ui::text_value(&oauth_client_id);
+            let hint = ui::text_value(&email);
+            let pending = match PendingAuthorization::begin(provider, &client_id, Some(&hint)) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    let _ = oauth_status.SetText(&error.to_string());
+                    let _ = ui::set_visible(&oauth_status, true);
+                    return;
+                }
+            };
+            let url = pending.auth_url().to_owned();
+            if let Err(error) = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &url])
+                .spawn()
+            {
+                let _ = oauth_status.SetText(&format!("Could not open the browser: {error}"));
+                let _ = ui::set_visible(&oauth_status, true);
+                return;
+            }
+            let _ = oauth_status.SetText("Waiting for the browser to complete sign-in…");
+            let _ = ui::set_visible(&oauth_status, true);
+
+            let window = window.clone();
+            let oauth_status = oauth_status.clone();
+            let oauth_tokens = Arc::clone(&oauth_tokens);
+            std::thread::spawn(move || {
+                let result = pending.wait(std::time::Duration::from_secs(300));
+                // The dispatcher callback is `Fn`, so hand it owned copies
+                // instead of the `Result` itself.
+                let (tokens, failure) = match result {
+                    Ok(tokens) => (Some(tokens), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                let enqueue = window.DispatcherQueue().and_then(|queue| {
+                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+                        if let Some(tokens) = &tokens {
+                            if let Ok(mut slot) = oauth_tokens.lock() {
+                                *slot = tokens.clone();
+                            }
+                            let _ = oauth_status.SetText("Signed in successfully.");
+                        } else if let Some(failure) = &failure {
+                            let _ = oauth_status.SetText(&format!("Sign-in failed: {failure}"));
+                        }
+                        let _ = ui::set_visible(&oauth_status, true);
+                    });
+                    queue.TryEnqueue(handler.to_ref())
+                });
+                if let Err(error) = enqueue {
+                    tracing::warn!(%error, "could not report the sign-in result on the UI thread");
+                }
+            });
+        }
+    })?);
 
     // Fill server fields from the address domain while they are still the
     // values the previous suggestion put there. Anything the user typed wins.
@@ -200,6 +540,10 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
         name,
         email,
         password,
+        auth_method,
+        oauth_provider,
+        oauth_client_id,
+        oauth_tokens: Arc::clone(&oauth_tokens),
         imap_host,
         imap_port,
         imap_user,
@@ -208,6 +552,9 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
         smtp_port,
         smtp_user,
         smtp_security,
+        signature,
+        trust_container,
+        allowlist: Arc::clone(&allowlist),
     };
     revokers.keep(ui::on_text_changed(&rows.email, {
         let rows_email = rows.email.clone();
@@ -273,6 +620,70 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
         }
     })?);
 
+    revokers.keep(ui::on_click(&test, {
+        let app = Arc::clone(&app);
+        let rows = FormRows {
+            name: rows.name.clone(),
+            email: rows.email.clone(),
+            password: rows.password.clone(),
+            auth_method: rows.auth_method.clone(),
+            oauth_provider: rows.oauth_provider.clone(),
+            oauth_client_id: rows.oauth_client_id.clone(),
+            oauth_tokens: Arc::clone(&rows.oauth_tokens),
+            imap_host: rows.imap_host.clone(),
+            imap_port: rows.imap_port.clone(),
+            imap_user: rows.imap_user.clone(),
+            imap_security: rows.imap_security.clone(),
+            smtp_host: rows.smtp_host.clone(),
+            smtp_port: rows.smtp_port.clone(),
+            smtp_user: rows.smtp_user.clone(),
+            smtp_security: rows.smtp_security.clone(),
+            signature: rows.signature.clone(),
+            trust_container: rows.trust_container.clone(),
+            allowlist: Arc::clone(&rows.allowlist),
+        };
+        let error = error.clone();
+        move || {
+            let draft = rows.draft();
+            let password = draft.password.clone();
+            // In edit mode, we don't require password for test if it's empty
+            let require_password = mode == AccountDialogMode::Add;
+            let account = match draft.build(require_password) {
+                Ok(account) => account,
+                Err(message) => {
+                    let _ = error.SetText(&message);
+                    let _ = ui::set_visible(&error, true);
+                    return;
+                }
+            };
+            let _ = error.SetText("Testing connection…");
+            let _ = ui::set_visible(&error, true);
+            let app = Arc::clone(&app);
+            let error = error.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let result = runtime.block_on(app.mailin.test_connection(
+                    &account.imap,
+                    &account.smtp,
+                    &password,
+                ));
+                match result {
+                    Ok(()) => {
+                        let _ = error.SetText("Connection successful!");
+                    }
+                    Err(e) => {
+                        let _ = error.SetText(&format!("Connection failed: {e}"));
+                    }
+                }
+                let _ = ui::set_visible(&error, true);
+            });
+        }
+    })?);
+
+    // Clone for use in both save and remove closures
+    let existing_account_for_save = existing_account.clone();
+    let existing_account_for_remove = existing_account.clone();
+
     let on_saved: Arc<dyn Fn(AccountId) + 'static> = Arc::new(on_saved);
     let account_id: Arc<Mutex<Option<AccountId>>> = Arc::new(Mutex::new(None));
     revokers.keep(ui::on_click(&save, {
@@ -284,6 +695,10 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
             name: rows.name.clone(),
             email: rows.email.clone(),
             password: rows.password.clone(),
+            auth_method: rows.auth_method.clone(),
+            oauth_provider: rows.oauth_provider.clone(),
+            oauth_client_id: rows.oauth_client_id.clone(),
+            oauth_tokens: Arc::clone(&rows.oauth_tokens),
             imap_host: rows.imap_host.clone(),
             imap_port: rows.imap_port.clone(),
             imap_user: rows.imap_user.clone(),
@@ -292,12 +707,18 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
             smtp_port: rows.smtp_port.clone(),
             smtp_user: rows.smtp_user.clone(),
             smtp_security: rows.smtp_security.clone(),
+            signature: rows.signature.clone(),
+            trust_container: rows.trust_container.clone(),
+            allowlist: Arc::clone(&rows.allowlist),
         };
         let error = error.clone();
         move || {
             let draft = rows.draft();
             let password = draft.password.clone();
-            let mut account = match draft.build() {
+            let is_oauth = draft.auth_method == AuthMethod::OAuth2;
+            // In edit mode, we don't require password if it's empty (keep existing)
+            let require_password = mode == AccountDialogMode::Add;
+            let mut account = match draft.build(require_password) {
                 Ok(account) => account,
                 Err(message) => {
                     let _ = error.SetText(&message);
@@ -307,13 +728,37 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
             };
             // Keep the identifier across retries: a failed keyring write must
             // not leave an account row behind that a second click duplicates.
-            if let Ok(mut slot) = account_id.lock() {
-                match *slot {
-                    Some(id) => account.id = id,
-                    None => *slot = Some(account.id),
+            // In edit mode, preserve the existing account ID and non-form fields:
+            // sync settings and the remote-content allowlist are edited elsewhere
+            // and must survive a settings save.
+            if let Some(existing) = &existing_account_for_save {
+                account.id = existing.id;
+                account.sync = existing.sync.clone();
+                account
+                    .remote_allowed_domains
+                    .clone_from(&existing.remote_allowed_domains);
+            } else {
+                if let Ok(mut slot) = account_id.lock() {
+                    match *slot {
+                        Some(id) => account.id = id,
+                        None => *slot = Some(account.id),
+                    }
                 }
             }
-            if let Err(failure) = app.mailin.save_account(&account, Some(&password)) {
+            // Apply signature from the form field
+            account.signature = ui::text_value(&rows.signature);
+            // Apply allowlist from the shared cell
+            account
+                .remote_allowed_domains
+                .clone_from(&rows.allowlist.lock().unwrap());
+            // Only update password if user entered a new one. OAuth2 accounts
+            // keep tokens in the account row and do not use the keyring.
+            let secret = if password.is_empty() || is_oauth {
+                None
+            } else {
+                Some(SecretString::from(password))
+            };
+            if let Err(failure) = app.mailin.save_account(&account, secret.as_ref()) {
                 let _ = error.SetText(&failure.to_string());
                 let _ = ui::set_visible(&error, true);
                 return;
@@ -323,6 +768,36 @@ pub fn present(app: Arc<AppState>, on_saved: impl Fn(AccountId) + 'static) -> Re
             let _ = window.Close();
         }
     })?);
+
+    // Remove account handler
+    if let Some(remove) = remove {
+        let window = window.clone();
+        let app = Arc::clone(&app);
+        let existing = existing_account_for_remove;
+        revokers.keep(ui::on_click(&remove, move || {
+            let Some(account) = &existing else { return };
+            let account_id = account.id;
+            let mailin = Arc::clone(&app.mailin);
+            let window = window.clone();
+            std::thread::spawn(move || {
+                if let Err(error) = mailin.remove_account(&account_id) {
+                    tracing::warn!(%error, "could not remove the account");
+                    return;
+                }
+                // The store tells the main window to refresh; close the
+                // wizard on the UI thread.
+                let closed = window.DispatcherQueue().and_then(|queue| {
+                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+                        let _ = window.Close();
+                    });
+                    queue.TryEnqueue(handler.to_ref())
+                });
+                if let Err(error) = closed {
+                    tracing::warn!(%error, "could not close the account wizard");
+                }
+            });
+        })?);
+    }
 
     let window_token = ui::keep_alive(&window);
     let cleanup = revokers.clone();
@@ -351,6 +826,50 @@ fn security_at(index: usize) -> Security {
     }
 }
 
+fn auth_index(method: AuthMethod) -> usize {
+    match method {
+        AuthMethod::Password => 0,
+        AuthMethod::OAuth2 => 1,
+    }
+}
+
+fn auth_at(index: usize) -> AuthMethod {
+    match index {
+        1 => AuthMethod::OAuth2,
+        _ => AuthMethod::Password,
+    }
+}
+
+fn provider_labels() -> [&'static str; 5] {
+    [
+        OAuthProvider::Google.label(),
+        OAuthProvider::Microsoft.label(),
+        OAuthProvider::Yahoo.label(),
+        OAuthProvider::Fastmail.label(),
+        OAuthProvider::Custom.label(),
+    ]
+}
+
+fn provider_index(provider: OAuthProvider) -> usize {
+    match provider {
+        OAuthProvider::Google => 0,
+        OAuthProvider::Microsoft => 1,
+        OAuthProvider::Yahoo => 2,
+        OAuthProvider::Fastmail => 3,
+        OAuthProvider::Custom => 4,
+    }
+}
+
+fn provider_at(index: usize) -> OAuthProvider {
+    match index {
+        1 => OAuthProvider::Microsoft,
+        2 => OAuthProvider::Yahoo,
+        3 => OAuthProvider::Fastmail,
+        4 => OAuthProvider::Custom,
+        _ => OAuthProvider::Google,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +879,8 @@ mod tests {
             display_name: String::new(),
             email: "ada@example.com".into(),
             password: "secret".into(),
+            auth_method: AuthMethod::Password,
+            oauth2: OAuth2Tokens::default(),
             imap: ServerDraft {
                 host: "imap.example.com".into(),
                 port: "993".into(),
@@ -376,8 +897,20 @@ mod tests {
     }
 
     #[test]
+    fn oauth2_requires_an_access_token() {
+        let mut draft = sample();
+        draft.password.clear();
+        draft.auth_method = AuthMethod::OAuth2;
+        assert!(draft.build(true).is_err());
+        draft.oauth2.access_token = "token".into();
+        let account = draft.build(true).expect("OAuth2 draft");
+        assert_eq!(account.imap.auth_method, AuthMethod::OAuth2);
+        assert_eq!(account.smtp.auth_method, AuthMethod::OAuth2);
+    }
+
+    #[test]
     fn empty_optional_fields_get_sensible_defaults() {
-        let account = sample().build().expect("valid draft");
+        let account = sample().build(true).expect("valid draft");
         assert_eq!(account.display_name, "ada");
         assert_eq!(account.imap.username, "ada@example.com");
         assert_eq!(account.smtp.username, "ada@example.com");
@@ -388,18 +921,26 @@ mod tests {
     fn missing_password_is_rejected() {
         let mut draft = sample();
         draft.password.clear();
-        assert!(draft.build().is_err());
+        assert!(draft.build(true).is_err());
+    }
+
+    #[test]
+    fn edit_mode_allows_empty_password() {
+        let mut draft = sample();
+        draft.password.clear();
+        // In edit mode (require_password = false), empty password should be OK
+        assert!(draft.build(false).is_ok());
     }
 
     #[test]
     fn invalid_port_and_host_are_rejected() {
         let mut draft = sample();
         draft.imap.port = "nope".into();
-        assert!(draft.build().is_err());
+        assert!(draft.build(true).is_err());
 
         let mut draft = sample();
         draft.smtp.host = "  ".into();
-        assert!(draft.build().is_err());
+        assert!(draft.build(true).is_err());
     }
 
     #[test]

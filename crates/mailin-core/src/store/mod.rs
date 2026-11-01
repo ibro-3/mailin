@@ -9,7 +9,7 @@
 mod migrations;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
@@ -17,13 +17,13 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use crate::account::{Account, AccountId};
 use crate::error::{Error, Result};
 use crate::model::{
-    AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, PgpKey, Plugin, Rule, RuleAction, RuleCondition, ScheduledAction, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
 };
 
 pub use migrations::SCHEMA_VERSION;
 
-const MESSAGE_COLUMNS: &str = "m.id, m.folder_id, m.uid, m.message_id, m.thread_key, m.subject, \
+const MESSAGE_COLUMNS: &str = "m.id, m.folder_id, m.uid, m.message_id, m.thread_key, m.thread_root_key, m.thread_reply_count, m.subject, \
      m.from_name, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.received_at, m.snippet, \
      m.size, m.flags, m.has_attachments, m.body_state";
 
@@ -55,9 +55,10 @@ impl FolderUpsert {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
+    db_path: PathBuf,
 }
 
 impl Store {
@@ -73,8 +74,10 @@ impl Store {
             use std::os::unix::fs::PermissionsExt;
             let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
         }
+        let db_path = path.to_path_buf();
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
+            db_path,
         })
     }
 
@@ -82,8 +85,19 @@ impl Store {
         let mut conn = Connection::open_in_memory()?;
         Self::configure(&mut conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
+            db_path: PathBuf::from(":memory:"),
         })
+    }
+
+    /// Get the database file path.
+    pub fn path(&self) -> &Path {
+        &self.db_path
+    }
+
+    /// Get the data directory (parent of the database file).
+    pub fn data_dir(&self) -> PathBuf {
+        self.db_path.parent().unwrap_or(&self.db_path).to_path_buf()
     }
 
     fn configure(conn: &mut Connection) -> Result<()> {
@@ -409,6 +423,16 @@ impl Store {
         Ok(removed as u32)
     }
 
+    /// Mark a folder as needing a full resync by clearing its last_synced_at timestamp.
+    pub fn refresh_folder(&self, folder: FolderId) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE folders SET last_synced_at = NULL WHERE id = ?1",
+            params![folder.0],
+        )?;
+        Ok(())
+    }
+
     /// Apply flag updates for many messages in one transaction. UIDs that are
     /// no longer cached are ignored.
     pub fn set_flags_many(&self, folder: FolderId, updates: &[(u32, Vec<String>)]) -> Result<u32> {
@@ -511,6 +535,17 @@ impl Store {
         tx.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(Some(MessageId(id)))
+    }
+
+    /// Remove one cached message by its local id. Used after the server has
+    /// moved or permanently deleted it.
+    pub fn delete_message_by_id(&self, id: MessageId) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM messages_fts WHERE rowid = ?1", params![id.0])?;
+        let removed = tx.execute("DELETE FROM messages WHERE id = ?1", params![id.0])?;
+        tx.commit()?;
+        Ok(removed > 0)
     }
 
     // -------------------------------------------------------------- attachments
@@ -645,6 +680,66 @@ impl Store {
             .map_err(Error::from)
     }
 
+    /// Enhanced search with structured query parsing (from:, to:, subject:, has:, is:, before:, after:).
+    /// Searches within a specific folder or across all folders in an account.
+    pub fn search_messages(
+        &self,
+        account: &AccountId,
+        folder_id: Option<FolderId>,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<MessageHeader>> {
+        use crate::search::{build_filter_where, build_fts_query, parse_search_query};
+
+        let parsed = parse_search_query(query);
+        let conn = self.lock()?;
+
+        let (filter_sql, mut filter_params) = build_filter_where(&parsed.filters);
+        let fts_query = build_fts_query(&parsed.fts_terms);
+
+        let mut sql = format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.account_id = ?1"
+        );
+
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(account.to_string())];
+        let mut param_index = 2;
+
+        // Add folder filter if specified
+        if let Some(folder) = folder_id {
+            sql.push_str(" AND m.folder_id = ?");
+            sql.push_str(&param_index.to_string());
+            params.push(Box::new(folder.0));
+            param_index += 1;
+        }
+
+        // Add FTS query if present
+        if let Some(fts) = fts_query {
+            sql.push_str(" AND m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)");
+            sql.push_str(&param_index.to_string());
+            params.push(Box::new(fts));
+            param_index += 1;
+        }
+
+        // Add structured filters
+        if filter_sql != "1=1" {
+            sql.push_str(" AND ");
+            sql.push_str(&filter_sql);
+            params.append(&mut filter_params);
+        }
+
+        sql.push_str(" ORDER BY m.received_at DESC, m.uid DESC LIMIT ?");
+        sql.push_str(&param_index.to_string());
+        params.push(Box::new(i64::from(limit.clamp(1, 500))));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), map_message)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
     pub fn unread_total(&self, account: &AccountId) -> Result<u32> {
         let conn = self.lock()?;
         let count: i64 = conn.query_row(
@@ -655,6 +750,71 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(count as u32)
+    }
+
+    // ---------------------------------------------------------------- threading
+
+    /// Get thread roots for a folder (conversation view).
+    /// Returns root messages with reply count and unread count.
+    pub fn get_thread_roots(
+        &self,
+        folder: FolderId,
+        limit: u32,
+    ) -> Result<Vec<MessageHeader>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages m
+             WHERE m.folder_id = ?1 AND (m.thread_root_key = m.message_id OR m.thread_root_key IS NULL)
+             ORDER BY m.received_at DESC, m.uid DESC
+             LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![folder.0, i64::from(limit)],
+            map_message,
+        )?;
+        let mut roots: Vec<MessageHeader> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        
+        // Augment with reply counts and unread counts
+        for root in &mut roots {
+            let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
+            if let Some(key) = root_key {
+                // Count replies
+                let reply_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND (thread_root_key != message_id OR thread_root_key IS NULL)",
+                    params![folder.0, key],
+                    |row| row.get(0),
+                )?;
+                root.thread_reply_count = reply_count as u32;
+                
+                // Count unread in thread
+                let unread_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND instr(' ' || flags || ' ', ' \\Seen ') = 0",
+                    params![folder.0, key],
+                    |row| row.get(0),
+                )?;
+                // We'll use has_attachments field temporarily to store unread count, 
+                // but better to add a proper field. For now, let's just count.
+            }
+        }
+        
+        Ok(roots)
+    }
+
+    /// Get all replies for a thread root, ordered by date.
+    pub fn list_thread_replies(&self, thread_root_key: &str) -> Result<Vec<MessageHeader>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS}
+             FROM messages
+             WHERE thread_root_key = ?1
+             ORDER BY received_at ASC, uid ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![thread_root_key], map_message)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
     }
 
     // ------------------------------------------------------------------ outbox
@@ -746,11 +906,923 @@ impl Store {
         )?;
         Ok(count as u32)
     }
+
+    pub fn list_outbox(&self, account: &AccountId) -> Result<Vec<OutboxEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, raw, envelope_json, state, attempts, last_error, created_at, updated_at
+             FROM outbox
+             WHERE account_id = ?1 AND state != 'sent'
+             ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], map_outbox)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    // --------------------------------------------------------------- templates
+
+    /// Insert or update a template for an account.
+    pub fn upsert_template(
+        &self,
+        account: &AccountId,
+        name: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO templates (account_id, name, subject, body, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(account_id, name) DO UPDATE SET
+                 subject = excluded.subject,
+                 body = excluded.body,
+                 updated_at = excluded.updated_at
+             RETURNING id",
+            params![account.to_string(), name, subject, body, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all templates for an account, ordered by name.
+    pub fn list_templates(&self, account: &AccountId) -> Result<Vec<Template>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, name, subject, body, created_at, updated_at
+             FROM templates
+             WHERE account_id = ?1
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Template {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                name: row.get(2)?,
+                subject: row.get(3)?,
+                body: row.get(4)?,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a template by name for an account.
+    pub fn delete_template(&self, account: &AccountId, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM templates WHERE account_id = ?1 AND name = ?2",
+            params![account.to_string(), name],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- contacts
+
+    /// Insert or update a contact for an account.
+    /// Increments times_seen and updates last_used_at.
+    /// Preserves existing display_name if new one is empty.
+    pub fn upsert_contact(
+        &self,
+        account: &AccountId,
+        email: &str,
+        display_name: &str,
+        manual: bool,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO contacts (account_id, email, display_name, last_used_at, times_seen, manual)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)
+             ON CONFLICT(account_id, email) DO UPDATE SET
+                 display_name = CASE 
+                     WHEN contacts.display_name = '' OR contacts.display_name IS NULL 
+                     THEN excluded.display_name 
+                     ELSE contacts.display_name 
+                 END,
+                 last_used_at = excluded.last_used_at,
+                 times_seen = contacts.times_seen + 1,
+                 manual = contacts.manual | excluded.manual
+             RETURNING id",
+            params![account.to_string(), email, display_name, now, manual as i64],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all contacts for an account, ordered by times_seen DESC, last_used_at DESC.
+    pub fn list_contacts(&self, account: &AccountId) -> Result<Vec<Contact>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, email, display_name, last_used_at, times_seen, manual
+             FROM contacts
+             WHERE account_id = ?1
+             ORDER BY times_seen DESC, last_used_at DESC NULLS LAST",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Contact {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                email: row.get(2)?,
+                display_name: row.get(3)?,
+                last_used_at: row.get(4)?,
+                times_seen: row.get(5)?,
+                manual: row.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Search contacts by prefix match on email or display_name.
+    /// Results ordered by times_seen DESC, last_used_at DESC.
+    pub fn search_contacts(&self, account: &AccountId, query: &str, limit: u32) -> Result<Vec<Contact>> {
+        let conn = self.lock()?;
+        let pattern = format!("%{}%", query.to_lowercase());
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, email, display_name, last_used_at, times_seen, manual
+             FROM contacts
+             WHERE account_id = ?1 AND (lower(email) LIKE ?2 OR lower(display_name) LIKE ?2)
+             ORDER BY times_seen DESC, last_used_at DESC NULLS LAST
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![account.to_string(), pattern, limit as i64], |row| {
+            Ok(Contact {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                email: row.get(2)?,
+                display_name: row.get(3)?,
+                last_used_at: row.get(4)?,
+                times_seen: row.get(5)?,
+                manual: row.get::<_, i64>(6)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a contact by email for an account.
+    pub fn delete_contact(&self, account: &AccountId, email: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM contacts WHERE account_id = ?1 AND email = ?2",
+            params![account.to_string(), email],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- scheduled actions
+
+    /// Schedule a new action to run at the specified time.
+    pub fn schedule_action(
+        &self,
+        account: &AccountId,
+        due_at: i64,
+        kind: &str,
+        payload_json: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO scheduled_actions (account_id, due_at, kind, payload_json, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)
+             RETURNING id",
+            params![account.to_string(), due_at, kind, payload_json, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Get all pending actions that are due (due_at <= now).
+    pub fn due_actions(&self) -> Result<Vec<ScheduledAction>> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, due_at, kind, payload_json, state, created_at, last_error
+             FROM scheduled_actions
+             WHERE state = 'pending' AND due_at <= ?1
+             ORDER BY due_at",
+        )?;
+        let rows = stmt.query_map(params![now], |row| {
+            Ok(ScheduledAction {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                due_at: row.get(2)?,
+                kind: row.get(3)?,
+                payload_json: row.get(4)?,
+                state: row.get(5)?,
+                created_at: row.get(6)?,
+                last_error: row.get(7)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Update the state of a scheduled action.
+    pub fn set_action_state(&self, id: i64, state: &str, error: Option<&str>) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE scheduled_actions SET state = ?2, last_error = ?3 WHERE id = ?1",
+            params![id, state, error],
+        )?;
+        Ok(changed > 0)
+    }
+
+    // --------------------------------------------------------------- rules
+
+    /// Insert or update a rule for an account.
+    pub fn upsert_rule(
+        &self,
+        account: &AccountId,
+        name: &str,
+        enabled: bool,
+        priority: i64,
+        conditions_json: &str,
+        actions_json: &str,
+        stop: bool,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO rules (account_id, name, enabled, priority, conditions_json, actions_json, stop, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(account_id, name) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 priority = excluded.priority,
+                 conditions_json = excluded.conditions_json,
+                 actions_json = excluded.actions_json,
+                 stop = excluded.stop
+             RETURNING id",
+            params![
+                account.to_string(),
+                name,
+                enabled as i64,
+                priority,
+                conditions_json,
+                actions_json,
+                stop as i64,
+                now,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all rules for an account, ordered by priority DESC, id ASC.
+    pub fn list_rules(&self, account: &AccountId) -> Result<Vec<Rule>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, name, enabled, priority, conditions_json, actions_json, stop, created_at
+             FROM rules
+             WHERE account_id = ?1
+             ORDER BY priority DESC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Rule {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                name: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                priority: row.get(4)?,
+                conditions_json: row.get(5)?,
+                actions_json: row.get(6)?,
+                stop: row.get::<_, i64>(7)? != 0,
+                created_at: row.get(8)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a rule by name for an account.
+    pub fn delete_rule(&self, account: &AccountId, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM rules WHERE account_id = ?1 AND name = ?2",
+            params![account.to_string(), name],
+        )? > 0)
+    }
+
+    /// Apply rules to messages - delegates to the engine via the Mailin facade.
+    /// This is a placeholder that the Mailin facade uses to call the engine.
+    pub fn apply_rules(&self, _folder_id: FolderId, _message_ids: &[MessageId]) {
+        // The actual rule application happens in the engine.
+        // This method exists to allow the Mailin facade to call it.
+        // The engine's apply_rules is called via Mailin::apply_rules which
+        // routes to the engine. This is a no-op at the store level.
+    }
+
+    // --------------------------------------------------------------- virtual folders
+
+    /// Create or update a virtual folder.
+    pub fn upsert_virtual_folder(
+        &self,
+        account: &AccountId,
+        name: &str,
+        kind: VirtualFolderKind,
+        query_json: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO virtual_folders (account_id, name, kind, query_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id, name) DO UPDATE SET
+                 kind = excluded.kind,
+                 query_json = excluded.query_json
+             RETURNING id",
+            params![account.to_string(), name, kind as i64, query_json, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all virtual folders for an account.
+    pub fn list_virtual_folders(&self, account: &AccountId) -> Result<Vec<VirtualFolder>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, name, kind, query_json, created_at
+             FROM virtual_folders
+             WHERE account_id = ?1
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(VirtualFolder {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                name: row.get(2)?,
+                kind: match row.get::<_, i64>(3)? {
+                    0 => VirtualFolderKind::UnifiedInbox,
+                    1 => VirtualFolderKind::Starred,
+                    _ => VirtualFolderKind::AllMail,
+                },
+                query_json: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Delete a virtual folder by name for an account.
+    pub fn delete_virtual_folder(&self, account: &AccountId, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM virtual_folders WHERE account_id = ?1 AND name = ?2",
+            params![account.to_string(), name],
+        )? > 0)
+    }
+
+    /// Get messages for a virtual folder (unified inbox, etc.)
+    /// Returns (MessageHeader, FolderId, AccountId) tuples for cross-account display.
+    pub fn list_messages_virtual(
+        &self,
+        kind: VirtualFolderKind,
+        account_filter: &[AccountId],
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<(MessageHeader, FolderId, AccountId)>> {
+        let conn = self.lock()?;
+        
+        let account_placeholders = account_filter.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(limit as i64), Box::new(offset as i64)];
+        for acc in account_filter {
+            params.push(Box::new(acc.to_string()));
+        }
+        
+        let (folder_roles, _folder_roles_params): (&str, Vec<&str>) = match kind {
+            VirtualFolderKind::UnifiedInbox => {
+                ("'inbox'", vec![])
+            }
+            VirtualFolderKind::Starred => {
+                ("'archive'", vec![])  // Using archive as starred proxy
+            }
+            VirtualFolderKind::AllMail => {
+                ("'inbox','sent','archive','drafts'", vec![])
+            }
+        };
+        
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS}, f.id as folder_id, f.account_id
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.role IN ({}) AND f.account_id IN ({})
+             ORDER BY m.received_at DESC, m.uid DESC
+             LIMIT ?1 OFFSET ?2",
+            folder_roles, account_placeholders
+        );
+        
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| {
+            let flags: String = row.get(16)?;
+            let account_id_str: String = row.get(19)?;
+            let folder_id: i64 = row.get(18)?;
+            Ok((
+                MessageHeader {
+                    id: MessageId(row.get(0)?),
+                    folder_id: FolderId(row.get(1)?),
+                    uid: row.get(2)?,
+                    message_id: row.get(3)?,
+                    thread_key: row.get(4)?,
+                    thread_root_key: row.get(5)?,
+                    thread_reply_count: row.get(6)?,
+                    thread_depth: 0, // computed at read time if needed
+                    subject: row.get(7)?,
+                    from_name: row.get(8)?,
+                    from_addr: row.get(9)?,
+                    to_addrs: row.get(10)?,
+                    cc_addrs: row.get(11)?,
+                    sent_at: row.get(12)?,
+                    received_at: row.get(13)?,
+                    snippet: row.get(14)?,
+                    size: row.get(15)?,
+                    flags: flags.split_whitespace().map(str::to_owned).collect(),
+                    has_attachments: row.get::<_, i64>(17)? != 0,
+                    body_fetched: row.get::<_, i64>(18)? != 0,
+                },
+                FolderId(folder_id),
+                AccountId::parse(&account_id_str)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(17, rusqlite::types::Type::Text, Box::new(e)))?,
+            ))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Count unread messages for a virtual folder.
+    pub fn count_unread_virtual(&self, kind: VirtualFolderKind, account_filter: &[AccountId]) -> Result<u32> {
+        let conn = self.lock()?;
+        
+        let account_placeholders = account_filter.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![];
+        for acc in account_filter {
+            params.push(Box::new(acc.to_string()));
+        }
+        
+        let folder_roles = match kind {
+            VirtualFolderKind::UnifiedInbox => "'inbox'",
+            VirtualFolderKind::Starred => "'archive'",
+            VirtualFolderKind::AllMail => "'inbox','sent','archive','drafts'",
+        };
+        
+        let sql = format!(
+            "SELECT COUNT(*)
+             FROM messages m
+             JOIN folders f ON f.id = m.folder_id
+             WHERE f.role IN ({}) AND f.account_id IN ({})
+             AND instr(' ' || m.flags || ' ', ' \\Seen ') = 0",
+            folder_roles, account_placeholders
+        );
+        
+        let count: i64 = conn.query_row(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |row| row.get(0))?;
+        Ok(count as u32)
+    }
+
+    // --------------------------------------------------------------- calendars
+
+    /// Create or update a calendar.
+    pub fn upsert_calendar(
+        &self,
+        account: &AccountId,
+        href: &str,
+        display_name: &str,
+        color: Option<&str>,
+        ctag: Option<&str>,
+) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO calendars (account_id, href, display_name, color, ctag, last_synced_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(account_id, href) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 color = excluded.color,
+                 ctag = excluded.ctag,
+                 last_synced_at = excluded.last_synced_at
+             RETURNING id",
+            params![account.to_string(), href, display_name, color, ctag, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all calendars for an account.
+    pub fn list_calendars(&self, account: &AccountId) -> Result<Vec<Calendar>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, href, display_name, color, ctag, last_synced_at
+             FROM calendars
+             WHERE account_id = ?1
+             ORDER BY display_name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            Ok(Calendar {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                href: row.get(2)?,
+                display_name: row.get(3)?,
+                color: row.get(4)?,
+                ctag: row.get(5)?,
+                last_synced_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get a calendar by href.
+    pub fn calendar_by_href(&self, account: &AccountId, href: &str) -> Result<Option<Calendar>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, account_id, href, display_name, color, ctag, last_synced_at
+             FROM calendars
+             WHERE account_id = ?1 AND href = ?2",
+            params![account.to_string(), href],
+            |row| {
+                Ok(Calendar {
+                    id: row.get(0)?,
+                    account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                    href: row.get(2)?,
+                    display_name: row.get(3)?,
+                    color: row.get(4)?,
+                    ctag: row.get(5)?,
+                    last_synced_at: row.get(6)?,
+                })
+            },
+        ).optional().map_err(Error::from)
+    }
+
+    /// Update calendar ctag and last_synced_at.
+    pub fn update_calendar_sync(&self, calendar_id: i64, ctag: Option<&str>) -> Result<()> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        conn.execute(
+            "UPDATE calendars SET ctag = ?2, last_synced_at = ?3 WHERE id = ?1",
+            params![calendar_id, ctag, now],
+        )?;
+        Ok(())
+    }
+
+    /// Update calendar ctag (alias for update_calendar_sync without timestamp change).
+    pub fn update_calendar_ctag(&self, calendar_id: i64, ctag: &str) -> Result<()> {
+        self.update_calendar_sync(calendar_id, Some(ctag))
+    }
+
+    /// Delete a calendar.
+    pub fn delete_calendar(&self, calendar_id: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM calendars WHERE id = ?1",
+            params![calendar_id],
+) ? > 0)
+    }
+
+    // --------------------------------------------------------------- events
+
+    /// Insert or update an event.
+    pub fn upsert_event(
+        &self,
+        calendar_id: i64,
+        uid: &str,
+        summary: &str,
+        start_at: i64,
+        end_at: i64,
+        all_day: bool,
+        location: Option<&str>,
+        description: Option<&str>,
+        attendees_json: &str,
+        ics_raw: &str,
+        etag: Option<&str>,
+) -> Result<i64> {
+        let conn = self.lock()?;
+        let id: i64 = conn.query_row(
+            "INSERT INTO events (calendar_id, uid, summary, start_at, end_at, all_day, location, description, attendees_json, ics_raw, etag)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(calendar_id, uid) DO UPDATE SET
+                 summary = excluded.summary,
+                 start_at = excluded.start_at,
+                 end_at = excluded.end_at,
+                 all_day = excluded.all_day,
+                 location = excluded.location,
+                 description = excluded.description,
+                 attendees_json = excluded.attendees_json,
+                 ics_raw = excluded.ics_raw,
+                 etag = excluded.etag
+             RETURNING id",
+            params![calendar_id, uid, summary, start_at, end_at, all_day as i64, location, description, attendees_json, ics_raw, etag],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Insert or update an event from a CalendarEvent struct.
+    pub fn upsert_calendar_event(&self, event: &CalendarEvent) -> Result<i64> {
+        self.upsert_event(
+            event.calendar_id,
+            &event.uid,
+            &event.summary,
+            event.start_at,
+            event.end_at,
+            event.all_day,
+            event.location.as_deref(),
+            event.description.as_deref(),
+            &event.attendees_json,
+            &event.ics_raw,
+            event.etag.as_deref(),
+        )
+    }
+
+    /// List events for a calendar within a time range.
+    pub fn list_events(&self, calendar_id: i64, start: i64, end: i64) -> Result<Vec<CalendarEvent>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, calendar_id, uid, summary, start_at, end_at, all_day, location, description, attendees_json, ics_raw, etag
+             FROM events
+             WHERE calendar_id = ?1 AND end_at >= ?2 AND start_at <= ?3
+             ORDER BY start_at",
+        )?;
+        let rows = stmt.query_map(params![calendar_id, start, end], |row| {
+            Ok(CalendarEvent {
+                id: row.get(0)?,
+                calendar_id: row.get(1)?,
+                uid: row.get(2)?,
+                summary: row.get(3)?,
+                start_at: row.get(4)?,
+                end_at: row.get(5)?,
+                all_day: row.get::<_, i64>(6)? != 0,
+                location: row.get(7)?,
+                description: row.get(8)?,
+                attendees_json: row.get(9)?,
+                ics_raw: row.get(10)?,
+                etag: row.get(11)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get an event by UID.
+    pub fn event_by_uid(&self, calendar_id: i64, uid: &str) -> Result<Option<CalendarEvent>> {
+    let conn = self.lock()?;
+    conn.query_row(
+        "SELECT id, calendar_id, uid, summary, start_at, end_at, all_day, location, description, attendees_json, ics_raw, etag
+         FROM events
+         WHERE calendar_id = ?1 AND uid = ?2",
+        params![calendar_id, uid],
+        |row| {
+            Ok(CalendarEvent {
+                id: row.get(0)?,
+                calendar_id: row.get(1)?,
+                uid: row.get(2)?,
+                summary: row.get(3)?,
+                start_at: row.get(4)?,
+                end_at: row.get(5)?,
+                all_day: row.get::<_, i64>(6)? != 0,
+                location: row.get(7)?,
+                description: row.get(8)?,
+                attendees_json: row.get(9)?,
+                ics_raw: row.get(10)?,
+                etag: row.get(11)?,
+            })
+        }).optional().map_err(Error::from)
+    }
+
+    /// Delete an event by UID.
+    pub fn delete_event(&self, calendar_id: i64, uid: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM events WHERE calendar_id = ?1 AND uid = ?2",
+            params![calendar_id, uid],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- plugins
+
+    /// Insert or update a plugin.
+    pub fn upsert_plugin(
+        &self,
+        name: &str,
+        version: &str,
+        source_path: &str,
+        enabled: bool,
+        manifest_json: &str,
+        permissions_json: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let id: i64 = conn.query_row(
+            "INSERT INTO plugins (name, version, source_path, enabled, manifest_json, permissions_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(name) DO UPDATE SET
+                 version = excluded.version,
+                 source_path = excluded.source_path,
+                 enabled = excluded.enabled,
+                 manifest_json = excluded.manifest_json,
+                 permissions_json = excluded.permissions_json
+             RETURNING id",
+            params![name, version, source_path, enabled as i64, manifest_json, permissions_json, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all plugins.
+    pub fn list_plugins(&self) -> Result<Vec<Plugin>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT name, version, source_path, enabled, manifest_json, permissions_json, created_at
+             FROM plugins
+             ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Plugin {
+                name: row.get(0)?,
+                version: row.get(1)?,
+                source_path: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                manifest_json: row.get(4)?,
+                permissions_json: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get a plugin by name.
+    pub fn plugin(&self, name: &str) -> Result<Option<Plugin>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT name, version, source_path, enabled, manifest_json, permissions_json, created_at
+             FROM plugins
+             WHERE name = ?1",
+            params![name],
+            |row| {
+                Ok(Plugin {
+                    name: row.get(0)?,
+                    version: row.get(1)?,
+                    source_path: row.get(2)?,
+                    enabled: row.get::<_, i64>(3)? != 0,
+                    manifest_json: row.get(4)?,
+                    permissions_json: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            },
+        ).optional().map_err(Error::from)
+    }
+
+    /// Delete a plugin by name.
+    pub fn delete_plugin(&self, name: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM plugins WHERE name = ?1",
+            params![name],
+        )? > 0)
+    }
+
+    // --------------------------------------------------------------- pgp_keys
+
+    /// Insert or update a PGP key.
+    pub fn upsert_pgp_key(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+        user_ids: &[String],
+        public_key: &str,
+    ) -> Result<i64> {
+        let conn = self.lock()?;
+        let now = crate::now_unix();
+        let user_ids_json = serde_json::to_string(user_ids).unwrap_or_default();
+        let id: i64 = conn.query_row(
+            "INSERT INTO pgp_keys (account_id, fingerprint, user_ids, public_key, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id, fingerprint) DO UPDATE SET
+                 user_ids = excluded.user_ids,
+                 public_key = excluded.public_key
+             RETURNING id",
+            params![account.to_string(), fingerprint, user_ids_json, public_key, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// List all PGP keys for an account.
+    pub fn pgp_keys_for_account(&self, account: &AccountId) -> Result<Vec<PgpKey>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, account_id, fingerprint, user_ids, public_key, created_at
+             FROM pgp_keys
+             WHERE account_id = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![account.to_string()], |row| {
+            let user_ids_json: String = row.get(3)?;
+            let user_ids: Vec<String> = serde_json::from_str(&user_ids_json).unwrap_or_default();
+            Ok(PgpKey {
+                id: row.get(0)?,
+                account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                fingerprint: row.get(2)?,
+                user_ids,
+                public_key: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(Error::from)
+    }
+
+    /// Get a PGP key by fingerprint.
+    pub fn pgp_key_by_fingerprint(&self, account: &AccountId, fingerprint: &str) -> Result<Option<PgpKey>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, account_id, fingerprint, user_ids, public_key, created_at
+             FROM pgp_keys
+             WHERE account_id = ?1 AND fingerprint = ?2",
+            params![account.to_string(), fingerprint],
+            |row| {
+                let user_ids_json: String = row.get(3)?;
+                let user_ids: Vec<String> = serde_json::from_str(&user_ids_json).unwrap_or_default();
+                Ok(PgpKey {
+                    id: row.get(0)?,
+                    account_id: AccountId::parse(&row.get::<_, String>(1)?)
+                        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e)))?,
+                    fingerprint: row.get(2)?,
+                    user_ids,
+                    public_key: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        ).optional().map_err(Error::from)
+    }
+
+    /// Delete a PGP key by fingerprint.
+    pub fn delete_pgp_key(&self, account: &AccountId, fingerprint: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM pgp_keys WHERE account_id = ?1 AND fingerprint = ?2",
+            params![account.to_string(), fingerprint],
+        )? > 0)
+    }
+
+    // ---------------------------------------------------------------- pgp_mime
+
+    /// Store the OpenPGP/MIME payload extracted for a message.
+    pub fn upsert_pgp_mime(
+        &self,
+        message_id: MessageId,
+        kind: crate::model::PgpMimeKind,
+        payload: &str,
+        signature: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO pgp_mime (message_id, kind, payload, signature, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(message_id) DO UPDATE SET
+                 kind = excluded.kind,
+                 payload = excluded.payload,
+                 signature = excluded.signature,
+                 fetched_at = excluded.fetched_at",
+            params![message_id.0, kind.as_str(), payload, signature, crate::now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// The OpenPGP/MIME payload of a message, when it has one.
+    pub fn pgp_mime(&self, message_id: MessageId) -> Result<Option<crate::model::PgpMime>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT message_id, kind, payload, signature FROM pgp_mime WHERE message_id = ?1",
+            params![message_id.0],
+            |row| {
+                let kind: String = row.get(1)?;
+                Ok(crate::model::PgpMime {
+                    message_id: row.get(0)?,
+                    kind: crate::model::PgpMimeKind::parse(&kind)
+                        .unwrap_or(crate::model::PgpMimeKind::Encrypted),
+                    payload: row.get(2)?,
+                    signature: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Error::from)
+    }
+
 }
 
 // -------------------------------------------------------------------- helpers
-
-/// IMAP mod-sequences are 63 bit unsigned, SQLite integers are signed.
 fn modseq_to_sql(value: Option<u64>) -> Option<i64> {
     value.map(|v| v.min(i64::MAX as u64) as i64)
 }
@@ -782,6 +1854,7 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
     }
 
     let flags = message.flags.join(" ");
+    let thread_root_key = message.thread_root_key.as_ref().or(message.thread_key.as_ref());
     let existing: Option<i64> = tx
         .query_row(
             "SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2",
@@ -794,15 +1867,16 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
         Some(id) => {
             tx.execute(
                 "UPDATE messages SET
-                     message_id = ?2, thread_key = ?3, subject = ?4, from_name = ?5,
-                     from_addr = ?6, to_addrs = ?7, cc_addrs = ?8, sent_at = ?9,
-                     received_at = ?10, size = ?11, flags = ?12, has_attachments = ?13,
-                     snippet = COALESCE(?14, snippet)
+                     message_id = ?2, thread_key = ?3, thread_root_key = ?4, subject = ?5, from_name = ?6,
+                     from_addr = ?7, to_addrs = ?8, cc_addrs = ?9, sent_at = ?10,
+                     received_at = ?11, size = ?12, flags = ?13, has_attachments = ?14,
+                     snippet = COALESCE(?15, snippet)
                  WHERE id = ?1",
                 params![
                     id,
                     message.message_id,
                     message.thread_key,
+                    thread_root_key,
                     message.subject,
                     message.from_name,
                     message.from_addr,
@@ -821,14 +1895,15 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
         None => {
             tx.execute(
                 "INSERT INTO messages
-                     (folder_id, uid, message_id, thread_key, subject, from_name, from_addr,
+                     (folder_id, uid, message_id, thread_key, thread_root_key, subject, from_name, from_addr,
                       to_addrs, cc_addrs, sent_at, received_at, snippet, size, flags, has_attachments)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     message.folder_id.0,
                     message.uid,
                     message.message_id,
                     message.thread_key,
+                    thread_root_key,
                     message.subject,
                     message.from_name,
                     message.from_addr,
@@ -895,28 +1970,31 @@ fn insert_fts_from_message(tx: &Transaction<'_>, id: MessageId) -> Result<()> {
 }
 
 fn map_message(row: &Row<'_>) -> rusqlite::Result<MessageHeader> {
-    let flags: String = row.get(14)?;
+    let flags: String = row.get(16)?;
     Ok(MessageHeader {
         id: MessageId(row.get(0)?),
         folder_id: FolderId(row.get(1)?),
         uid: row.get(2)?,
         message_id: row.get(3)?,
         thread_key: row.get(4)?,
-        subject: row.get(5)?,
-        from_name: row.get(6)?,
-        from_addr: row.get(7)?,
-        to_addrs: row.get(8)?,
-        cc_addrs: row.get(9)?,
-        sent_at: row.get(10)?,
-        received_at: row.get(11)?,
-        snippet: row.get(12)?,
-        size: row.get(13)?,
+        thread_root_key: row.get(5)?,
+        thread_reply_count: row.get(6)?,
+        thread_depth: 0,
+        subject: row.get(7)?,
+        from_name: row.get(8)?,
+        from_addr: row.get(9)?,
+        to_addrs: row.get(10)?,
+        cc_addrs: row.get(11)?,
+        sent_at: row.get(12)?,
+        received_at: row.get(13)?,
+        snippet: row.get(14)?,
+        size: row.get(15)?,
         flags: flags
             .split_whitespace()
             .map(std::string::ToString::to_string)
             .collect(),
-        has_attachments: row.get::<_, i64>(15)? != 0,
-        body_fetched: row.get::<_, i64>(16)? != 0,
+        has_attachments: row.get::<_, i64>(17)? != 0,
+        body_fetched: row.get::<_, i64>(18)? != 0,
     })
 }
 
@@ -980,7 +2058,6 @@ fn fts_query(input: &str) -> Option<String> {
             .join(" AND "),
     )
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

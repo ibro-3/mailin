@@ -21,24 +21,36 @@ pub mod credentials;
 pub mod engine;
 pub mod error;
 pub mod html;
+mod caldav;
 mod imap;
 pub mod model;
+pub mod search;
+pub mod oauth;
+pub mod pgp;
+pub mod plugins;
+pub mod rules;
 mod smtp;
 pub mod store;
 mod sync;
 mod tls;
 
-pub use account::{Account, AccountId, AccountSyncSettings, Security, ServerSettings};
-pub use client::{Event, Mailin};
+pub use account::{
+    Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, OAuthProvider, Security,
+    ServerSettings,
+};
+pub use client::{ClientEvent, Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
-pub use config::{Config, Paths, SyncPreferences, Theme, UiPreferences};
+pub use config::{Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode, UiPreferences};
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use model::{
-    AttachmentData, AttachmentMeta, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, UpsertedMessage,
-};
+    AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
+    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, PgpKey, PgpMime, PgpMimeKind, Plugin, Rule, RuleAction, RuleCondition,
+    ScheduledAction, SignatureStatus, SnoozePayload, SyncStatus, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
+}
+pub use plugins::PluginSystem;
+pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use store::{FolderUpsert, Store};
 
 #[cfg(feature = "keyring")]

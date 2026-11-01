@@ -7,15 +7,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use mailin_core::{Config, Engine, Mailin, Paths, Theme};
+use mailin_core::{Config, Engine, Mailin, OutgoingMessage, Paths, Theme};
 
 use crate::window::MainWindow;
 
 const APP_ID: &str = "dev.mailin.Mailin";
 
 /// Everything that lives for the whole process. The UI keeps an `Rc` of this.
+///
+/// The config sits behind an `Rc<RefCell<…>>` so the preferences dialog can
+/// write changes back into the running application; the UI reads it on every
+/// use instead of caching values that would go stale.
 pub struct AppState {
-    pub config: Config,
+    pub config: Rc<RefCell<Config>>,
     pub mailin: std::sync::Arc<Mailin>,
     pub engine: Engine,
 }
@@ -29,7 +33,7 @@ impl AppState {
         let mailin = std::sync::Arc::new(Mailin::open(&paths)?);
         let engine = Engine::start(std::sync::Arc::clone(&mailin))?;
         Ok(Self {
-            config,
+            config: Rc::new(RefCell::new(config)),
             mailin,
             engine,
         })
@@ -57,7 +61,8 @@ pub fn run() -> glib::ExitCode {
         let startup_error = Rc::clone(&startup_error);
         move |_| match AppState::open() {
             Ok(opened) => {
-                apply_theme(opened.config.ui.theme);
+                apply_theme(opened.config.borrow().ui.theme);
+                install_css();
                 *state.borrow_mut() = Some(Rc::new(opened));
             }
             Err(error) => {
@@ -90,14 +95,109 @@ pub fn run() -> glib::ExitCode {
         }
     });
 
+    // Handle mailto: URI activation (e.g., from browser links)
+    application.connect_open({
+        move |_application, files, _hint| {
+            for file in files {
+                let uri = file.uri();
+                if let Some(draft) = parse_mailto_uri(&uri) {
+                    crate::window::set_mailto_draft(draft);
+                    return;
+                }
+            }
+        }
+    });
+
     application.run()
 }
 
-fn apply_theme(theme: Theme) {
+pub fn apply_theme(theme: Theme) {
     let scheme = match theme {
         Theme::System => adw::ColorScheme::Default,
         Theme::Light => adw::ColorScheme::ForceLight,
         Theme::Dark => adw::ColorScheme::ForceDark,
     };
     adw::StyleManager::default().set_color_scheme(scheme);
+}
+
+/// Application-wide styles that libadwaita does not provide: the reader's
+/// remote-content banner needs a tinted background for its two actions.
+fn install_css() {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(
+        ".remote-banner {\
+           background-color: alpha(@accent_color, 0.16);\
+           border-radius: 8px;\
+           padding: 6px;\
+         }\
+         @keyframes spin {\
+           to { transform: rotate(360deg); }\
+         }\
+         .sync-status-idle {\
+           color: @disabled_text_color;\
+         }\
+         .sync-status-syncing {\
+           color: @accent_color;\
+           animation: spin 1s linear infinite;\
+         }\
+         .sync-status-connected {\
+           color: @success_color;\
+         }\
+         .sync-status-offline {\
+           color: @warning_color;\
+         }\
+         .sync-status-error {\
+           color: @error_color;\
+         }",
+    );
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+/// Parse a mailto: URI into an OutgoingMessage draft.
+/// Supports: mailto:addr?subject=...&body=...&cc=...&bcc=...
+fn parse_mailto_uri(uri: &str) -> Option<OutgoingMessage> {
+    let uri = uri.strip_prefix("mailto:")?;
+    let (addr_part, query_part) = uri.split_once('?').unwrap_or((uri, ""));
+    let to = percent_decode(addr_part)?;
+    let mut draft = OutgoingMessage {
+        to,
+        ..OutgoingMessage::default()
+    };
+    for pair in query_part.split('&') {
+        let (key, value) = pair.split_once('=')?;
+        let value = percent_decode(value)?;
+        match key {
+            "subject" => draft.subject = value,
+            "body" => draft.body = value,
+            "cc" => draft.cc = value,
+            "bcc" => draft.bcc = value,
+            _ => {}
+        }
+    }
+    Some(draft)
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex1 = chars.next()?;
+            let hex2 = chars.next()?;
+            let byte = u8::from_str_radix(&format!("{hex1}{hex2}"), 16).ok()?;
+            result.push(byte as char);
+        } else if c == '+' {
+            result.push(' ');
+        } else {
+            result.push(c);
+        }
+    }
+    Some(result)
 }

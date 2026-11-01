@@ -15,9 +15,17 @@ mod bootstrap;
 #[cfg(windows)]
 mod compose;
 #[cfg(windows)]
+mod design_tokens;
+#[cfg(windows)]
 mod format;
 #[cfg(windows)]
+mod move_dialog;
+#[cfg(windows)]
+mod pgp_keys;
+#[cfg(windows)]
 mod platform;
+#[cfg(windows)]
+mod preferences;
 #[cfg(windows)]
 mod ui;
 #[cfg(windows)]

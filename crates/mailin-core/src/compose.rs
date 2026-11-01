@@ -11,7 +11,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use crate::error::{Error, Result};
-use crate::model::OutgoingEnvelope;
+use crate::model::{MessageHeader, OutgoingEnvelope};
 
 /// A file attached to an outgoing message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,10 @@ pub struct ComposeAttachment {
     pub filename: String,
     pub mime_type: String,
     pub data: Vec<u8>,
+    /// Content-ID for inline images (e.g., `<image1@example.com>`).
+    /// When set, the attachment is rendered inline with `Content-Disposition: inline`
+    /// and can be referenced in HTML as `<img src="cid:image1@example.com">`.
+    pub cid: Option<String>,
 }
 
 impl ComposeAttachment {
@@ -27,6 +31,18 @@ impl ComposeAttachment {
             filename: filename.into(),
             mime_type: mime_type.into(),
             data,
+            cid: None,
+        }
+    }
+
+    /// Create an inline image attachment with a generated Content-ID.
+    pub fn inline_image(filename: impl Into<String>, mime_type: impl Into<String>, data: Vec<u8>) -> Self {
+        let cid = format!("{}@mailin.local", uuid::Uuid::new_v4().simple());
+        Self {
+            filename: filename.into(),
+            mime_type: mime_type.into(),
+            data,
+            cid: Some(cid),
         }
     }
 }
@@ -43,10 +59,18 @@ pub struct OutgoingMessage {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    /// Optional HTML body. When present alongside `body`, a `multipart/alternative`
+    /// is emitted (text/plain + text/html). If attachments are also present,
+    /// the structure becomes `multipart/mixed` containing `multipart/alternative`.
+    pub html_body: Option<String>,
     pub in_reply_to: Option<String>,
     /// Message IDs of the conversation, used for threading by receiving
     /// clients. Values may be given with or without angle brackets.
     pub references: Vec<String>,
+    /// Stable RFC 5322 Message-ID for a draft. Reusing it lets the server-side
+    /// draft be replaced instead of duplicated on every auto-save. Empty for
+    /// messages that are about to be sent.
+    pub draft_key: Option<String>,
     pub attachments: Vec<ComposeAttachment>,
 }
 
@@ -56,6 +80,17 @@ impl OutgoingMessage {
     /// Header values are stripped of line breaks, so a malicious or accidental
     /// newline in a subject cannot inject headers.
     pub fn build(&self) -> Result<(Vec<u8>, OutgoingEnvelope)> {
+        self.build_inner(true)
+    }
+
+    /// Build a draft that may have no recipients yet. Drafts are appended to
+    /// the Drafts folder rather than transmitted, so the envelope is not
+    /// validated.
+    pub fn build_draft(&self) -> Result<Vec<u8>> {
+        self.build_inner(false).map(|(raw, _)| raw)
+    }
+
+    fn build_inner(&self, require_recipients: bool) -> Result<(Vec<u8>, OutgoingEnvelope)> {
         let from = parse_single(&self.from_name, &self.from_addr)?;
         let to = parse_mailboxes(&self.to)?;
         let cc = parse_mailboxes(&self.cc)?;
@@ -67,7 +102,9 @@ impl OutgoingMessage {
             cc: cc.iter().map(|mailbox| mailbox.address.clone()).collect(),
             bcc: bcc.iter().map(|mailbox| mailbox.address.clone()).collect(),
         };
-        envelope.validate()?;
+        if require_recipients {
+            envelope.validate()?;
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -78,9 +115,15 @@ impl OutgoingMessage {
             .address
             .split_once('@')
             .map_or("mailin.local", |(_, domain)| domain);
-        let message_id = format!("{}@{}", uuid::Uuid::new_v4(), domain);
+        let message_id = self
+            .draft_key
+            .as_deref()
+            .map(message_id_header)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.trim_matches(['<', '>']).to_owned())
+            .unwrap_or_else(|| format!("{}@{}", uuid::Uuid::new_v4(), domain));
 
-        let mut message = String::with_capacity(1024 + self.body.len());
+        let mut message = String::with_capacity(1024 + self.body.len() + self.html_body.as_ref().map_or(0, |s| s.len()));
         write_header(&mut message, "Date", &date);
         write_header(&mut message, "From", &format_mailbox(&from));
         write_header(&mut message, "To", &format_mailboxes(&to));
@@ -111,12 +154,50 @@ impl OutgoingMessage {
         }
 
         let body = normalize_crlf(&self.body);
-        if self.attachments.is_empty() {
+        let html_body = self.html_body.as_ref().map(|s| normalize_crlf(s));
+
+        // Determine MIME structure:
+        // - No attachments, no HTML: text/plain
+        // - HTML, no attachments: multipart/alternative
+        // - Attachments, no HTML: multipart/mixed with text/plain
+        // - Attachments + HTML: multipart/mixed with multipart/alternative
+        let has_html = html_body.is_some();
+        let has_attachments = !self.attachments.is_empty();
+
+        if !has_attachments && !has_html {
+            // Simple text/plain
             write_header(&mut message, "Content-Type", "text/plain; charset=utf-8");
             write_header(&mut message, "Content-Transfer-Encoding", "base64");
             message.push_str("\r\n");
             write_base64(&mut message, body.as_bytes());
-        } else {
+        } else if !has_attachments && has_html {
+            // multipart/alternative (text/plain + text/html)
+            let boundary = format!("mailin-alt-{}", uuid::Uuid::new_v4().simple());
+            write_header(
+                &mut message,
+                "Content-Type",
+                &format!("multipart/alternative; boundary=\"{boundary}\""),
+            );
+            message.push_str("\r\n");
+            message.push_str("This is a multi-part message in MIME format.\r\n");
+
+            // text/plain part
+            message.push_str(&format!("--{boundary}\r\n"));
+            message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+            message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+            write_base64(&mut message, body.as_bytes());
+
+            // text/html part
+            if let Some(html) = html_body {
+                message.push_str(&format!("--{boundary}\r\n"));
+                message.push_str("Content-Type: text/html; charset=utf-8\r\n");
+                message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+                write_base64(&mut message, html.as_bytes());
+            }
+
+            message.push_str(&format!("--{boundary}--\r\n"));
+        } else if has_attachments && !has_html {
+            // multipart/mixed with text/plain + attachments
             let boundary = format!("mailin-{}", uuid::Uuid::new_v4().simple());
             write_header(
                 &mut message,
@@ -126,26 +207,170 @@ impl OutgoingMessage {
             message.push_str("\r\n");
             message.push_str("This is a multi-part message in MIME format.\r\n");
 
+            // text/plain part
             message.push_str(&format!("--{boundary}\r\n"));
             message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
             message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
             write_base64(&mut message, body.as_bytes());
 
+            // Attachments
             for attachment in &self.attachments {
                 message.push_str(&format!("--{boundary}\r\n"));
                 let mime_type = sanitize_mime_type(&attachment.mime_type);
                 message.push_str(&format!("Content-Type: {mime_type}\r\n"));
                 message.push_str("Content-Transfer-Encoding: base64\r\n");
-                message.push_str(&format!(
-                    "Content-Disposition: attachment; {}\r\n\r\n",
-                    filename_parameter(&attachment.filename)
-                ));
+                if let Some(cid) = &attachment.cid {
+                    // Inline image with CID
+                    message.push_str(&format!("Content-ID: <{}>\r\n", cid));
+                    message.push_str("Content-Disposition: inline\r\n");
+                } else {
+                    message.push_str(&format!(
+                        "Content-Disposition: attachment; {}\r\n",
+                        filename_parameter(&attachment.filename)
+                    ));
+                }
+                message.push_str("\r\n");
                 write_base64(&mut message, &attachment.data);
             }
             message.push_str(&format!("--{boundary}--\r\n"));
+        } else {
+            // has_attachments && has_html: multipart/mixed containing multipart/alternative + attachments
+            let outer_boundary = format!("mailin-{}", uuid::Uuid::new_v4().simple());
+            let alt_boundary = format!("mailin-alt-{}", uuid::Uuid::new_v4().simple());
+
+            write_header(
+                &mut message,
+                "Content-Type",
+                &format!("multipart/mixed; boundary=\"{outer_boundary}\""),
+            );
+            message.push_str("\r\n");
+            message.push_str("This is a multi-part message in MIME format.\r\n");
+
+            // multipart/alternative part
+            message.push_str(&format!("--{outer_boundary}\r\n"));
+            message.push_str(&format!("Content-Type: multipart/alternative; boundary=\"{alt_boundary}\"\r\n\r\n"));
+            message.push_str("This is a multi-part message in MIME format.\r\n");
+
+            // text/plain part
+            message.push_str(&format!("--{alt_boundary}\r\n"));
+            message.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+            message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+            write_base64(&mut message, body.as_bytes());
+
+            // text/html part
+            if let Some(html) = html_body {
+                message.push_str(&format!("--{alt_boundary}\r\n"));
+                message.push_str("Content-Type: text/html; charset=utf-8\r\n");
+                message.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
+                write_base64(&mut message, html.as_bytes());
+            }
+
+            message.push_str(&format!("--{alt_boundary}--\r\n"));
+
+            // Attachments
+            for attachment in &self.attachments {
+                message.push_str(&format!("--{outer_boundary}\r\n"));
+                let mime_type = sanitize_mime_type(&attachment.mime_type);
+                message.push_str(&format!("Content-Type: {mime_type}\r\n"));
+                message.push_str("Content-Transfer-Encoding: base64\r\n");
+                if let Some(cid) = &attachment.cid {
+                    // Inline image with CID
+                    message.push_str(&format!("Content-ID: <{}>\r\n", cid));
+                    message.push_str("Content-Disposition: inline\r\n");
+                } else {
+                    message.push_str(&format!(
+                        "Content-Disposition: attachment; {}\r\n",
+                        filename_parameter(&attachment.filename)
+                    ));
+                }
+                message.push_str("\r\n");
+                write_base64(&mut message, &attachment.data);
+            }
+            message.push_str(&format!("--{outer_boundary}--\r\n"));
         }
 
         Ok((message.into_bytes(), envelope))
+    }
+}
+
+/// RFC 3676 signature separator line.
+pub const SIGNATURE_SEPARATOR: &str = "-- ";
+
+/// The account signature as an isolated block, or an empty string when the
+/// signature is blank. The `-- ` separator is part of the block.
+pub fn signature_block(signature: &str) -> String {
+    let signature = signature.trim();
+    if signature.is_empty() {
+        String::new()
+    } else {
+        format!("{SIGNATURE_SEPARATOR}\n{signature}")
+    }
+}
+
+/// Place the signature above a prefilled body (reply quotation or forwarded
+/// headers), separated by one blank line. A blank signature leaves `body`
+/// untouched.
+pub fn with_signature_prefix(signature: &str, body: &str) -> String {
+    let block = signature_block(signature);
+    if block.is_empty() {
+        return body.to_owned();
+    }
+    format!("{block}\n\n{}", body.trim_start_matches('\n'))
+}
+
+/// Rebuild a composer draft from a stored Drafts-folder message. The Message-ID
+/// becomes the draft key so the next save replaces the same server message.
+pub fn draft_from_header(header: &MessageHeader, body: Option<&str>) -> OutgoingMessage {
+    OutgoingMessage {
+        from_name: header.from_name.clone().unwrap_or_default(),
+        from_addr: header.from_addr.clone().unwrap_or_default(),
+        to: header.to_addrs.clone(),
+        cc: header.cc_addrs.clone(),
+        bcc: String::new(),
+        subject: header.subject.clone(),
+        body: body.unwrap_or_default().to_owned(),
+        html_body: None,
+        in_reply_to: None,
+        references: Vec::new(),
+        draft_key: header.message_id.clone(),
+        attachments: Vec::new(),
+    }
+}
+
+/// A fresh Message-ID used to replace a draft on later auto-saves.
+pub fn new_draft_key(from_addr: &str) -> String {
+    let domain = from_addr
+        .split_once('@')
+        .map_or("mailin.local", |(_, domain)| domain);
+    format!("{}@{}", uuid::Uuid::new_v4(), domain)
+}
+
+/// Substitute `{{variable}}` placeholders in a template string.
+/// Variables are provided as a HashMap. Unknown variables are left as-is.
+pub fn apply_template(template: &str, vars: &std::collections::HashMap<&str, &str>) -> String {
+    let mut result = template.to_owned();
+    for (key, value) in vars {
+        let placeholder = format!("{{{{{key}}}}}");
+        result = result.replace(&placeholder, value);
+    }
+    result
+}
+
+/// Create an OutgoingMessage from a Template with variable substitution.
+pub fn template_draft(template: &crate::model::Template, vars: &std::collections::HashMap<&str, &str>) -> OutgoingMessage {
+    OutgoingMessage {
+        from_name: String::new(),
+        from_addr: String::new(),
+        to: String::new(),
+        cc: String::new(),
+        bcc: String::new(),
+        subject: apply_template(&template.subject, vars),
+        body: apply_template(&template.body, vars),
+        html_body: None,
+        in_reply_to: None,
+        references: Vec::new(),
+        draft_key: Some(new_draft_key("template")),
+        attachments: Vec::new(),
     }
 }
 
@@ -435,10 +660,151 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+/// PGP options for an outgoing message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PgpOptions {
+    /// Encrypt the MIME entity for every recipient (sign-then-encrypt when `sign` is set).
+    pub encrypt: bool,
+    /// Sign the MIME entity (detached PGP/MIME signature; inside the
+    /// encryption when both options are set).
+    pub sign: bool,
+}
+
+impl PgpOptions {
+    pub fn is_enabled(&self) -> bool {
+        self.encrypt || self.sign
+    }
+}
+
+/// Split a built message into its visible headers, its MIME content headers and
+/// its body. The MIME entity that PGP/MIME encrypts or signs is
+/// `content_headers + "\r\n" + body`.
+fn split_mime_entity(raw: &[u8]) -> Result<(String, String, String)> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| Error::Protocol("outgoing message is not valid UTF-8".into()))?;
+    let (headers, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| Error::Protocol("outgoing message has no header/body separator".into()))?;
+
+    let mut visible = String::new();
+    let mut content = String::new();
+    for block in header_blocks(headers) {
+        let name = block
+            .split_once(':')
+            .map(|(name, _)| name.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(
+            name.as_str(),
+            "content-type" | "content-transfer-encoding" | "mime-version"
+        ) {
+            content.push_str(&block);
+            content.push_str("\r\n");
+        } else {
+            visible.push_str(&block);
+            visible.push_str("\r\n");
+        }
+    }
+    Ok((visible, content, body.to_owned()))
+}
+
+/// Header blocks including continuation lines.
+fn header_blocks(headers: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    for line in headers.split("\r\n") {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(last) = blocks.last_mut() {
+                last.push_str("\r\n");
+                last.push_str(line);
+                continue;
+            }
+        }
+        if !line.is_empty() {
+            blocks.push(line.to_owned());
+        }
+    }
+    blocks
+}
+
+/// The MIME entity (content headers + body) that PGP/MIME protects.
+pub fn mime_entity(raw: &[u8]) -> Result<String> {
+    let (_, content, body) = split_mime_entity(raw)?;
+    if content.is_empty() {
+        Ok(body)
+    } else {
+        Ok(format!("{content}\r\n{body}"))
+    }
+}
+
+fn normalize_armored(armored: &str) -> String {
+    normalize_crlf(armored.trim())
+}
+
+/// Wrap an already-built message as `multipart/encrypted` (RFC 3156).
+pub fn wrap_encrypted(raw: &[u8], armored_ciphertext: &str) -> Result<Vec<u8>> {
+    let (visible, _, _) = split_mime_entity(raw)?;
+    let boundary = format!("mailin-pgp-{}", uuid::Uuid::new_v4().simple());
+    let ciphertext = normalize_armored(armored_ciphertext);
+
+    let mut out = String::with_capacity(raw.len() + ciphertext.len() + 512);
+    out.push_str(&visible);
+    write_header(&mut out, "MIME-Version", "1.0");
+    write_header(
+        &mut out,
+        "Content-Type",
+        &format!("multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"{boundary}\""),
+    );
+    out.push_str("\r\n");
+    out.push_str("This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156).\r\n");
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str("Content-Type: application/pgp-encrypted\r\n\r\n");
+    out.push_str("Version: 1\r\n");
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str("Content-Type: application/octet-stream; name=\"encrypted.asc\"\r\n");
+    out.push_str("Content-Description: OpenPGP encrypted message\r\n");
+    out.push_str("Content-Disposition: inline; filename=\"encrypted.asc\"\r\n\r\n");
+    out.push_str(&ciphertext);
+    out.push_str("\r\n");
+    out.push_str(&format!("--{boundary}--\r\n"));
+    Ok(out.into_bytes())
+}
+
+/// Wrap an already-built message as `multipart/signed` (RFC 3156).
+pub fn wrap_signed(raw: &[u8], armored_signature: &str) -> Result<Vec<u8>> {
+    let (visible, _, _) = split_mime_entity(raw)?;
+    let entity = mime_entity(raw)?;
+    let boundary = format!("mailin-pgp-{}", uuid::Uuid::new_v4().simple());
+    let signature = normalize_armored(armored_signature);
+
+    let mut out = String::with_capacity(raw.len() + signature.len() + 512);
+    out.push_str(&visible);
+    write_header(&mut out, "MIME-Version", "1.0");
+    write_header(
+        &mut out,
+        "Content-Type",
+        &format!(
+            "multipart/signed; micalg=pgp-sha256; protocol=\"application/pgp-signature\"; boundary=\"{boundary}\""
+        ),
+    );
+    out.push_str("\r\n");
+    out.push_str("This is an OpenPGP/MIME signed message (RFC 4880 and 3156).\r\n");
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str(&entity);
+    if !entity.ends_with("\r\n") {
+        out.push_str("\r\n");
+    }
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str("Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n");
+    out.push_str("Content-Description: OpenPGP digital signature\r\n");
+    out.push_str("Content-Disposition: attachment; filename=\"signature.asc\"\r\n\r\n");
+    out.push_str(&signature);
+    out.push_str("\r\n");
+    out.push_str(&format!("--{boundary}--\r\n"));
+    Ok(out.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn draft() -> OutgoingMessage {
         OutgoingMessage {
             from_name: "Ada Lovelace".into(),
@@ -577,5 +943,162 @@ mod tests {
             sanitize_mime_type("bad\r\nheader"),
             "application/octet-stream"
         );
+    }
+
+    #[test]
+    fn drafts_may_have_no_recipients_and_reuse_the_key() {
+        let mut message = draft();
+        message.to.clear();
+        message.subject.clear();
+        message.draft_key = Some("draft-key@example.com".into());
+        // Sending this must still fail, but saving a draft is allowed.
+        assert!(message.build().is_err());
+        let raw = text(&message.build_draft().expect("draft build"));
+        assert!(raw.contains("Message-ID: <draft-key@example.com>"));
+        assert!(raw.contains("To: \r\n"));
+    }
+
+    #[test]
+    fn a_stored_draft_can_be_resumed() {
+        let header = MessageHeader {
+            id: crate::model::MessageId(7),
+            folder_id: crate::model::FolderId(3),
+            uid: 42,
+            message_id: Some("draft-key@example.com".into()),
+            thread_key: None,
+            thread_root_key: None,
+            thread_reply_count: 0,
+            thread_depth: 0,
+            subject: "Unfinished".into(),
+            from_name: Some("Ada".into()),
+            from_addr: Some("ada@example.com".into()),
+            to_addrs: "grace@example.com".into(),
+            cc_addrs: String::new(),
+            sent_at: None,
+            received_at: 0,
+            snippet: None,
+            size: None,
+            flags: vec!["\\Draft".into()],
+            has_attachments: false,
+            body_fetched: true,
+        };
+        let draft = draft_from_header(&header, Some("Half written"));
+        assert_eq!(draft.to, "grace@example.com");
+        assert_eq!(draft.subject, "Unfinished");
+        assert_eq!(draft.body, "Half written");
+        assert_eq!(draft.draft_key.as_deref(), Some("draft-key@example.com"));
+    }
+
+    #[test]
+    fn blank_signatures_change_nothing() {
+        assert_eq!(signature_block(""), "");
+        assert_eq!(signature_block("  \n\n"), "");
+        let quote = "\n\nOn Monday, Grace wrote:\n> hi";
+        assert_eq!(with_signature_prefix("", quote), quote);
+    }
+
+    #[test]
+    fn signature_block_starts_with_the_rfc_separator() {
+        assert_eq!(
+            signature_block("Ada\nhttps://example.com\n"),
+            "-- \nAda\nhttps://example.com"
+        );
+    }
+
+    #[test]
+    fn signature_sits_above_the_quotation() {
+        let reply = with_signature_prefix("Ada", "\n\nOn Monday, Grace wrote:\n> hi");
+        assert_eq!(reply, "-- \nAda\n\nOn Monday, Grace wrote:\n> hi");
+        let forwarded = with_signature_prefix(
+            "Ada",
+            "\n\n---------- Forwarded message ----------\nFrom: Grace",
+        );
+        assert!(forwarded.starts_with("-- \nAda\n\n---------- Forwarded message ----------"));
+    }
+
+    #[test]
+    fn apply_template_substitutes_variables() {
+        let template = "Hello {{name}}, your order {{order_id}} is ready.";
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("name", "Ada");
+        vars.insert("order_id", "12345");
+        let result = apply_template(template, &vars);
+        assert_eq!(result, "Hello Ada, your order 12345 is ready.");
+    }
+
+    #[test]
+    fn apply_template_leaves_unknown_variables() {
+        let template = "Hello {{name}}, your order {{order_id}} is ready.";
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("name", "Ada");
+        let result = apply_template(template, &vars);
+        assert_eq!(result, "Hello Ada, your order {{order_id}} is ready.");
+    }
+
+    #[test]
+    fn apply_template_handles_empty_vars() {
+        let template = "Hello {{name}}!";
+        let vars = std::collections::HashMap::new();
+        let result = apply_template(template, &vars);
+        assert_eq!(result, "Hello {{name}}!");
+    }
+
+    #[test]
+    fn template_draft_creates_outgoing_message() {
+        use crate::account::AccountId;
+        use crate::model::Template;
+        let template = Template {
+            id: 1,
+            account_id: AccountId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            name: "Test Template".into(),
+            subject: "Hello {{name}}".into(),
+            body: "Dear {{name}},\n\nBody text.".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("name", "World");
+        let draft = template_draft(&template, &vars);
+        assert_eq!(draft.subject, "Hello World");
+        assert_eq!(draft.body, "Dear World,\n\nBody text.");
+        assert!(draft.draft_key.is_some());
+    }
+
+    #[test]
+    fn mime_entity_contains_content_headers_and_body_only() {
+        let (raw, _) = draft().build().expect("build");
+        let entity = mime_entity(&raw).expect("entity");
+        assert!(!entity.contains("Subject:"));
+        assert!(entity.contains("Content-Type: text/plain; charset=utf-8"));
+        // The body is base64 encoded, so check for a decodable payload instead.
+        let (_, _, body) = split_mime_entity(&raw).expect("split");
+        assert!(entity.ends_with(&body));
+    }
+
+    #[test]
+    fn encrypted_wrapper_is_multipart_encrypted() {
+        let (raw, _) = draft().build().expect("build");
+        let wrapped = wrap_encrypted(&raw, "-----BEGIN PGP MESSAGE-----\r\nabc\r\n-----END PGP MESSAGE-----")
+            .expect("wrap");
+        let text = text(&wrapped);
+        assert!(text.contains("Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\""));
+        assert!(text.contains("Content-Type: application/pgp-encrypted"));
+        assert!(text.contains("Version: 1"));
+        assert!(text.contains("-----BEGIN PGP MESSAGE-----"));
+        // Top-level headers survive, the MIME entity moved inside the ciphertext.
+        assert!(text.contains("Subject: "));
+        assert!(!text.contains("Content-Type: text/plain"));
+    }
+
+    #[test]
+    fn signed_wrapper_is_multipart_signed() {
+        let (raw, _) = draft().build().expect("build");
+        let wrapped = wrap_signed(&raw, "-----BEGIN PGP SIGNATURE-----\r\nabc\r\n-----END PGP SIGNATURE-----")
+            .expect("wrap");
+        let text = text(&wrapped);
+        assert!(text.contains("Content-Type: multipart/signed; micalg=pgp-sha256"));
+        assert!(text.contains("Content-Type: application/pgp-signature"));
+        assert!(text.contains("-----BEGIN PGP SIGNATURE-----"));
+        assert!(text.contains("Subject: "));
     }
 }

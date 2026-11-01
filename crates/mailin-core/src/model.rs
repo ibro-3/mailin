@@ -4,6 +4,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::account::AccountId;
+use crate::compose::OutgoingMessage;
+use std::collections::HashMap;
 
 /// Local row identifier of a folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -38,6 +40,7 @@ pub enum FolderRole {
     Trash,
     Junk,
     Archive,
+    Snoozed,
     #[default]
     Other,
 }
@@ -51,6 +54,7 @@ impl FolderRole {
             Self::Trash => "trash",
             Self::Junk => "junk",
             Self::Archive => "archive",
+            Self::Snoozed => "snoozed",
             Self::Other => "other",
         }
     }
@@ -78,6 +82,10 @@ impl FolderRole {
         if has("\\Archive") || has("\\All") || has("\\AllMail") {
             return Self::Archive;
         }
+        // RFC 6154 doesn't define \Snoozed, but some servers use it or X-Snoozed
+        if has("\\Snoozed") || has("X-Snoozed") {
+            return Self::Snoozed;
+        }
 
         let leaf = name.rsplit(['/', '.']).next().unwrap_or(name);
         let leaf = leaf.to_ascii_lowercase();
@@ -87,6 +95,7 @@ impl FolderRole {
             "trash" | "deleted" | "deleted items" | "deleted messages" => Self::Trash,
             "junk" | "spam" | "junk e-mail" | "bulk mail" => Self::Junk,
             "archive" | "all mail" | "all" => Self::Archive,
+            "snoozed" => Self::Snoozed,
             _ => Self::Other,
         }
     }
@@ -100,7 +109,8 @@ impl FolderRole {
             Self::Archive => 3,
             Self::Junk => 4,
             Self::Trash => 5,
-            Self::Other => 6,
+            Self::Snoozed => 6,
+            Self::Other => 7,
         }
     }
 }
@@ -116,7 +126,57 @@ impl FromStr for FolderRole {
             "trash" => Self::Trash,
             "junk" => Self::Junk,
             "archive" => Self::Archive,
+            "snoozed" => Self::Snoozed,
             "other" => Self::Other,
+            _ => return Err(()),
+        })
+    }
+}
+
+/// Sync status for an account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyncStatus {
+    /// No sync operation in progress.
+    Idle,
+    /// Actively synchronizing folders/messages.
+    Syncing,
+    /// Last sync completed successfully.
+    Connected,
+    /// Network/connection failure (offline).
+    Offline,
+    /// Sync failed with an error message.
+    Error,
+}
+
+impl Default for SyncStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+impl SyncStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Syncing => "syncing",
+            Self::Connected => "connected",
+            Self::Offline => "offline",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl FromStr for SyncStatus {
+    type Err = ();
+
+    fn from_str(value: &str) -> std::result::Result<Self, ()> {
+        Ok(match value {
+            "idle" => Self::Idle,
+            "syncing" => Self::Syncing,
+            "connected" => Self::Connected,
+            "offline" => Self::Offline,
+            "error" => Self::Error,
             _ => return Err(()),
         })
     }
@@ -166,6 +226,12 @@ pub struct MessageHeader {
     pub message_id: Option<String>,
     /// Root of the `References` chain, used later for conversation grouping.
     pub thread_key: Option<String>,
+    /// Root of the thread (same as thread_key for root messages, or the topmost ancestor).
+    pub thread_root_key: Option<String>,
+    /// Number of replies in this thread (only valid for thread roots).
+    pub thread_reply_count: u32,
+    /// Thread depth (0 for root, 1 for direct reply, etc.). Computed at read time.
+    pub thread_depth: u32,
     pub subject: String,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -207,6 +273,18 @@ impl MessageHeader {
             (None, None) => "(unknown sender)".to_owned(),
         }
     }
+
+    /// Bare domain of the sender address, used for per-sender trust checks
+    /// such as the remote-content allowlist.
+    pub fn from_domain(&self) -> Option<&str> {
+        let addr = self.from_addr.as_deref()?;
+        // Tolerate `Name <user@host>` shapes by looking at the angle part.
+        let addr = addr.rsplit_once('<').map_or(addr, |(_, inner)| inner);
+        let addr = addr.trim().trim_end_matches('>');
+        addr.rsplit_once('@')
+            .map(|(_, domain)| domain)
+            .filter(|domain| !domain.is_empty() && !domain.contains(char::is_whitespace))
+    }
 }
 
 impl fmt::Display for MessageHeader {
@@ -223,6 +301,7 @@ pub struct NewMessage {
     pub uid: u32,
     pub message_id: Option<String>,
     pub thread_key: Option<String>,
+    pub thread_root_key: Option<String>,
     pub subject: String,
     pub from_name: Option<String>,
     pub from_addr: Option<String>,
@@ -243,6 +322,7 @@ impl NewMessage {
             uid,
             message_id: None,
             thread_key: None,
+            thread_root_key: None,
             subject: String::new(),
             from_name: None,
             from_addr: None,
@@ -402,6 +482,229 @@ impl OutgoingEnvelope {
         }
         Ok(())
     }
+}
+
+/// A contact for autocomplete, seeded from observed mail or added manually.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Contact {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub email: String,
+    pub display_name: String,
+    pub last_used_at: Option<i64>,
+    pub times_seen: i64,
+    pub manual: bool,
+}
+
+/// A message template with `{{variable}}` placeholders for compose prefill.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Template {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub name: String,
+    pub subject: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl Template {
+    /// Create an OutgoingMessage from this template with variable substitution.
+    pub fn to_draft(&self, from_name: String, from_addr: String) -> OutgoingMessage {
+        OutgoingMessage {
+            from_name,
+            from_addr,
+            subject: self.subject.clone(),
+            body: self.body.clone(),
+            ..OutgoingMessage::default()
+        }
+    }
+}
+
+/// Condition for a rule: field, operator, value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleCondition {
+    pub field: String,
+    pub op: String,
+    pub value: String,
+}
+
+/// Action for a rule: kind and value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleAction {
+    pub kind: String,
+    pub value: String,
+}
+
+/// A mail filtering rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rule {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub name: String,
+    pub enabled: bool,
+    pub priority: i64,
+    pub conditions_json: String,
+    pub actions_json: String,
+    pub stop: bool,
+    pub created_at: i64,
+}
+
+/// A scheduled action to be executed at a specific time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledAction {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub due_at: i64,
+    pub kind: String,
+    pub payload_json: String,
+    pub state: String,
+    pub created_at: i64,
+    pub last_error: Option<String>,
+}
+
+/// Payload for the 'snooze_message' scheduled action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnoozePayload {
+    pub message_id: i64,
+    pub return_to_folder_id: i64,
+}
+
+/// Virtual folder kinds for unified views across accounts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VirtualFolderKind {
+    UnifiedInbox = 0,
+    Starred = 1,
+    AllMail = 2,
+}
+
+impl From<VirtualFolderKind> for i64 {
+    fn from(kind: VirtualFolderKind) -> Self {
+        kind as i64
+    }
+}
+
+impl TryFrom<i64> for VirtualFolderKind {
+    type Error = ();
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(VirtualFolderKind::UnifiedInbox),
+            1 => Ok(VirtualFolderKind::Starred),
+            2 => Ok(VirtualFolderKind::AllMail),
+            _ => Err(()),
+        }
+    }
+}
+
+/// A virtual folder that aggregates messages across accounts/folders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VirtualFolder {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub name: String,
+    pub kind: VirtualFolderKind,
+    pub query_json: String,
+    pub created_at: i64,
+}
+
+/// A PGP public key cached for a recipient.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PgpKey {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub fingerprint: String,
+    pub user_ids: Vec<String>,
+    pub public_key: String,
+    pub created_at: i64,
+}
+
+/// Signature verification result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SignatureStatus {
+    Valid,
+    Invalid,
+    UnknownKey,
+    Error,
+}
+
+/// Kind of OpenPGP/MIME payload stored for a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PgpMimeKind {
+    /// `multipart/encrypted` with an armored ciphertext payload.
+    Encrypted,
+    /// `multipart/signed` with a signed MIME entity and detached signature.
+    Signed,
+}
+
+impl PgpMimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PgpMimeKind::Encrypted => "encrypted",
+            PgpMimeKind::Signed => "signed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "encrypted" => Some(PgpMimeKind::Encrypted),
+            "signed" => Some(PgpMimeKind::Signed),
+            _ => None,
+        }
+    }
+}
+
+/// An OpenPGP/MIME payload extracted from a message body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PgpMime {
+    pub message_id: i64,
+    pub kind: PgpMimeKind,
+    /// Encrypted: armored ciphertext. Signed: the exact bytes covered by the signature.
+    pub payload: String,
+    /// Armored detached signature, for signed payloads.
+    pub signature: Option<String>,
+}
+
+/// A CalDAV calendar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Calendar {
+    pub id: i64,
+    pub account_id: AccountId,
+    pub href: String,
+    pub display_name: String,
+    pub color: Option<String>,
+    pub ctag: Option<String>,
+    pub last_synced_at: Option<i64>,
+}
+
+/// An event in a calendar (VEVENT).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    pub id: i64,
+    pub calendar_id: i64,
+    pub uid: String,
+    pub summary: String,
+    pub start_at: i64,
+    pub end_at: i64,
+    pub all_day: bool,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    pub attendees_json: String,
+    pub ics_raw: String,
+    pub etag: Option<String>,
+}
+
+/// A plugin for extending Mailin functionality.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Plugin {
+    pub name: String,
+    pub version: String,
+    pub source_path: String,
+    pub enabled: bool,
+    pub manifest_json: String,
+    pub permissions_json: String,
+    pub created_at: i64,
 }
 
 #[cfg(test)]

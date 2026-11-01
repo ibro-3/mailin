@@ -5,7 +5,7 @@
 
 use mail_parser::{Address, HeaderValue, Message, MessageParser, MimeHeaders};
 
-use crate::model::{AttachmentData, AttachmentMeta};
+use crate::model::{AttachmentData, AttachmentMeta, PgpMimeKind};
 
 /// Fields extracted from a message (or a header block).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,6 +20,14 @@ pub(crate) struct ParsedHeader {
     pub thread_key: Option<String>,
 }
 
+/// An OpenPGP/MIME payload found while parsing a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedPgp {
+    pub kind: PgpMimeKind,
+    pub payload: String,
+    pub signature: Option<String>,
+}
+
 /// Body and attachment data of a complete message.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParsedBody {
@@ -27,6 +35,7 @@ pub(crate) struct ParsedBody {
     pub html: Option<String>,
     pub snippet: Option<String>,
     pub attachments: Vec<AttachmentData>,
+    pub pgp: Option<ParsedPgp>,
 }
 
 /// Parse a `BODY[HEADER]` block. Missing or malformed bytes degrade to an
@@ -44,15 +53,90 @@ pub(crate) fn parse_message(bytes: &[u8]) -> (ParsedHeader, ParsedBody) {
         return (ParsedHeader::default(), ParsedBody::default());
     };
     let header = header_from(&message);
-    let body = ParsedBody {
+    let mut body = body_from(&message);
+    body.pgp = pgp_from_raw(bytes);
+    (header, body)
+}
+
+/// Parse a standalone MIME entity (for example, decrypted OpenPGP content).
+pub(crate) fn parse_entity(bytes: &[u8]) -> ParsedBody {
+    match MessageParser::default().parse(bytes) {
+        Some(message) => body_from(&message),
+        None => ParsedBody::default(),
+    }
+}
+
+fn body_from(message: &Message<'_>) -> ParsedBody {
+    ParsedBody {
         text: message.body_text(0).map(|text| text.into_owned()),
         html: message.body_html(0).map(|html| html.into_owned()),
         snippet: message
             .body_preview(SNIPPET_LEN)
             .map(|snippet| snippet.into_owned()),
-        attachments: attachments_from(&message),
-    };
-    (header, body)
+        attachments: attachments_from(message),
+        pgp: None,
+    }
+}
+
+/// Detect an OpenPGP/MIME wrapper and pull out the part the reader needs.
+///
+/// Encrypted messages keep the armored ciphertext; signed messages keep the
+/// exact MIME entity plus the detached signature so it can be verified later.
+fn pgp_from_raw(raw: &[u8]) -> Option<ParsedPgp> {
+    let text = std::str::from_utf8(raw).ok()?;
+    let (headers, body) = text.split_once("\r\n\r\n")?;
+    let lower = headers.to_ascii_lowercase();
+
+    if lower.contains("multipart/encrypted") {
+        let payload = armored_block(body, "MESSAGE")?;
+        return Some(ParsedPgp {
+            kind: PgpMimeKind::Encrypted,
+            payload,
+            signature: None,
+        });
+    }
+
+    if lower.contains("multipart/signed") {
+        let boundary = header_parameter(headers, "boundary")?;
+        let marker = format!("--{boundary}");
+        let mut parts = body.split(&marker);
+        parts.next()?; // preamble
+        let entity = parts.next()?.strip_prefix("\r\n")?.to_owned();
+        let signature_part = parts.next()?;
+        let signature = armored_block(signature_part, "SIGNATURE")?;
+        return Some(ParsedPgp {
+            kind: PgpMimeKind::Signed,
+            payload: entity,
+            signature: Some(signature),
+        });
+    }
+
+    None
+}
+
+/// Value of a `; name="value"` (or `; name=value`) MIME parameter.
+fn header_parameter(headers: &str, name: &str) -> Option<String> {
+    let lower = headers.to_ascii_lowercase();
+    let start = lower.find(&format!("{name}="))? + name.len() + 1;
+    let rest = &headers[start..];
+    if let Some(stripped) = rest.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_owned())
+    } else {
+        let end = rest
+            .find(|c: char| c == ';' || c == '\r' || c == '\n')
+            .unwrap_or(rest.len());
+        Some(rest[..end].trim().to_owned())
+    }
+}
+
+/// The armored block with the given `BEGIN PGP <label>` marker.
+fn armored_block(text: &str, label: &str) -> Option<String> {
+    let begin = format!("-----BEGIN PGP {label}-----");
+    let end = format!("-----END PGP {label}-----");
+    let start = text.find(&begin)?;
+    let end_at = text[start..].find(&end)? + start + end.len();
+    Some(text[start..end_at].to_owned())
 }
 
 const SNIPPET_LEN: usize = 160;
@@ -210,6 +294,51 @@ mod tests {
         assert_eq!(header.message_id.as_deref(), Some("m1@example.com"));
         assert_eq!(header.thread_key.as_deref(), Some("root@example.com"));
         assert!(header.sent_at.is_some());
+    }
+
+    fn sample_message(body: &str) -> crate::compose::OutgoingMessage {
+        crate::compose::OutgoingMessage {
+            from_name: "Alice".into(),
+            from_addr: "alice@example.com".into(),
+            to: "Bob <bob@example.com>".into(),
+            subject: "PGP".into(),
+            body: body.into(),
+            ..crate::compose::OutgoingMessage::default()
+        }
+    }
+
+    #[test]
+    fn extracts_encrypted_payload() {
+        let (raw, _) = sample_message("secret").build().expect("build");
+        let wrapped = crate::compose::wrap_encrypted(
+            &raw,
+            "-----BEGIN PGP MESSAGE-----\r\nAAAA\r\n-----END PGP MESSAGE-----",
+        )
+        .expect("wrap");
+        let (_, body) = parse_message(&wrapped);
+        let pgp = body.pgp.expect("pgp payload");
+        assert_eq!(pgp.kind, PgpMimeKind::Encrypted);
+        assert!(pgp.payload.contains("BEGIN PGP MESSAGE"));
+        assert!(pgp.signature.is_none());
+    }
+
+    #[test]
+    fn extracts_signed_entity_and_signature() {
+        let (raw, _) = sample_message("signed body").build().expect("build");
+        let wrapped = crate::compose::wrap_signed(
+            &raw,
+            "-----BEGIN PGP SIGNATURE-----\r\nBBBB\r\n-----END PGP SIGNATURE-----",
+        )
+        .expect("wrap");
+        let (_, body) = parse_message(&wrapped);
+        let pgp = body.pgp.expect("pgp payload");
+        assert_eq!(pgp.kind, PgpMimeKind::Signed);
+        assert!(pgp.payload.contains("Content-Type: text/plain"));
+        assert!(!pgp.payload.contains("Subject:"));
+        assert!(pgp
+            .signature
+            .expect("signature")
+            .contains("BEGIN PGP SIGNATURE"));
     }
 
     #[test]
