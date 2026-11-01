@@ -540,6 +540,46 @@ impl ImapSession {
             .await
             .map_err(|e| Error::Imap(format!("APPEND to {mailbox} failed: {e}")))
     }
+
+    /// Create a new folder on the IMAP server.
+    pub async fn create_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .create(name)
+            .await
+            .map_err(|e| Error::Imap(format!("CREATE {name} failed: {e}")))
+    }
+
+    /// Rename a folder on the IMAP server.
+    pub async fn rename_folder(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        self.inner
+            .rename(old_name, new_name)
+            .await
+            .map_err(|e| Error::Imap(format!("RENAME {old_name} -> {new_name} failed: {e}")))
+    }
+
+    /// Delete a folder on the IMAP server.
+    pub async fn delete_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .delete(name)
+            .await
+            .map_err(|e| Error::Imap(format!("DELETE {name} failed: {e}")))
+    }
+
+    /// Subscribe to a folder on the IMAP server.
+    pub async fn subscribe_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .subscribe(name)
+            .await
+            .map_err(|e| Error::Imap(format!("SUBSCRIBE {name} failed: {e}")))
+    }
+
+    /// Unsubscribe from a folder on the IMAP server.
+    pub async fn unsubscribe_folder(&mut self, name: &str) -> Result<()> {
+        self.inner
+            .unsubscribe(name)
+            .await
+            .map_err(|e| Error::Imap(format!("UNSUBSCRIBE {name} failed: {e}")))
+    }
 }
 
 fn uid_set(uids: &[u32]) -> String {

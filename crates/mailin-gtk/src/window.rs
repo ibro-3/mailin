@@ -1167,6 +1167,67 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&add_action);
 
+        // Folder management actions
+        let new_folder_action = gio::SimpleAction::new("new-folder", Some(&glib::VariantTy::STRING));
+        new_folder_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, param| {
+                let Some(param) = param.and_then(|v| v.str()) else { return };
+                Self::create_folder(this.clone(), param.to_string())
+            }
+        });
+        this.widgets.window.add_action(&new_folder_action);
+
+        let rename_folder_action = gio::SimpleAction::new("rename-folder", Some(&glib::VariantTy::STRING));
+        rename_folder_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, param| {
+                let Some(param) = param.and_then(|v| v.str()) else { return };
+                Self::rename_folder(this.clone(), param.to_string())
+            }
+        });
+        this.widgets.window.add_action(&rename_folder_action);
+
+        let delete_folder_action = gio::SimpleAction::new("delete-folder", Some(&glib::VariantTy::STRING));
+        delete_folder_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, param| {
+                let Some(param) = param.and_then(|v| v.str()) else { return };
+                Self::delete_folder(this.clone(), param.to_string())
+            }
+        });
+        this.widgets.window.add_action(&delete_folder_action);
+
+        let subscribe_folder_action = gio::SimpleAction::new("subscribe-folder", Some(&glib::VariantTy::STRING));
+        subscribe_folder_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, param| {
+                let Some(param) = param.and_then(|v| v.str()) else { return };
+                Self::subscribe_folder(this.clone(), param.to_string(), true)
+            }
+        });
+        this.widgets.window.add_action(&subscribe_folder_action);
+
+        let unsubscribe_folder_action = gio::SimpleAction::new("unsubscribe-folder", Some(&glib::VariantTy::STRING));
+        unsubscribe_folder_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, param| {
+                let Some(param) = param.and_then(|v| v.str()) else { return };
+                Self::subscribe_folder(this.clone(), param.to_string(), false)
+            }
+        });
+        this.widgets.window.add_action(&unsubscribe_folder_action);
+
+        let folder_properties_action = gio::SimpleAction::new("folder-properties", Some(&glib::VariantTy::STRING));
+        folder_properties_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, param| {
+                let Some(param) = param.and_then(|v| v.str()) else { return };
+                Self::folder_properties(Rc::clone(&this), param.to_string())
+            }
+        });
+        this.widgets.window.add_action(&folder_properties_action);
+
         let move_action = gio::SimpleAction::new("move", None);
         move_action.connect_activate({
             let this = Rc::clone(this);
@@ -3118,9 +3179,80 @@ impl MainWindow {
             }
         });
     }
-}
 
-// -------------------------------------------------------------------- widgets
+    // Folder management actions
+    fn create_folder(this: Rc<Self>, folder_id: String) {
+        let account = this.selection.borrow().account;
+        let Some(account_id) = account else { return };
+        let folder_name = folder_id;
+        if folder_name.trim().is_empty() {
+            return;
+        }
+        let app = this.app.clone();
+        glib::spawn_future_local(async move {
+            app.engine.create_folder(account_id, folder_name, "/".to_string(), FolderRole::Other);
+            this.refresh_folders();
+        });
+    }
+
+    fn rename_folder(this: Rc<Self>, folder_id: String) {
+        let parts: Vec<&str> = folder_id.split(':').collect();
+        if parts.len() != 2 {
+            return;
+        }
+        let folder_id = parts[0].parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
+        let new_name = parts[1].to_string();
+        if new_name.trim().is_empty() {
+            return;
+        }
+        let app = this.app.clone();
+        glib::spawn_future_local(async move {
+            app.engine.rename_folder(folder_id, new_name);
+            this.refresh_folders();
+        });
+    }
+
+    fn delete_folder(this: Rc<Self>, folder_id: String) {
+        let folder_id = folder_id.parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
+        let app = this.app.clone();
+        let confirm = gtk::AlertDialog::builder()
+            .message("Delete folder?")
+            .detail("Are you sure you want to delete this folder? This will move all messages to Trash.")
+            .build();
+        confirm.set_buttons(&["Cancel", "Delete"]);
+        confirm.set_cancel_button(0);
+        confirm.set_default_button(0);
+
+        let app = this.app.clone();
+        let this = this.clone();
+        glib::spawn_future_local(async move {
+            let response = confirm.choose_future(None::<&gtk::Window>).await;
+            match response {
+                Ok(1) => {
+                    app.engine.delete_folder(folder_id);
+                    this.refresh_folders();
+                }
+                _ => {}
+            }
+        });
+    }
+
+    fn subscribe_folder(this: Rc<Self>, folder_id: String, subscribe: bool) {
+        let folder_id = folder_id.parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
+        let app = this.app.clone();
+        glib::spawn_future_local(async move {
+            app.engine.subscribe_folder(folder_id, subscribe);
+            this.refresh_folders();
+        });
+    }
+
+    fn folder_properties(this: Rc<Self>, folder_id: String) {
+        // TODO: Show folder properties dialog
+        let _folder_id = folder_id.parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
+        let toast = adw::Toast::new("Folder properties not yet implemented");
+        this.widgets.toast.add_toast(toast);
+    }
+}
 
 /// Start saving an attachment, downloading the body first when only metadata
 /// was cached by an older version.
@@ -3351,6 +3483,52 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
         );
         row.update_property(&[Property::Label(&name)]);
     }
+
+    // Add right-click context menu for folder operations
+    let popover = gtk::Popover::new();
+    popover.set_has_arrow(true);
+    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    menu_box.set_margin_top(6);
+    menu_box.set_margin_bottom(6);
+    menu_box.set_margin_start(8);
+    menu_box.set_margin_end(8);
+    
+    let actions = [
+        ("New Folder", "win.new-folder"),
+        ("Rename Folder", "win.rename-folder"),
+        ("Delete Folder", "win.delete-folder"),
+        ("Subscribe", "win.subscribe-folder"),
+        ("Unsubscribe", "win.unsubscribe-folder"),
+        ("Properties", "win.folder-properties"),
+    ];
+    
+    for (label, action) in actions {
+        let btn = gtk::Button::builder()
+            .label(label)
+            .action_name(action)
+            .build();
+        btn.add_css_class("flat");
+        btn.set_halign(gtk::Align::Start);
+        menu_box.append(&btn);
+    }
+    
+    popover.set_child(Some(&menu_box));
+    popover.set_parent(&row);
+    
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(0); // Handle all buttons
+    let row_for_gesture = row.clone();
+    let popover_for_gesture = popover.clone();
+    gesture.connect_pressed(move |gesture, n_press, _x, _y| {
+        if n_press == 1 && gesture.current_button() == gdk::BUTTON_SECONDARY {
+            let popover = popover_for_gesture.clone();
+            popover.set_has_arrow(true);
+            popover.set_parent(&row_for_gesture);
+            popover.present();
+        }
+    });
+    row.add_controller(gesture);
+
     row
 }
 

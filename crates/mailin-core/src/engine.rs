@@ -272,6 +272,45 @@ impl Engine {
         Ok(id)
     }
 
+    // Folder management
+
+    /// Create a new folder on the server and locally.
+    pub fn create_folder(
+        &self,
+        account_id: AccountId,
+        name: String,
+        delimiter: String,
+        role: FolderRole,
+    ) {
+        self.send(Command::CreateFolder {
+            account_id,
+            name,
+            delimiter,
+            role,
+        });
+    }
+
+    /// Rename a folder on the server and locally.
+    pub fn rename_folder(&self, folder_id: FolderId, new_name: String) {
+        self.send(Command::RenameFolder {
+            folder_id,
+            new_name,
+        });
+    }
+
+    /// Delete a folder on the server and locally.
+    pub fn delete_folder(&self, folder_id: FolderId) {
+        self.send(Command::DeleteFolder(folder_id));
+    }
+
+    /// Subscribe or unsubscribe from a folder.
+    pub fn subscribe_folder(&self, folder_id: FolderId, subscribe: bool) {
+        self.send(Command::SubscribeFolder {
+            folder_id,
+            subscribe,
+        });
+    }
+
     /// Stop the workers and wait briefly for them to finish.
     pub fn stop(mut self) {
         self.shutdown();
@@ -353,6 +392,21 @@ enum Command {
         folder_id: FolderId,
         message_ids: Vec<MessageId>,
     },
+    CreateFolder {
+        account_id: AccountId,
+        name: String,
+        delimiter: String,
+        role: FolderRole,
+    },
+    RenameFolder {
+        folder_id: FolderId,
+        new_name: String,
+    },
+    DeleteFolder(FolderId),
+    SubscribeFolder {
+        folder_id: FolderId,
+        subscribe: bool,
+    },
     Shutdown,
 }
 
@@ -415,6 +469,21 @@ enum WorkerCommand {
     ApplyRules {
         folder_id: FolderId,
         message_ids: Vec<MessageId>,
+    },
+    CreateFolder {
+        account_id: AccountId,
+        name: String,
+        delimiter: String,
+        role: FolderRole,
+    },
+    RenameFolder {
+        folder_id: FolderId,
+        new_name: String,
+    },
+    DeleteFolder(FolderId),
+    SubscribeFolder {
+        folder_id: FolderId,
+        subscribe: bool,
     },
     Stop,
 }
@@ -576,6 +645,44 @@ async fn supervise(state: Arc<EngineState>, mut commands: mpsc::UnboundedReceive
                 if let Some(account_id) = account_for_folder(&state, folder_id) {
                     let worker = ensure_worker(&mut workers, &state, account_id);
                     let _ = worker.send(WorkerCommand::ApplyRules { folder_id, message_ids });
+                }
+            }
+            Command::CreateFolder {
+                account_id,
+                name,
+                delimiter,
+                role,
+            } => {
+                let worker = ensure_worker(&mut workers, &state, account_id);
+                let _ = worker.send(WorkerCommand::CreateFolder {
+                    account_id,
+                    name,
+                    delimiter,
+                    role,
+                });
+            }
+            Command::RenameFolder {
+                folder_id,
+                new_name,
+            } => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::RenameFolder { folder_id, new_name });
+                }
+            }
+            Command::DeleteFolder(folder_id) => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::DeleteFolder(folder_id));
+                }
+            }
+            Command::SubscribeFolder {
+                folder_id,
+                subscribe,
+            } => {
+                if let Some(account_id) = account_for_folder(&state, folder_id) {
+                    let worker = ensure_worker(&mut workers, &state, account_id);
+                    let _ = worker.send(WorkerCommand::SubscribeFolder { folder_id, subscribe });
                 }
             }
         }
@@ -1021,6 +1128,29 @@ async fn handle_command(
         }
         WorkerCommand::ApplyRules { folder_id, message_ids } => {
             apply_rules(session, state, account, folder_id, &message_ids).await?;
+        }
+        WorkerCommand::CreateFolder {
+            account_id,
+            name,
+            delimiter,
+            role,
+        } => {
+            create_folder_imap(session, state, account_id, &name, &delimiter, role).await?;
+        }
+        WorkerCommand::RenameFolder {
+            folder_id,
+            new_name,
+        } => {
+            rename_folder_imap(session, state, folder_id, &new_name).await?;
+        }
+        WorkerCommand::DeleteFolder(folder_id) => {
+            delete_folder_imap(session, state, folder_id).await?;
+        }
+        WorkerCommand::SubscribeFolder {
+            folder_id,
+            subscribe,
+        } => {
+            subscribe_folder_imap(session, state, folder_id, subscribe).await?;
         }
     }
     Ok(false)
@@ -1701,6 +1831,71 @@ async fn discard_draft_key(
     state.mailbox.publish(Event::MessagesChanged {
         folder_id: drafts.id,
     });
+    Ok(())
+}
+
+/// Create a new folder via IMAP and locally.
+async fn create_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    account_id: AccountId,
+    name: &str,
+    delimiter: &str,
+    role: FolderRole,
+) -> Result<()> {
+    session.create_folder(name).await?;
+    let remote = session.list_folders().await?;
+    sync::refresh_folders(&state.mailbox, account_id, &remote)?;
+    Ok(())
+}
+
+/// Rename a folder via IMAP and locally.
+async fn rename_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder_id: FolderId,
+    new_name: &str,
+) -> Result<()> {
+    let Some(folder) = state.mailbox.folder(folder_id)? else {
+        return Ok(());
+    };
+    session.rename_folder(&folder.name, new_name).await?;
+    let remote = session.list_folders().await?;
+    sync::refresh_folders(&state.mailbox, folder.account_id, &remote)?;
+    Ok(())
+}
+
+/// Delete a folder via IMAP and locally.
+async fn delete_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder_id: FolderId,
+) -> Result<()> {
+    let Some(folder) = state.mailbox.folder(folder_id)? else {
+        return Ok(());
+    };
+    session.delete_folder(&folder.name).await?;
+    let _ = state.mailbox.store().delete_folder(folder_id)?;
+    Ok(())
+}
+
+/// Subscribe or unsubscribe from a folder via IMAP.
+async fn subscribe_folder_imap(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder_id: FolderId,
+    subscribe: bool,
+) -> Result<()> {
+    let Some(folder) = state.mailbox.folder(folder_id)? else {
+        return Ok(());
+    };
+    if subscribe {
+        session.subscribe_folder(&folder.name).await?;
+    } else {
+        session.unsubscribe_folder(&folder.name).await?;
+    }
+    let remote = session.list_folders().await?;
+    sync::refresh_folders(&state.mailbox, folder.account_id, &remote)?;
     Ok(())
 }
 
