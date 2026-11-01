@@ -453,6 +453,40 @@ impl Mailin {
         matches!(self.credentials.get_pgp_secret(account, fingerprint), Ok(Some(_)))
     }
 
+    /// Build an outgoing message, applying PGP options. Returns the wire bytes
+    /// and the SMTP envelope.
+    pub fn build_outgoing(
+        &self,
+        account: &AccountId,
+        message: &crate::compose::OutgoingMessage,
+        pgp: crate::compose::PgpOptions,
+    ) -> Result<(Vec<u8>, crate::model::OutgoingEnvelope)> {
+        let (raw, envelope) = message.build()?;
+        if !pgp.is_enabled() {
+            return Ok((raw, envelope));
+        }
+
+        let entity = crate::compose::mime_entity(&raw)?;
+        if pgp.encrypt {
+            let mut recipients = envelope.to.clone();
+            recipients.extend(envelope.cc.iter().cloned());
+            recipients.extend(envelope.bcc.iter().cloned());
+            let armored = self.pgp_encrypt(account, &entity, &recipients, pgp.sign)?;
+            return Ok((crate::compose::wrap_encrypted(&raw, &armored)?, envelope));
+        }
+
+        let signature = self.pgp_sign_detached(account, entity.as_bytes())?;
+        Ok((crate::compose::wrap_signed(&raw, &signature)?, envelope))
+    }
+
+    /// Detached signature over arbitrary bytes using the account's own key.
+    pub fn pgp_sign_detached(&self, account: &AccountId, data: &[u8]) -> Result<String> {
+        let (cert, secret) = self
+            .pgp_signer(account)?
+            .ok_or_else(|| Error::Protocol("No secret key available for signing".into()))?;
+        crate::pgp::sign_detached(data, &cert, &secret)
+    }
+
     /// Addresses (from `recipients`) that have no cached public key.
     pub fn missing_pgp_keys(&self, account: &AccountId, recipients: &[String]) -> Result<Vec<String>> {
         let mut missing = Vec::new();
@@ -809,5 +843,91 @@ mod tests {
             .pgp_encrypt(&acc.id, "x", &["bob@example.com".into()], false)
             .expect_err("must fail");
         assert!(error.to_string().contains("No public key for: bob@example.com"));
+    }
+
+    #[test]
+    fn build_outgoing_encrypts_and_signs_for_recipients() {
+        use crate::compose::PgpOptions;
+        let client = client();
+        let acc = account();
+        client.save_account(&acc, None).expect("save");
+        client
+            .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
+            .expect("generate");
+
+        let message = crate::compose::OutgoingMessage {
+            from_name: "Alice".into(),
+            from_addr: "alice@example.com".into(),
+            to: "Alice <alice@example.com>".into(),
+            subject: "Secret".into(),
+            body: "hello".into(),
+            ..crate::compose::OutgoingMessage::default()
+        };
+        let (raw, envelope) = client
+            .build_outgoing(&acc.id, &message, PgpOptions { encrypt: true, sign: true })
+            .expect("build");
+        let text = String::from_utf8(raw).expect("utf-8");
+        assert!(text.contains("multipart/encrypted"));
+        assert_eq!(envelope.to, vec!["alice@example.com".to_owned()]);
+
+        let start = text.find("-----BEGIN PGP MESSAGE-----").expect("begin");
+        let end = text.find("-----END PGP MESSAGE-----").expect("end")
+            + "-----END PGP MESSAGE-----".len();
+        let (entity, status) = client
+            .pgp_decrypt(&acc.id, &text[start..end])
+            .expect("decrypt");
+        assert_eq!(status, SignatureStatus::Valid);
+        assert!(entity.contains("Content-Type: text/plain"));
+        assert!(!entity.contains("Subject:"));
+    }
+
+    #[test]
+    fn build_outgoing_signs_without_encrypting() {
+        use crate::compose::PgpOptions;
+        let client = client();
+        let acc = account();
+        client.save_account(&acc, None).expect("save");
+        let key = client
+            .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
+            .expect("generate");
+
+        let message = crate::compose::OutgoingMessage {
+            from_name: "Alice".into(),
+            from_addr: "alice@example.com".into(),
+            to: "Bob <bob@example.com>".into(),
+            subject: "Signed".into(),
+            body: "hello".into(),
+            ..crate::compose::OutgoingMessage::default()
+        };
+        let (raw, _) = client
+            .build_outgoing(&acc.id, &message, PgpOptions { encrypt: false, sign: true })
+            .expect("build");
+        let text = String::from_utf8(raw).expect("utf-8");
+        assert!(text.contains("multipart/signed"));
+
+        let boundary = text
+            .split_once("boundary=\"")
+            .expect("boundary")
+            .1
+            .split('"')
+            .next()
+            .expect("boundary value");
+        let marker = format!("--{boundary}");
+        let body = text.split_once("\r\n\r\n").expect("body").1;
+        let parts: Vec<&str> = body.split(&marker).collect();
+        // parts[0] is the preamble; parts[1] is the signed entity.
+        let entity = parts[1].strip_prefix("\r\n").expect("entity start");
+        let signature = parts[2];
+        let sig_start = signature.find("-----BEGIN PGP SIGNATURE-----").expect("sig begin");
+        let sig_end = signature.find("-----END PGP SIGNATURE-----").expect("sig end")
+            + "-----END PGP SIGNATURE-----".len();
+        let cert = crate::pgp::import_public_key(&key.public_key).expect("cert");
+        let status = crate::pgp::verify_detached(
+            entity.as_bytes(),
+            &signature[sig_start..sig_end],
+            &cert,
+        )
+        .expect("verify");
+        assert_eq!(status, SignatureStatus::Valid);
     }
 }

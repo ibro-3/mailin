@@ -356,6 +356,67 @@ pub fn decrypt_message(
     Ok((plaintext, verdict(good, bad, unknown)))
 }
 
+/// Create a detached signature (armored) over `data` using `signer_cert`.
+pub fn sign_detached(data: &[u8], signer_cert: &Cert, signer_secret: &str) -> Result<String> {
+    let secret_cert = if signer_secret.trim().is_empty() {
+        signer_cert.clone()
+    } else {
+        import_secret_key(signer_secret)?
+    };
+    let keypair = signing_keypair(&secret_cert)?;
+
+    let mut sink = Vec::new();
+    let message = Message::new(&mut sink);
+    let mut signer = Signer::new(message, keypair)
+        .detached()
+        .hash_algo(openpgp::types::HashAlgorithm::SHA256)
+        .map_err(|e| Error::Protocol(e.to_string()))?
+        .creation_time(SystemTime::now())
+        .build()
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    signer
+        .write_all(data)
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    signer
+        .finalize()
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+
+    let mut armored = Vec::new();
+    let mut writer = openpgp::armor::Writer::new(&mut armored, openpgp::armor::Kind::Signature)
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    writer
+        .write_all(&sink)
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    writer
+        .finalize()
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    String::from_utf8(armored).map_err(|e| Error::Protocol(e.to_string()))
+}
+
+/// Verify a detached signature over `data` against `signer_cert`.
+pub fn verify_detached(
+    data: &[u8],
+    armored_signature: &str,
+    signer_cert: &Cert,
+) -> Result<SignatureStatus> {
+    let counts = Arc::new(Mutex::new((0usize, 0usize, 0usize)));
+    let helper = VerifyHelper {
+        cert: signer_cert.clone(),
+        verdict: Arc::clone(&counts),
+    };
+
+    let mut verifier = DetachedVerifierBuilder::from_bytes(armored_signature.as_bytes())
+        .map_err(|e| Error::Protocol(e.to_string()))?
+        .with_policy(&POLICY, None, helper)
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    verifier
+        .verify_bytes(data)
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+
+    let (good, bad, unknown) = *counts.lock().unwrap();
+    Ok(verdict(good, bad, unknown))
+}
+
 /// Sign a message as a cleartext signature (RFC 4880 §7).
 ///
 /// `signer_secret`, when non-empty, is an armored secret key; otherwise the
@@ -578,6 +639,25 @@ mod tests {
         let tampered = signed.replace("Hello, World!", "Hello, Wrold!");
         assert_eq!(
             verify_signature(&tampered, &cert).unwrap(),
+            SignatureStatus::Invalid
+        );
+    }
+
+    #[test]
+    fn test_detached_sign_and_verify() {
+        let (public, secret) = generate_keypair("Test <test@example.com>").unwrap();
+        let cert = import_public_key(&public).unwrap();
+        let secret_cert = import_secret_key(&secret).unwrap();
+
+        let payload = b"the quick brown fox";
+        let signature = sign_detached(payload, &secret_cert, &secret).unwrap();
+        assert!(signature.contains("-----BEGIN PGP SIGNATURE-----"));
+        assert_eq!(
+            verify_detached(payload, &signature, &cert).unwrap(),
+            SignatureStatus::Valid
+        );
+        assert_eq!(
+            verify_detached(b"the quick brown fix", &signature, &cert).unwrap(),
             SignatureStatus::Invalid
         );
     }

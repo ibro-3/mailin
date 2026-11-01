@@ -660,10 +660,151 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, month as u32, day as u32)
 }
 
+/// PGP options for an outgoing message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PgpOptions {
+    /// Encrypt the MIME entity for every recipient (sign-then-encrypt when `sign` is set).
+    pub encrypt: bool,
+    /// Sign the MIME entity (detached PGP/MIME signature; inside the
+    /// encryption when both options are set).
+    pub sign: bool,
+}
+
+impl PgpOptions {
+    pub fn is_enabled(&self) -> bool {
+        self.encrypt || self.sign
+    }
+}
+
+/// Split a built message into its visible headers, its MIME content headers and
+/// its body. The MIME entity that PGP/MIME encrypts or signs is
+/// `content_headers + "\r\n" + body`.
+fn split_mime_entity(raw: &[u8]) -> Result<(String, String, String)> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| Error::Protocol("outgoing message is not valid UTF-8".into()))?;
+    let (headers, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| Error::Protocol("outgoing message has no header/body separator".into()))?;
+
+    let mut visible = String::new();
+    let mut content = String::new();
+    for block in header_blocks(headers) {
+        let name = block
+            .split_once(':')
+            .map(|(name, _)| name.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if matches!(
+            name.as_str(),
+            "content-type" | "content-transfer-encoding" | "mime-version"
+        ) {
+            content.push_str(&block);
+            content.push_str("\r\n");
+        } else {
+            visible.push_str(&block);
+            visible.push_str("\r\n");
+        }
+    }
+    Ok((visible, content, body.to_owned()))
+}
+
+/// Header blocks including continuation lines.
+fn header_blocks(headers: &str) -> Vec<String> {
+    let mut blocks: Vec<String> = Vec::new();
+    for line in headers.split("\r\n") {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some(last) = blocks.last_mut() {
+                last.push_str("\r\n");
+                last.push_str(line);
+                continue;
+            }
+        }
+        if !line.is_empty() {
+            blocks.push(line.to_owned());
+        }
+    }
+    blocks
+}
+
+/// The MIME entity (content headers + body) that PGP/MIME protects.
+pub fn mime_entity(raw: &[u8]) -> Result<String> {
+    let (_, content, body) = split_mime_entity(raw)?;
+    if content.is_empty() {
+        Ok(body)
+    } else {
+        Ok(format!("{content}\r\n{body}"))
+    }
+}
+
+fn normalize_armored(armored: &str) -> String {
+    normalize_crlf(armored.trim())
+}
+
+/// Wrap an already-built message as `multipart/encrypted` (RFC 3156).
+pub fn wrap_encrypted(raw: &[u8], armored_ciphertext: &str) -> Result<Vec<u8>> {
+    let (visible, _, _) = split_mime_entity(raw)?;
+    let boundary = format!("mailin-pgp-{}", uuid::Uuid::new_v4().simple());
+    let ciphertext = normalize_armored(armored_ciphertext);
+
+    let mut out = String::with_capacity(raw.len() + ciphertext.len() + 512);
+    out.push_str(&visible);
+    write_header(&mut out, "MIME-Version", "1.0");
+    write_header(
+        &mut out,
+        "Content-Type",
+        &format!("multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"{boundary}\""),
+    );
+    out.push_str("\r\n");
+    out.push_str("This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156).\r\n");
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str("Content-Type: application/pgp-encrypted\r\n\r\n");
+    out.push_str("Version: 1\r\n");
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str("Content-Type: application/octet-stream; name=\"encrypted.asc\"\r\n");
+    out.push_str("Content-Description: OpenPGP encrypted message\r\n");
+    out.push_str("Content-Disposition: inline; filename=\"encrypted.asc\"\r\n\r\n");
+    out.push_str(&ciphertext);
+    out.push_str("\r\n");
+    out.push_str(&format!("--{boundary}--\r\n"));
+    Ok(out.into_bytes())
+}
+
+/// Wrap an already-built message as `multipart/signed` (RFC 3156).
+pub fn wrap_signed(raw: &[u8], armored_signature: &str) -> Result<Vec<u8>> {
+    let (visible, _, _) = split_mime_entity(raw)?;
+    let entity = mime_entity(raw)?;
+    let boundary = format!("mailin-pgp-{}", uuid::Uuid::new_v4().simple());
+    let signature = normalize_armored(armored_signature);
+
+    let mut out = String::with_capacity(raw.len() + signature.len() + 512);
+    out.push_str(&visible);
+    write_header(&mut out, "MIME-Version", "1.0");
+    write_header(
+        &mut out,
+        "Content-Type",
+        &format!(
+            "multipart/signed; micalg=pgp-sha256; protocol=\"application/pgp-signature\"; boundary=\"{boundary}\""
+        ),
+    );
+    out.push_str("\r\n");
+    out.push_str("This is an OpenPGP/MIME signed message (RFC 4880 and 3156).\r\n");
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str(&entity);
+    if !entity.ends_with("\r\n") {
+        out.push_str("\r\n");
+    }
+    out.push_str(&format!("--{boundary}\r\n"));
+    out.push_str("Content-Type: application/pgp-signature; name=\"signature.asc\"\r\n");
+    out.push_str("Content-Description: OpenPGP digital signature\r\n");
+    out.push_str("Content-Disposition: attachment; filename=\"signature.asc\"\r\n\r\n");
+    out.push_str(&signature);
+    out.push_str("\r\n");
+    out.push_str(&format!("--{boundary}--\r\n"));
+    Ok(out.into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn draft() -> OutgoingMessage {
         OutgoingMessage {
             from_name: "Ada Lovelace".into(),
@@ -921,5 +1062,43 @@ mod tests {
         assert_eq!(draft.subject, "Hello World");
         assert_eq!(draft.body, "Dear World,\n\nBody text.");
         assert!(draft.draft_key.is_some());
+    }
+
+    #[test]
+    fn mime_entity_contains_content_headers_and_body_only() {
+        let (raw, _) = draft().build().expect("build");
+        let entity = mime_entity(&raw).expect("entity");
+        assert!(!entity.contains("Subject:"));
+        assert!(entity.contains("Content-Type: text/plain; charset=utf-8"));
+        // The body is base64 encoded, so check for a decodable payload instead.
+        let (_, _, body) = split_mime_entity(&raw).expect("split");
+        assert!(entity.ends_with(&body));
+    }
+
+    #[test]
+    fn encrypted_wrapper_is_multipart_encrypted() {
+        let (raw, _) = draft().build().expect("build");
+        let wrapped = wrap_encrypted(&raw, "-----BEGIN PGP MESSAGE-----\r\nabc\r\n-----END PGP MESSAGE-----")
+            .expect("wrap");
+        let text = text(&wrapped);
+        assert!(text.contains("Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\""));
+        assert!(text.contains("Content-Type: application/pgp-encrypted"));
+        assert!(text.contains("Version: 1"));
+        assert!(text.contains("-----BEGIN PGP MESSAGE-----"));
+        // Top-level headers survive, the MIME entity moved inside the ciphertext.
+        assert!(text.contains("Subject: "));
+        assert!(!text.contains("Content-Type: text/plain"));
+    }
+
+    #[test]
+    fn signed_wrapper_is_multipart_signed() {
+        let (raw, _) = draft().build().expect("build");
+        let wrapped = wrap_signed(&raw, "-----BEGIN PGP SIGNATURE-----\r\nabc\r\n-----END PGP SIGNATURE-----")
+            .expect("wrap");
+        let text = text(&wrapped);
+        assert!(text.contains("Content-Type: multipart/signed; micalg=pgp-sha256"));
+        assert!(text.contains("Content-Type: application/pgp-signature"));
+        assert!(text.contains("-----BEGIN PGP SIGNATURE-----"));
+        assert!(text.contains("Subject: "));
     }
 }
