@@ -7,8 +7,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
 
 use crate::account::{Account, AccountId};
 use crate::config::Paths;
@@ -16,7 +15,7 @@ use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
 use crate::model::{
     Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, PgpKey, PgpMime,
-    SignatureStatus, VirtualFolderKind,
+    Plugin, SignatureStatus, VirtualFolderKind,
 };
 use crate::store::Store;
 use secrecy::{ExposeSecret, SecretString};
@@ -81,6 +80,7 @@ pub struct Mailin {
     store: Arc<Store>,
     credentials: Arc<dyn CredentialsStore>,
     events: broadcast::Sender<Event>,
+    plugin_system: Arc<RwLock<Option<Arc<crate::plugins::PluginSystem>>>>,
 }
 
 impl fmt::Debug for Mailin {
@@ -112,6 +112,7 @@ impl Mailin {
             store,
             credentials,
             events,
+            plugin_system: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -327,7 +328,7 @@ impl Mailin {
     ) -> Result<()> {
         let mut config = self.app_config().ok_or(Error::Config("config not loaded".into()))?;
         config.search.add(*account, query, folder_id);
-        let paths = crate::config::Paths::from_database_file(self.store.paths())?;
+        let paths = crate::config::Paths::from_database_file(self.store.path())?;
         config.save(&paths)?;
         Ok(())
     }
@@ -335,7 +336,7 @@ impl Mailin {
     fn app_config(&self) -> Option<crate::Config> {
         // This is a bit of a hack - in practice the config is managed by AppState
         // For now, we'll load it from disk each time
-        let paths = crate::config::Paths::from_database_file(self.store.paths()).ok()?;
+        let paths = crate::config::Paths::from_database_file(self.store.path()).ok()?;
         crate::Config::load(&paths).ok()
     }
 
@@ -476,6 +477,43 @@ impl Mailin {
     /// Remove the CalDAV password for an account from the keyring.
     pub fn delete_caldav_password(&self, account: &AccountId) -> Result<()> {
         self.credentials.delete_caldav_password(account)
+    }
+
+    /// Get the plugin system for managing Lua plugins.
+    pub fn plugin_system(&self) -> Option<Arc<crate::plugins::PluginSystem>> {
+        self.plugin_system.read().unwrap().clone()
+    }
+
+    /// Set the plugin system (called by Engine after initialization).
+    pub(crate) fn set_plugin_system(&self, system: Arc<crate::plugins::PluginSystem>) {
+        *self.plugin_system.write().unwrap() = Some(system);
+    }
+
+    /// List all loaded plugins.
+    pub async fn list_plugins(&self) -> Vec<Plugin> {
+        if let Some(sys) = self.plugin_system() {
+            sys.list_plugins().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Enable/disable a plugin.
+    pub async fn set_plugin_enabled(&self, name: &str, enabled: bool) -> Result<()> {
+        if let Some(sys) = self.plugin_system() {
+            sys.set_enabled(name, enabled).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Unload a plugin.
+    pub async fn unload_plugin(&self, name: &str) -> Result<()> {
+        if let Some(sys) = self.plugin_system() {
+            sys.unload(name).await
+        } else {
+            Ok(())
+        }
     }
 
     /// Build an outgoing message, applying PGP options. Returns the wire bytes

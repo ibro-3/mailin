@@ -44,8 +44,17 @@ pub enum Error {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    #[error("plugin error: {0}")]
+    Plugin(String),
+
     #[error("internal store lock is poisoned")]
     LockPoisoned,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<mlua::Error> for Error {
+    fn from(e: mlua::Error) -> Self {
+        Error::Plugin(e.to_string())
+    }
+}

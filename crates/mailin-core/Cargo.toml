@@ -52,7 +52,8 @@ sequoia-openpgp = { version = "1", default-features = false, features = ["crypto
 base32 = "0.5"
 chrono = { version = "0.4", features = ["serde"] }
 ical = "0.10"
-mlua = { version = "0.10", features = ["luau", "serialize", "async"] }
+mlua = { version = "0.10", features = ["luau", "serialize", "async", "send"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 
 [dev-dependencies]
 tempfile.workspace = true

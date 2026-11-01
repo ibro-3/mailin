@@ -55,9 +55,9 @@ impl FolderUpsert {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
     db_path: PathBuf,
 }
 
@@ -76,7 +76,7 @@ impl Store {
         }
         let db_path = path.to_path_buf();
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             db_path,
         })
     }
@@ -85,14 +85,19 @@ impl Store {
         let mut conn = Connection::open_in_memory()?;
         Self::configure(&mut conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             db_path: PathBuf::from(":memory:"),
         })
     }
 
     /// Get the database file path.
-    pub fn paths(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.db_path
+    }
+
+    /// Get the data directory (parent of the database file).
+    pub fn data_dir(&self) -> PathBuf {
+        self.db_path.parent().unwrap_or(&self.db_path).to_path_buf()
     }
 
     fn configure(conn: &mut Connection) -> Result<()> {

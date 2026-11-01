@@ -64,10 +64,11 @@ impl Engine {
         crate::tls::install_crypto_provider();
 
         let state = Arc::new(EngineState {
-            mailbox,
+            mailbox: Arc::clone(&mailbox),
             outbox: Arc::new(Notify::new()),
             sync_status: Arc::new(RwLock::new(HashMap::new())),
             last_sync_at: Arc::new(RwLock::new(HashMap::new())),
+            plugin_system: None,
         });
         let (commands, receiver) = mpsc::unbounded_channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -76,6 +77,28 @@ impl Engine {
             .thread_name("mailin-net")
             .build()
             .map_err(|e| Error::Config(format!("could not start the network runtime: {e}")))?;
+
+        // Initialize plugin system
+        let data_dir = mailbox.store().data_dir();
+        let plugin_system = runtime.block_on(async {
+            match crate::plugins::init_plugin_system(Arc::clone(&mailbox.store()), &data_dir).await {
+                Ok(sys) => Some(sys),
+                Err(e) => {
+                    tracing::warn!(%e, "Failed to initialize plugin system");
+                    None
+                }
+            }
+        });
+
+        // Set plugin system on Mailin
+        if let Some(ref sys) = plugin_system {
+            mailbox.set_plugin_system(Arc::clone(sys));
+        }
+
+        // Store plugin system in state
+        let mut state_mut = Arc::get_mut(&mut state).unwrap();
+        state_mut.plugin_system = plugin_system;
+
         runtime.spawn(supervise(state.clone(), receiver));
 
         Ok(Self {
@@ -348,6 +371,8 @@ struct EngineState {
     sync_status: Arc<RwLock<HashMap<AccountId, SyncStatus>>>,
     /// Timestamp of the last successful sync per account.
     last_sync_at: Arc<RwLock<HashMap<AccountId, i64>>>,
+    /// Plugin system for Lua-based extensions.
+    plugin_system: Option<Arc<crate::plugins::PluginSystem>>,
 }
 
 enum Command {
