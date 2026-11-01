@@ -16,12 +16,31 @@ pub trait CredentialsStore: Send + Sync {
     fn set(&self, account: &AccountId, secret: &SecretString) -> Result<()>;
     fn get(&self, account: &AccountId) -> Result<Option<SecretString>>;
     fn delete(&self, account: &AccountId) -> Result<()>;
+
+    /// Store the armored secret key identified by `fingerprint`.
+    fn set_pgp_secret(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+        secret: &SecretString,
+    ) -> Result<()>;
+
+    /// Load the armored secret key identified by `fingerprint`.
+    fn get_pgp_secret(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+    ) -> Result<Option<SecretString>>;
+
+    /// Remove the armored secret key identified by `fingerprint`.
+    fn delete_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<()>;
 }
 
 /// In-memory store for tests and for `--self-test` runs.
 #[derive(Debug, Default)]
 pub struct MemoryCredentials {
     secrets: Mutex<HashMap<AccountId, SecretString>>,
+    pgp_secrets: Mutex<HashMap<(AccountId, String), SecretString>>,
 }
 
 impl MemoryCredentials {
@@ -31,6 +50,12 @@ impl MemoryCredentials {
 
     fn guard(&self) -> Result<std::sync::MutexGuard<'_, HashMap<AccountId, SecretString>>> {
         self.secrets.lock().map_err(|_| Error::LockPoisoned)
+    }
+
+    fn pgp_guard(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<(AccountId, String), SecretString>>> {
+        self.pgp_secrets.lock().map_err(|_| Error::LockPoisoned)
     }
 }
 
@@ -46,6 +71,30 @@ impl CredentialsStore for MemoryCredentials {
 
     fn delete(&self, account: &AccountId) -> Result<()> {
         self.guard()?.remove(account);
+        Ok(())
+    }
+
+    fn set_pgp_secret(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+        secret: &SecretString,
+    ) -> Result<()> {
+        self.pgp_guard()?
+            .insert((*account, fingerprint.to_owned()), secret.clone());
+        Ok(())
+    }
+
+    fn get_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<Option<SecretString>> {
+        Ok(self
+            .pgp_guard()?
+            .get(&(*account, fingerprint.to_owned()))
+            .cloned())
+    }
+
+    fn delete_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<()> {
+        self.pgp_guard()?
+            .remove(&(*account, fingerprint.to_owned()));
         Ok(())
     }
 }
@@ -72,8 +121,15 @@ impl KeyringCredentials {
     }
 
     fn entry(&self, account: &AccountId) -> Result<keyring::Entry> {
-        keyring::Entry::new(&self.service, &account.to_string())
-            .map_err(|e| Error::Credentials(e.to_string()))
+        self.entry_named(&account.to_string())
+    }
+
+    fn entry_pgp(&self, account: &AccountId, fingerprint: &str) -> Result<keyring::Entry> {
+        self.entry_named(&format!("{account}:pgp:{fingerprint}"))
+    }
+
+    fn entry_named(&self, user: &str) -> Result<keyring::Entry> {
+        keyring::Entry::new(&self.service, user).map_err(|e| Error::Credentials(e.to_string()))
     }
 }
 
@@ -115,6 +171,32 @@ impl CredentialsStore for KeyringCredentials {
             Err(e) => Err(Error::Credentials(e.to_string())),
         }
     }
+
+    fn set_pgp_secret(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+        secret: &SecretString,
+    ) -> Result<()> {
+        self.entry_pgp(account, fingerprint)?
+            .set_password(secret.expose_secret())
+            .map_err(|e| Error::Credentials(e.to_string()))
+    }
+
+    fn get_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<Option<SecretString>> {
+        match self.entry_pgp(account, fingerprint)?.get_password() {
+            Ok(secret) => Ok(Some(SecretString::new(secret.into()))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(Error::Credentials(e.to_string())),
+        }
+    }
+
+    fn delete_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<()> {
+        match self.entry_pgp(account, fingerprint)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(Error::Credentials(e.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +233,30 @@ mod tests {
             .set(&a, &SecretString::new("a-secret".into()))
             .expect("set");
         assert!(store.get(&b).expect("get").is_none());
+    }
+
+    #[test]
+    fn pgp_secrets_round_trip_per_account_and_fingerprint() {
+        let store = MemoryCredentials::new();
+        let a = AccountId::new();
+        let b = AccountId::new();
+        let fp = "AAAA1111BBBB2222CCCC3333DDDD4444EEEE5555";
+        assert!(store.get_pgp_secret(&a, fp).expect("get").is_none());
+        store
+            .set_pgp_secret(&a, fp, &SecretString::new("secret-key".into()))
+            .expect("set");
+        assert_eq!(
+            store
+                .get_pgp_secret(&a, fp)
+                .expect("get")
+                .expect("secret")
+                .expose_secret(),
+            "secret-key"
+        );
+        // Another account cannot see the key.
+        assert!(store.get_pgp_secret(&b, fp).expect("get").is_none());
+        store.delete_pgp_secret(&a, fp).expect("delete");
+        assert!(store.get_pgp_secret(&a, fp).expect("get").is_none());
+        store.delete_pgp_secret(&a, fp).expect("delete idempotent");
     }
 }

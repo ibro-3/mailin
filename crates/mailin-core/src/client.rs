@@ -14,7 +14,10 @@ use crate::account::{Account, AccountId};
 use crate::config::Paths;
 use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
-use crate::model::{Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, VirtualFolderKind};
+use crate::model::{
+    Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, PgpKey, SignatureStatus,
+    VirtualFolderKind,
+};
 use crate::store::Store;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -363,6 +366,208 @@ impl Mailin {
         None
     }
 
+    // ---------------------------------------------------------------------- pgp
+
+    /// All public keys cached for an account.
+    pub fn list_pgp_keys(&self, account: &AccountId) -> Result<Vec<PgpKey>> {
+        self.store.pgp_keys_for_account(account)
+    }
+
+    /// Import an armored public key and cache it for `account`.
+    pub fn import_pgp_public_key(&self, account: &AccountId, armored: &str) -> Result<PgpKey> {
+        let cert = crate::pgp::import_public_key(armored)?;
+        let public_key = crate::pgp::export_public_key(&cert)?;
+        self.cache_pgp_key(account, &cert, &public_key)
+    }
+
+    /// Import an armored secret key: the public part goes to the database, the
+    /// secret part to the OS keyring.
+    pub fn import_pgp_secret_key(&self, account: &AccountId, armored: &str) -> Result<PgpKey> {
+        let cert = crate::pgp::import_secret_key(armored)?;
+        if !cert.is_tsk() {
+            return Err(Error::Protocol(
+                "No secret key material found in the imported key".into(),
+            ));
+        }
+        let fingerprint = crate::pgp::key_fingerprint(&cert);
+        let public_key = crate::pgp::export_public_key(&cert)?;
+        let secret = crate::pgp::export_secret_key(&cert)?;
+        self.credentials.set_pgp_secret(
+            account,
+            &fingerprint,
+            &SecretString::new(secret.into()),
+        )?;
+        self.cache_pgp_key(account, &cert, &public_key)
+    }
+
+    /// Generate a fresh key pair for `user_id`, cache the public key and store
+    /// the secret key in the keyring.
+    pub fn generate_pgp_key(&self, account: &AccountId, user_id: &str) -> Result<PgpKey> {
+        let (public_key, secret_key) = crate::pgp::generate_keypair(user_id)?;
+        let cert = crate::pgp::import_secret_key(&secret_key)?;
+        let fingerprint = crate::pgp::key_fingerprint(&cert);
+        self.credentials.set_pgp_secret(
+            account,
+            &fingerprint,
+            &SecretString::new(secret_key.into()),
+        )?;
+        let stored = self
+            .store
+            .upsert_pgp_key(account, &fingerprint, &crate::pgp::key_user_ids(&cert), &public_key)?;
+        self.publish(Event::AccountsChanged);
+        Ok(PgpKey {
+            id: stored,
+            account_id: *account,
+            fingerprint,
+            user_ids: crate::pgp::key_user_ids(&cert),
+            public_key,
+            created_at: crate::now_unix(),
+        })
+    }
+
+    /// Remove a key from the database and the keyring.
+    pub fn delete_pgp_key(&self, account: &AccountId, fingerprint: &str) -> Result<bool> {
+        self.credentials.delete_pgp_secret(account, fingerprint)?;
+        let deleted = self.store.delete_pgp_key(account, fingerprint)?;
+        if deleted {
+            self.publish(Event::AccountsChanged);
+        }
+        Ok(deleted)
+    }
+
+    /// The stored key whose user IDs mention `address`, if any.
+    pub fn pgp_key_for_address(&self, account: &AccountId, address: &str) -> Result<Option<PgpKey>> {
+        let address = address.trim().to_lowercase();
+        if address.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .pgp_keys_for_account(account)?
+            .into_iter()
+            .find(|key| key.user_ids.iter().any(|uid| uid.to_lowercase().contains(&address))))
+    }
+
+    /// `true` when a secret key for `fingerprint` is available to this account.
+    pub fn has_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> bool {
+        matches!(self.credentials.get_pgp_secret(account, fingerprint), Ok(Some(_)))
+    }
+
+    /// Addresses (from `recipients`) that have no cached public key.
+    pub fn missing_pgp_keys(&self, account: &AccountId, recipients: &[String]) -> Result<Vec<String>> {
+        let mut missing = Vec::new();
+        for address in recipients {
+            if self.pgp_key_for_address(account, address)?.is_none() {
+                missing.push(address.clone());
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Encrypt `plaintext` for `recipients`; signs with the account's own key
+    /// when `sign` is set. Returns armored ciphertext.
+    pub fn pgp_encrypt(
+        &self,
+        account: &AccountId,
+        plaintext: &str,
+        recipients: &[String],
+        sign: bool,
+    ) -> Result<String> {
+        let mut certs = Vec::new();
+        let mut missing = Vec::new();
+        for address in recipients {
+            match self.pgp_key_for_address(account, address)? {
+                Some(key) => match crate::pgp::import_public_key(&key.public_key) {
+                    Ok(cert) => certs.push(cert),
+                    Err(_) => missing.push(address.clone()),
+                },
+                None => missing.push(address.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(Error::Protocol(format!(
+                "No public key for: {}",
+                missing.join(", ")
+            )));
+        }
+        let signer = if sign { self.pgp_signer(account)? } else { None };
+        let (signer_cert, signer_secret) = match signer {
+            Some((cert, secret)) => (Some(cert), Some(secret)),
+            None => (None, None),
+        };
+        crate::pgp::encrypt_message(plaintext, &certs, signer_cert.as_ref(), signer_secret.as_deref())
+    }
+
+    /// Sign `plaintext` as a cleartext signature using the account's own key.
+    pub fn pgp_sign(&self, account: &AccountId, plaintext: &str) -> Result<String> {
+        let (cert, secret) = self
+            .pgp_signer(account)?
+            .ok_or_else(|| Error::Protocol("No secret key available for signing".into()))?;
+        crate::pgp::sign_message(plaintext, &cert, &secret)
+    }
+
+    /// Decrypt armored ciphertext with any secret key of the account and report
+    /// the signature status.
+    pub fn pgp_decrypt(
+        &self,
+        account: &AccountId,
+        ciphertext: &str,
+    ) -> Result<(String, SignatureStatus)> {
+        let mut secret_certs = Vec::new();
+        for key in self.store.pgp_keys_for_account(account)? {
+            if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)? {
+                if let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret()) {
+                    secret_certs.push(cert);
+                }
+            }
+        }
+        if secret_certs.is_empty() {
+            return Err(Error::Protocol(
+                "No secret key available to decrypt this message".into(),
+            ));
+        }
+        crate::pgp::decrypt_message(ciphertext, &secret_certs)
+    }
+
+    fn cache_pgp_key(
+        &self,
+        account: &AccountId,
+        cert: &sequoia_openpgp::Cert,
+        public_key: &str,
+    ) -> Result<PgpKey> {
+        let fingerprint = crate::pgp::key_fingerprint(cert);
+        let user_ids = crate::pgp::key_user_ids(cert);
+        let id = self
+            .store
+            .upsert_pgp_key(account, &fingerprint, &user_ids, public_key)?;
+        self.publish(Event::AccountsChanged);
+        Ok(PgpKey {
+            id,
+            account_id: *account,
+            fingerprint,
+            user_ids,
+            public_key: public_key.to_owned(),
+            created_at: crate::now_unix(),
+        })
+    }
+
+    /// The first key of `account` that has secret key material in the keyring.
+    fn pgp_signer(
+        &self,
+        account: &AccountId,
+    ) -> Result<Option<(sequoia_openpgp::Cert, String)>> {
+        for key in self.store.pgp_keys_for_account(account)? {
+            if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)? {
+                if let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret()) {
+                    if cert.is_tsk() {
+                        return Ok(Some((cert, secret.expose_secret().to_owned())));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
     // ------------------------------------------------------------------ outbox
 
     pub fn queue_outgoing(
@@ -526,5 +731,83 @@ mod tests {
         acc.email = "broken".into();
         assert!(client.save_account(&acc, None).is_err());
         assert!(client.list_accounts().expect("list").is_empty());
+    }
+
+    #[test]
+    fn pgp_keys_round_trip_through_store_and_keyring() {
+        let client = client();
+        let acc = account();
+        client.save_account(&acc, None).expect("save");
+        let key = client
+            .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
+            .expect("generate");
+
+        let keys = client.list_pgp_keys(&acc.id).expect("list");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].fingerprint, key.fingerprint);
+        assert!(client.has_pgp_secret(&acc.id, &key.fingerprint));
+
+        let found = client
+            .pgp_key_for_address(&acc.id, "ALICE@example.com")
+            .expect("lookup")
+            .expect("key");
+        assert_eq!(found.fingerprint, key.fingerprint);
+        assert!(client
+            .pgp_key_for_address(&acc.id, "bob@example.com")
+            .expect("lookup")
+            .is_none());
+
+        assert!(client.delete_pgp_key(&acc.id, &key.fingerprint).expect("delete"));
+        assert!(client.list_pgp_keys(&acc.id).expect("list").is_empty());
+        assert!(!client.has_pgp_secret(&acc.id, &key.fingerprint));
+    }
+
+    #[test]
+    fn pgp_encrypt_decrypt_and_sign_through_the_client() {
+        let client = client();
+        let acc = account();
+        client.save_account(&acc, None).expect("save");
+        let key = client
+            .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
+            .expect("generate");
+        assert!(client
+            .missing_pgp_keys(&acc.id, &["alice@example.com".into()])
+            .expect("missing")
+            .is_empty());
+        assert_eq!(
+            client
+                .missing_pgp_keys(&acc.id, &["bob@example.com".into()])
+                .expect("missing"),
+            vec!["bob@example.com".to_owned()]
+        );
+
+        let recipients = vec!["alice@example.com".to_owned()];
+        let encrypted = client
+            .pgp_encrypt(&acc.id, "top secret", &recipients, true)
+            .expect("encrypt");
+        let (plaintext, status) = client.pgp_decrypt(&acc.id, &encrypted).expect("decrypt");
+        assert_eq!(plaintext, "top secret");
+        assert_eq!(status, SignatureStatus::Valid);
+
+        let signed = client.pgp_sign(&acc.id, "hello").expect("sign");
+        let cert = crate::pgp::import_public_key(&key.public_key).expect("cert");
+        assert_eq!(
+            crate::pgp::verify_signature(&signed, &cert).expect("verify"),
+            SignatureStatus::Valid
+        );
+    }
+
+    #[test]
+    fn pgp_encrypt_fails_without_recipient_key() {
+        let client = client();
+        let acc = account();
+        client.save_account(&acc, None).expect("save");
+        client
+            .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
+            .expect("generate");
+        let error = client
+            .pgp_encrypt(&acc.id, "x", &["bob@example.com".into()], false)
+            .expect_err("must fail");
+        assert!(error.to_string().contains("No public key for: bob@example.com"));
     }
 }

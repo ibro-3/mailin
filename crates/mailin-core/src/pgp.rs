@@ -109,6 +109,33 @@ pub fn key_user_ids(cert: &Cert) -> Vec<String> {
         .collect()
 }
 
+/// Export the public part of a certificate as armored text.
+pub fn export_public_key(cert: &Cert) -> Result<String> {
+    let bytes = cert
+        .armored()
+        .to_vec()
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| Error::Protocol(e.to_string()))
+}
+
+/// Export a certificate including its secret key material as armored text.
+pub fn export_secret_key(cert: &Cert) -> Result<String> {
+    let bytes = cert
+        .as_tsk()
+        .armored()
+        .to_vec()
+        .map_err(|e| Error::Protocol(e.to_string()))?;
+    String::from_utf8(bytes).map_err(|e| Error::Protocol(e.to_string()))
+}
+
+/// True when any user ID of `cert` mentions `address` (case-insensitive).
+pub fn matches_address(cert: &Cert, address: &str) -> bool {
+    let address = address.trim().to_lowercase();
+    key_user_ids(cert)
+        .iter()
+        .any(|uid| uid.to_lowercase().contains(&address))
+}
+
 /// Build a signing key pair from a certificate containing secret key material.
 fn signing_keypair(cert: &Cert) -> Result<openpgp::crypto::KeyPair> {
     cert.keys()
