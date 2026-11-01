@@ -891,3 +891,45 @@ fn rules_are_per_account() {
     assert_eq!(r1.len(), 1);
     assert_eq!(r2.len(), 1);
 }
+
+#[test]
+fn pgp_mime_payloads_round_trip_and_replace() {
+    use mailin_core::PgpMimeKind;
+
+    let (store, account) = store_with_account();
+    let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);
+    let stored = store
+        .upsert_message(&message(inbox, 1, "Encrypted"))
+        .expect("insert");
+    assert!(store.pgp_mime(stored.id).expect("get").is_none());
+
+    store
+        .upsert_pgp_mime(
+            stored.id,
+            PgpMimeKind::Encrypted,
+            "-----BEGIN PGP MESSAGE-----\r\nAAAA\r\n-----END PGP MESSAGE-----",
+            None,
+        )
+        .expect("insert payload");
+    let payload = store.pgp_mime(stored.id).expect("get").expect("payload");
+    assert_eq!(payload.kind, PgpMimeKind::Encrypted);
+    assert!(payload.payload.contains("BEGIN PGP MESSAGE"));
+    assert!(payload.signature.is_none());
+
+    // Re-importing replaces instead of duplicating.
+    store
+        .upsert_pgp_mime(
+            stored.id,
+            PgpMimeKind::Signed,
+            "Content-Type: text/plain\r\n\r\nhello\r\n",
+            Some("-----BEGIN PGP SIGNATURE-----\r\nBBBB\r\n-----END PGP SIGNATURE-----"),
+        )
+        .expect("update payload");
+    let payload = store.pgp_mime(stored.id).expect("get").expect("payload");
+    assert_eq!(payload.kind, PgpMimeKind::Signed);
+    assert!(payload.signature.is_some());
+
+    // Deleting the message cascades to its payload.
+    store.delete_message_by_id(stored.id).expect("delete message");
+    assert!(store.pgp_mime(stored.id).expect("get").is_none());
+}

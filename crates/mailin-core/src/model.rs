@@ -628,6 +628,44 @@ pub enum SignatureStatus {
     Error,
 }
 
+/// Kind of OpenPGP/MIME payload stored for a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PgpMimeKind {
+    /// `multipart/encrypted` with an armored ciphertext payload.
+    Encrypted,
+    /// `multipart/signed` with a signed MIME entity and detached signature.
+    Signed,
+}
+
+impl PgpMimeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PgpMimeKind::Encrypted => "encrypted",
+            PgpMimeKind::Signed => "signed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "encrypted" => Some(PgpMimeKind::Encrypted),
+            "signed" => Some(PgpMimeKind::Signed),
+            _ => None,
+        }
+    }
+}
+
+/// An OpenPGP/MIME payload extracted from a message body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PgpMime {
+    pub message_id: i64,
+    pub kind: PgpMimeKind,
+    /// Encrypted: armored ciphertext. Signed: the exact bytes covered by the signature.
+    pub payload: String,
+    /// Armored detached signature, for signed payloads.
+    pub signature: Option<String>,
+}
+
 /// A CalDAV calendar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Calendar {

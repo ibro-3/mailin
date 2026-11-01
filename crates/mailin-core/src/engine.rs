@@ -1185,6 +1185,14 @@ async fn fetch_body(
         body.snippet.as_deref(),
     )? {
         store.replace_attachments(message_id, &body.attachments)?;
+        if let Some(pgp) = &body.pgp {
+            store.upsert_pgp_mime(
+                message_id,
+                pgp.kind,
+                &pgp.payload,
+                pgp.signature.as_deref(),
+            )?;
+        }
         state.mailbox.publish(Event::BodyReady { message_id });
         state.mailbox.publish(Event::MessagesChanged {
             folder_id: folder.id,

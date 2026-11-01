@@ -15,8 +15,8 @@ use crate::config::Paths;
 use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
 use crate::model::{
-    Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, PgpKey, SignatureStatus,
-    VirtualFolderKind,
+    Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, PgpKey, PgpMime,
+    SignatureStatus, VirtualFolderKind,
 };
 use crate::store::Store;
 use secrecy::{ExposeSecret, SecretString};
@@ -487,6 +487,62 @@ impl Mailin {
         crate::pgp::sign_detached(data, &cert, &secret)
     }
 
+    /// The OpenPGP/MIME payload stored for a message, if any.
+    pub fn pgp_mime(&self, message: MessageId) -> Result<Option<PgpMime>> {
+        self.store.pgp_mime(message)
+    }
+
+    /// Decrypt or verify an OpenPGP/MIME message on demand.
+    ///
+    /// Encrypted messages are decrypted with the account's secret keys.
+    /// Signed messages are verified against the sender's cached public key
+    /// (unknown senders yield [`SignatureStatus::UnknownKey`]).
+    pub fn decrypt_message(&self, message: MessageId) -> Result<(String, SignatureStatus)> {
+        let payload = self
+            .store
+            .pgp_mime(message)?
+            .ok_or_else(|| Error::Protocol("message is not OpenPGP protected".into()))?;
+        let header = self
+            .store
+            .message(message)?
+            .ok_or_else(|| Error::Protocol("message not found".into()))?;
+        let folder = self
+            .store
+            .folder(header.folder_id)?
+            .ok_or_else(|| Error::FolderNotFound(header.folder_id.0))?;
+        let account = folder.account_id;
+
+        match payload.kind {
+            crate::model::PgpMimeKind::Encrypted => self.pgp_decrypt(&account, &payload.payload),
+            crate::model::PgpMimeKind::Signed => {
+                let signature = payload
+                    .signature
+                    .ok_or_else(|| Error::Protocol("signed message has no signature".into()))?;
+                let Some(sender) = header.from_addr.as_deref() else {
+                    return Ok((payload.payload, SignatureStatus::UnknownKey));
+                };
+                let Some(key) = self.pgp_key_for_address(&account, sender)? else {
+                    return Ok((payload.payload, SignatureStatus::UnknownKey));
+                };
+                let cert = crate::pgp::import_public_key(&key.public_key)?;
+                let status =
+                    crate::pgp::verify_detached(payload.payload.as_bytes(), &signature, &cert)?;
+                Ok((payload.payload, status))
+            }
+        }
+    }
+
+    /// Decrypt/verify a message and parse the resulting MIME entity for display.
+    /// Returns `(text, html, signature_status)`.
+    pub fn decrypted_body(
+        &self,
+        message: MessageId,
+    ) -> Result<(Option<String>, Option<String>, SignatureStatus)> {
+        let (entity, status) = self.decrypt_message(message)?;
+        let body = crate::imap::parse::parse_entity(entity.as_bytes());
+        Ok((body.text, body.html, status))
+    }
+
     /// Addresses (from `recipients`) that have no cached public key.
     pub fn missing_pgp_keys(&self, account: &AccountId, recipients: &[String]) -> Result<Vec<String>> {
         let mut missing = Vec::new();
@@ -879,6 +935,57 @@ mod tests {
         assert_eq!(status, SignatureStatus::Valid);
         assert!(entity.contains("Content-Type: text/plain"));
         assert!(!entity.contains("Subject:"));
+    }
+
+    #[test]
+    fn decrypt_message_reads_the_stored_payload() {
+        use crate::model::{FolderRole, NewMessage, PgpMimeKind};
+        use crate::store::FolderUpsert;
+
+        let client = client();
+        let acc = account();
+        client.save_account(&acc, None).expect("save");
+        client
+            .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
+            .expect("generate");
+
+        let mut folder = FolderUpsert::new(acc.id, "INBOX");
+        folder.role = FolderRole::Inbox;
+        folder.delimiter = "/".into();
+        let folder_id = client.store().upsert_folder(&folder).expect("folder");
+
+        let mut outgoing = crate::compose::OutgoingMessage {
+            from_name: "Alice".into(),
+            from_addr: "alice@example.com".into(),
+            to: "Alice <alice@example.com>".into(),
+            subject: "Encrypted".into(),
+            body: "hello there".into(),
+            ..crate::compose::OutgoingMessage::default()
+        };
+        outgoing.draft_key = None;
+        let (raw, _) = outgoing.build().expect("build");
+        let entity = crate::compose::mime_entity(&raw).expect("entity");
+        let armored = client
+            .pgp_encrypt(&acc.id, &entity, &["alice@example.com".into()], true)
+            .expect("encrypt");
+
+        let mut message = NewMessage::new(folder_id, 1);
+        message.subject = "Encrypted".into();
+        message.from_name = Some("Alice".into());
+        message.from_addr = Some("alice@example.com".into());
+        message.to_addrs = "alice@example.com".into();
+        message.received_at = 0;
+        let stored = client.store().upsert_message(&message).expect("insert");
+        client
+            .store()
+            .upsert_pgp_mime(stored.id, PgpMimeKind::Encrypted, &armored, None)
+            .expect("payload");
+
+        assert!(client.pgp_mime(stored.id).expect("mime").is_some());
+        let (text, html, status) = client.decrypted_body(stored.id).expect("decrypt");
+        assert_eq!(status, SignatureStatus::Valid);
+        assert_eq!(text.as_deref(), Some("hello there"));
+        assert!(html.as_deref().is_none_or(|html| html.contains("hello there")));
     }
 
     #[test]

@@ -1748,6 +1748,51 @@ impl Store {
         )? > 0)
     }
 
+    // ---------------------------------------------------------------- pgp_mime
+
+    /// Store the OpenPGP/MIME payload extracted for a message.
+    pub fn upsert_pgp_mime(
+        &self,
+        message_id: MessageId,
+        kind: crate::model::PgpMimeKind,
+        payload: &str,
+        signature: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO pgp_mime (message_id, kind, payload, signature, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(message_id) DO UPDATE SET
+                 kind = excluded.kind,
+                 payload = excluded.payload,
+                 signature = excluded.signature,
+                 fetched_at = excluded.fetched_at",
+            params![message_id.0, kind.as_str(), payload, signature, crate::now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// The OpenPGP/MIME payload of a message, when it has one.
+    pub fn pgp_mime(&self, message_id: MessageId) -> Result<Option<crate::model::PgpMime>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT message_id, kind, payload, signature FROM pgp_mime WHERE message_id = ?1",
+            params![message_id.0],
+            |row| {
+                let kind: String = row.get(1)?;
+                Ok(crate::model::PgpMime {
+                    message_id: row.get(0)?,
+                    kind: crate::model::PgpMimeKind::parse(&kind)
+                        .unwrap_or(crate::model::PgpMimeKind::Encrypted),
+                    payload: row.get(2)?,
+                    signature: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Error::from)
+    }
+
 }
 
 // -------------------------------------------------------------------- helpers
