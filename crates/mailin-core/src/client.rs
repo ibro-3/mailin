@@ -453,6 +453,14 @@ impl Mailin {
         matches!(self.credentials.get_pgp_secret(account, fingerprint), Ok(Some(_)))
     }
 
+    /// `true` when the account has any key pair that can sign.
+    pub fn has_signing_key(&self, account: &AccountId) -> bool {
+        self.store
+            .pgp_keys_for_account(account)
+            .map(|keys| keys.iter().any(|key| self.has_pgp_secret(account, &key.fingerprint)))
+            .unwrap_or(false)
+    }
+
     /// Build an outgoing message, applying PGP options. Returns the wire bytes
     /// and the SMTP envelope.
     pub fn build_outgoing(

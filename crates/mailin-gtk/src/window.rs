@@ -2239,6 +2239,10 @@ impl MainWindow {
     fn render_body(&self, message_id: MessageId) {
         clear_box(&self.widgets.reader_body);
         self.widgets.remote_panel.set_reveal_child(false);
+        if let Ok(Some(pgp)) = self.app.mailin.pgp_mime(message_id) {
+            self.render_pgp_body(message_id, &pgp);
+            return;
+        }
         let Ok(body) = self.app.mailin.message_body(message_id) else {
             self.widgets
                 .reader_body
@@ -2321,6 +2325,91 @@ impl MainWindow {
                 }
             }
         }
+    }
+
+    /// Render the placeholder for a PGP-protected message and decrypt/verify on demand.
+    fn render_pgp_body(&self, message_id: MessageId, pgp: &mailin_core::PgpMime) {
+        let encrypted = pgp.kind == mailin_core::PgpMimeKind::Encrypted;
+        let title = if encrypted {
+            "This message is encrypted with OpenPGP."
+        } else {
+            "This message is signed with OpenPGP."
+        };
+        let mut actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let action_label = gtk::Label::new(Some(title));
+        action_label.set_xalign(0.0);
+        action_label.set_hexpand(true);
+        action_label.set_wrap(true);
+        let action = gtk::Button::with_label(if encrypted { "Decrypt" } else { "Verify" });
+        action.add_css_class("suggested-action");
+        actions.append(&action_label);
+        actions.append(&action);
+        actions.set_margin_top(6);
+        actions.set_margin_bottom(6);
+
+        let status = gtk::Label::new(None);
+        status.set_xalign(0.0);
+        status.set_wrap(true);
+        status.set_visible(false);
+        status.set_accessible_role(gtk::AccessibleRole::Status);
+
+        let holder = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        self.widgets.reader_body.append(&actions);
+        self.widgets.reader_body.append(&status);
+        self.widgets.reader_body.append(&holder);
+
+        let app = Rc::clone(&self.app);
+        let config = Rc::clone(&self.app.config);
+        let actions_for_click = actions.clone();
+        let status_for_click = status.clone();
+        let holder_for_click = holder.clone();
+        action.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            match app.mailin.decrypted_body(message_id) {
+                Ok((text, html, signature)) => {
+                    actions_for_click.set_visible(false);
+                    status_for_click.set_text(&format!(
+                        "OpenPGP signature: {}",
+                        signature_label(signature)
+                    ));
+                    status_for_click.set_visible(true);
+                    clear_box(&holder_for_click);
+
+                    let has_html = html.as_deref().is_some_and(|html| !html.trim().is_empty());
+                    let has_text = text.as_deref().is_some_and(|text| !text.trim().is_empty());
+                    let want_html = has_html && config.borrow().ui.html_enabled;
+                    if want_html {
+                        let view = html::new_view();
+                        let dark = adw::StyleManager::default().is_dark();
+                        view.load_html(
+                            &html::document(
+                                html.as_deref().unwrap_or_default(),
+                                false,
+                                dark,
+                                &[],
+                            ),
+                            None,
+                        );
+                        holder_for_click.append(&view);
+                    } else if has_text {
+                        holder_for_click
+                            .append(&text_body(text.as_deref().unwrap_or_default()));
+                    } else if has_html {
+                        holder_for_click.append(&notice_body(
+                            "This message only provides an HTML body. Enable HTML in Preferences to show it.",
+                        ));
+                    } else {
+                        holder_for_click
+                            .append(&notice_body("The decrypted message has no readable body."));
+                    }
+                }
+                Err(error) => {
+                    button.set_sensitive(true);
+                    status_for_click.set_text(&format!("Could not open the message: {error}"));
+                    status_for_click.set_visible(true);
+                }
+            }
+        });
     }
 
     fn html_view(&self) -> webkit6::WebView {
@@ -4000,6 +4089,16 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {
     row.set_child(Some(&outer));
     row.set_tooltip_text(Some(&format!("ID: {}", entry.id)));
     row
+}
+
+fn signature_label(status: mailin_core::SignatureStatus) -> &'static str {
+    use mailin_core::SignatureStatus;
+    match status {
+        SignatureStatus::Valid => "valid",
+        SignatureStatus::Invalid => "invalid",
+        SignatureStatus::UnknownKey => "unknown key",
+        SignatureStatus::Error => "error",
+    }
 }
 
 fn text_body(text: &str) -> gtk::Widget {

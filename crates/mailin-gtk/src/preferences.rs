@@ -360,6 +360,64 @@ pub fn show_preferences(
     accounts_page.add(&account_group);
     dialog.add(&accounts_page);
 
+    // Encryption page: PGP key management per account.
+    let encryption_page = adw::PreferencesPage::new();
+    encryption_page.set_title("Encryption");
+    encryption_page.set_icon_name(Some("channel-secure-symbolic"));
+
+    let pgp_group = adw::PreferencesGroup::builder()
+        .title("OpenPGP keys")
+        .description("Manage the keys used to encrypt, sign, decrypt and verify mail.")
+        .build();
+
+    let accounts = app.mailin.list_accounts().unwrap_or_default();
+    if accounts.is_empty() {
+        let row = adw::ActionRow::builder()
+            .title("No accounts yet")
+            .subtitle("Add an account to manage its PGP keys.")
+            .build();
+        pgp_group.add(&row);
+    } else {
+        let parent_window = parent
+            .as_ref()
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok());
+        for account in accounts {
+            let key_count = app
+                .mailin
+                .list_pgp_keys(&account.id)
+                .map(|keys| keys.len())
+                .unwrap_or(0);
+            let row = adw::ActionRow::builder()
+                .title(gtk::glib::markup_escape_text(&account.email))
+                .subtitle(match key_count {
+                    1 => "1 key".to_owned(),
+                    count => format!("{count} keys"),
+                })
+                .build();
+            let manage = gtk::Button::with_label("Manage Keys");
+            manage.add_css_class("flat");
+            manage.set_valign(gtk::Align::Center);
+            {
+                use gtk::accessible::Property;
+                let label = format!("Manage PGP keys for {}", account.email);
+                manage.update_property(&[Property::Label(&label)]);
+            }
+            row.add_suffix(&manage);
+
+            if let Some(window) = parent_window.clone() {
+                let app = Rc::clone(app);
+                let account_id = account.id;
+                manage.connect_clicked(move |_| {
+                    crate::pgp_keys::present(&window, Rc::clone(&app), account_id);
+                });
+            }
+            pgp_group.add(&row);
+        }
+    }
+    encryption_page.add(&pgp_group);
+    dialog.add(&encryption_page);
+
     // Validate, persist and hand the new configuration back to the window.
     dialog.connect_closed({
         let config = config.clone();

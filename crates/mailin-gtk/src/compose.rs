@@ -7,7 +7,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use libadwaita as adw;
 
-use mailin_core::compose::{apply_template, new_draft_key, recipient_addresses, template_draft, with_signature_prefix};
+use mailin_core::compose::{apply_template, new_draft_key, recipient_addresses, template_draft, with_signature_prefix, PgpOptions};
 use mailin_core::{Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template};
 use mailin_core::html::sanitize_html;
 
@@ -228,6 +228,30 @@ pub fn present(
     html_toggle.add_css_class("flat");
     header.pack_start(&html_toggle);
 
+    // PGP toggles
+    let pgp_encrypt = Rc::new(Cell::new(false));
+    let pgp_sign = Rc::new(Cell::new(false));
+    let encrypt_toggle = gtk::ToggleButton::builder()
+        .icon_name("channel-secure-symbolic")
+        .tooltip_text("Encrypt this message (PGP)")
+        .build();
+    encrypt_toggle.add_css_class("flat");
+    {
+        use gtk::accessible::Property;
+        encrypt_toggle.update_property(&[Property::Label("Encrypt message")]);
+    }
+    header.pack_start(&encrypt_toggle);
+    let sign_toggle = gtk::ToggleButton::builder()
+        .icon_name("application-certificate-symbolic")
+        .tooltip_text("Sign this message (PGP)")
+        .build();
+    sign_toggle.add_css_class("flat");
+    {
+        use gtk::accessible::Property;
+        sign_toggle.update_property(&[Property::Label("Sign message")]);
+    }
+    header.pack_start(&sign_toggle);
+
     let to_row = adw::EntryRow::builder().title("To").build();
     let cc_row = adw::EntryRow::builder().title("Cc").build();
     let bcc_row = adw::EntryRow::builder().title("Bcc").build();
@@ -384,6 +408,62 @@ pub fn present(
     content.append(&page_scroller);
     toolbar.set_content(Some(&content));
     window.set_content(Some(&toolbar));
+
+    // Validate key availability as soon as the user asks for PGP.
+    {
+        let app = app.clone();
+        let state = Rc::clone(&pgp_encrypt);
+        let banner = banner.clone();
+        let to_row = to_row.clone();
+        let cc_row = cc_row.clone();
+        let bcc_row = bcc_row.clone();
+        encrypt_toggle.connect_toggled(move |button| {
+            state.set(button.is_active());
+            if !button.is_active() {
+                return;
+            }
+            let mut recipients = Vec::new();
+            for row in [&to_row, &cc_row, &bcc_row] {
+                if let Ok(addresses) = recipient_addresses(&row.text()) {
+                    recipients.extend(addresses);
+                }
+            }
+            match app.mailin.missing_pgp_keys(&account_id, &recipients) {
+                Ok(missing) if !missing.is_empty() => {
+                    button.set_active(false);
+                    state.set(false);
+                    banner.set_title(&format!("No public key for: {}", missing.join(", ")));
+                    banner.set_revealed(true);
+                }
+                Err(error) => {
+                    button.set_active(false);
+                    state.set(false);
+                    banner.set_title(&format!("Could not check PGP keys: {error}"));
+                    banner.set_revealed(true);
+                }
+                _ => banner.set_revealed(false),
+            }
+        });
+    }
+    {
+        let app = app.clone();
+        let state = Rc::clone(&pgp_sign);
+        let banner = banner.clone();
+        sign_toggle.connect_toggled(move |button| {
+            state.set(button.is_active());
+            if !button.is_active() {
+                return;
+            }
+            if !app.mailin.has_signing_key(&account_id) {
+                button.set_active(false);
+                state.set(false);
+                banner.set_title(
+                    "No secret key available. Add one in Account Settings → Encryption.",
+                );
+                banner.set_revealed(true);
+            }
+        });
+    }
 
     let attachments: Rc<RefCell<Vec<ComposeAttachment>>> =
         Rc::new(RefCell::new(draft.attachments.clone()));
@@ -911,9 +991,15 @@ pub fn present(
     let send_key = Rc::clone(&draft_key);
     let send_sent = Rc::clone(&sent);
     let send_closed = Rc::clone(&closed);
+    let send_encrypt = Rc::clone(&pgp_encrypt);
+    let send_sign = Rc::clone(&pgp_sign);
     send.connect_clicked(move |_| {
         let outgoing = send_snapshot();
-        match outgoing.build() {
+        let pgp = PgpOptions {
+            encrypt: send_encrypt.get(),
+            sign: send_sign.get(),
+        };
+        match app.mailin.build_outgoing(&account.id, &outgoing, pgp) {
             Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
                 Ok(_) => {
                     let key = send_key.borrow().clone();
