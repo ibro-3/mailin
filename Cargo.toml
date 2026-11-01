@@ -27,6 +27,8 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
+xmltree = "0.12"
+http = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 toml = "1"
