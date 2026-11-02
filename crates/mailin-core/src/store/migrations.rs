@@ -5,7 +5,10 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../../migrations/0002_attachment_data.sql")),
     (3, include_str!("../../migrations/0003_templates.sql")),
     (4, include_str!("../../migrations/0004_contacts.sql")),
-    (5, include_str!("../../migrations/0005_scheduled_actions.sql")),
+    (
+        5,
+        include_str!("../../migrations/0005_scheduled_actions.sql"),
+    ),
     (6, include_str!("../../migrations/0006_rules.sql")),
     (7, include_str!("../../migrations/0007_virtual_folders.sql")),
     (8, include_str!("../../migrations/0008_pgp_keys.sql")),
@@ -13,9 +16,10 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (10, include_str!("../../migrations/0010_plugins.sql")),
     (11, include_str!("../../migrations/0011_threading.sql")),
     (12, include_str!("../../migrations/0012_pgp_mime.sql")),
+    (13, include_str!("../../migrations/0013_references.sql")),
 ];
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 #[cfg(test)]
 mod tests {

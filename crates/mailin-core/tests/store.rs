@@ -1,8 +1,8 @@
 //! Store, search and outbox behaviour against a real SQLite database.
 
 use mailin_core::{
-    Account, AttachmentData, AttachmentMeta, Contact, FolderRole, FolderSyncState, FolderUpsert, NewMessage,
-    OutboxState, Paths, Security, ServerSettings, Store, Template,
+    Account, AttachmentData, AttachmentMeta, Contact, FolderRole, FolderSyncState, FolderUpsert,
+    NewMessage, OutboxState, Paths, Security, ServerSettings, Store, Template,
 };
 
 fn account() -> Account {
@@ -645,7 +645,12 @@ fn template_crud() {
 
     // Create template
     let id = store
-        .upsert_template(&account.id, "welcome", "Welcome {{name}}", "Hello {{name}},\n\nWelcome!")
+        .upsert_template(
+            &account.id,
+            "welcome",
+            "Welcome {{name}}",
+            "Hello {{name}},\n\nWelcome!",
+        )
         .expect("upsert");
     assert!(id > 0);
 
@@ -658,7 +663,12 @@ fn template_crud() {
 
     // Update template
     let id2 = store
-        .upsert_template(&account.id, "welcome", "Welcome {{name}}!", "Hello {{name}}!\n\nWelcome aboard!")
+        .upsert_template(
+            &account.id,
+            "welcome",
+            "Welcome {{name}}!",
+            "Hello {{name}}!\n\nWelcome aboard!",
+        )
         .expect("update");
     assert_eq!(id, id2, "upsert returns same id");
     let templates = store.list_templates(&account.id).expect("list again");
@@ -666,9 +676,22 @@ fn template_crud() {
     assert_eq!(templates[0].body, "Hello {{name}}!\n\nWelcome aboard!");
 
     // Delete template
-    assert!(store.delete_template(&account.id, "welcome").expect("delete"));
-    assert!(store.list_templates(&account.id).expect("list empty").is_empty());
-    assert!(!store.delete_template(&account.id, "welcome").expect("delete missing"));
+    assert!(
+        store
+            .delete_template(&account.id, "welcome")
+            .expect("delete")
+    );
+    assert!(
+        store
+            .list_templates(&account.id)
+            .expect("list empty")
+            .is_empty()
+    );
+    assert!(
+        !store
+            .delete_template(&account.id, "welcome")
+            .expect("delete missing")
+    );
 }
 
 #[test]
@@ -736,13 +759,24 @@ fn contact_crud() {
         .upsert_contact(&account.id, "manual@example.com", "Manual Entry", true)
         .expect("manual upsert");
     let contacts = store.list_contacts(&account.id).expect("list manual");
-    let manual = contacts.iter().find(|c| c.email == "manual@example.com").expect("manual contact");
+    let manual = contacts
+        .iter()
+        .find(|c| c.email == "manual@example.com")
+        .expect("manual contact");
     assert!(manual.manual);
 
     // Delete contact
-    assert!(store.delete_contact(&account.id, "grace@example.com").expect("delete"));
+    assert!(
+        store
+            .delete_contact(&account.id, "grace@example.com")
+            .expect("delete")
+    );
     assert!(store.list_contacts(&account.id).expect("list empty").len() == 1); // only manual remains
-    assert!(!store.delete_contact(&account.id, "grace@example.com").expect("delete missing"));
+    assert!(
+        !store
+            .delete_contact(&account.id, "grace@example.com")
+            .expect("delete missing")
+    );
 }
 
 #[test]
@@ -783,32 +817,50 @@ fn contact_search_ranks_by_frequency_and_recency() {
     let (store, account) = store_with_account();
 
     // Add contacts with different times_seen
-    store.upsert_contact(&account.id, "a@example.com", "A", false).expect("a");
-    store.upsert_contact(&account.id, "b@example.com", "B", false).expect("b");
-    store.upsert_contact(&account.id, "c@example.com", "C", false).expect("c");
+    store
+        .upsert_contact(&account.id, "a@example.com", "A", false)
+        .expect("a");
+    store
+        .upsert_contact(&account.id, "b@example.com", "B", false)
+        .expect("b");
+    store
+        .upsert_contact(&account.id, "c@example.com", "C", false)
+        .expect("c");
     // Manually increment times_seen for 'b'
-    store.upsert_contact(&account.id, "b@example.com", "B", false).expect("b again");
-    store.upsert_contact(&account.id, "b@example.com", "B", false).expect("b again");
+    store
+        .upsert_contact(&account.id, "b@example.com", "B", false)
+        .expect("b again");
+    store
+        .upsert_contact(&account.id, "b@example.com", "B", false)
+        .expect("b again");
 
     // Search for 'example' - should rank by times_seen DESC
-    let results = store.search_contacts(&account.id, "example", 10).expect("search");
+    let results = store
+        .search_contacts(&account.id, "example", 10)
+        .expect("search");
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].email, "b@example.com"); // 3 times_seen
     assert_eq!(results[1].email, "a@example.com"); // 1 times_seen
     assert_eq!(results[2].email, "c@example.com"); // 1 times_seen
 
     // Prefix search
-    let results = store.search_contacts(&account.id, "a@ex", 10).expect("prefix search");
+    let results = store
+        .search_contacts(&account.id, "a@ex", 10)
+        .expect("prefix search");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].email, "a@example.com");
 
     // Case insensitive
-    let results = store.search_contacts(&account.id, "A@EX", 10).expect("case insensitive");
+    let results = store
+        .search_contacts(&account.id, "A@EX", 10)
+        .expect("case insensitive");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].email, "a@example.com");
 
     // Limit
-    let results = store.search_contacts(&account.id, "example", 2).expect("limit");
+    let results = store
+        .search_contacts(&account.id, "example", 2)
+        .expect("limit");
     assert_eq!(results.len(), 2);
 }
 
@@ -857,8 +909,17 @@ fn rule_crud() {
 
     // Delete rule
     assert!(store.delete_rule(&account.id, "Test Rule").expect("delete"));
-    assert!(store.list_rules(&account.id).expect("list empty").is_empty());
-    assert!(!store.delete_rule(&account.id, "Test Rule").expect("delete missing"));
+    assert!(
+        store
+            .list_rules(&account.id)
+            .expect("list empty")
+            .is_empty()
+    );
+    assert!(
+        !store
+            .delete_rule(&account.id, "Test Rule")
+            .expect("delete missing")
+    );
 }
 
 #[test]
@@ -930,7 +991,9 @@ fn pgp_mime_payloads_round_trip_and_replace() {
     assert!(payload.signature.is_some());
 
     // Deleting the message cascades to its payload.
-    store.delete_message_by_id(stored.id).expect("delete message");
+    store
+        .delete_message_by_id(stored.id)
+        .expect("delete message");
     assert!(store.pgp_mime(stored.id).expect("get").is_none());
 }
 
@@ -980,7 +1043,10 @@ fn unthreaded_messages_are_their_own_roots() {
     assert_eq!(roots[0].thread_reply_count, 0);
 
     // A message with no thread root key of its own has no replies.
-    let key = roots[0].thread_root_key.clone().or(roots[0].message_id.clone());
+    let key = roots[0]
+        .thread_root_key
+        .clone()
+        .or(roots[0].message_id.clone());
     if let Some(key) = key {
         let replies = store.list_thread_replies(&key).expect("replies");
         assert!(replies.is_empty());

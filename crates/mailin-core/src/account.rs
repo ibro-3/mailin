@@ -344,6 +344,68 @@ impl Account {
                 "signature_html is longer than 8192 characters".to_owned(),
             ));
         }
+
+        // OAuth2 validation
+        for (label, server) in [("IMAP", &self.imap), ("SMTP", &self.smtp)] {
+            if server.auth_method == AuthMethod::OAuth2 {
+                if server.oauth2.client_id.trim().is_empty() {
+                    return Err(Error::InvalidAccount(format!(
+                        "{} OAuth2 client_id is required",
+                        label
+                    )));
+                }
+
+                // For custom provider, check required env vars exist
+                if server.oauth2.provider == OAuthProvider::Custom {
+                    let token_env = format!(
+                        "MAILIN_OAUTH_{}_TOKEN_ENDPOINT",
+                        server
+                            .oauth2
+                            .client_id
+                            .to_uppercase()
+                            .replace('-', "_")
+                            .replace('.', "_")
+                    );
+                    if std::env::var(&token_env).is_err() {
+                        return Err(Error::InvalidAccount(format!(
+                            "Custom OAuth2 provider requires {} environment variable",
+                            token_env
+                        )));
+                    }
+                    let auth_env = format!(
+                        "MAILIN_OAUTH_{}_AUTH_ENDPOINT",
+                        server
+                            .oauth2
+                            .client_id
+                            .to_uppercase()
+                            .replace('-', "_")
+                            .replace('.', "_")
+                    );
+                    if std::env::var(&auth_env).is_err() {
+                        return Err(Error::InvalidAccount(format!(
+                            "Custom OAuth2 provider requires {} environment variable",
+                            auth_env
+                        )));
+                    }
+                }
+
+                // Must have either access_token or refresh_token
+                if server.oauth2.refresh_token.is_empty() && server.oauth2.access_token.is_empty() {
+                    return Err(Error::InvalidAccount(format!(
+                        "{} OAuth2 requires either access_token or refresh_token",
+                        label
+                    )));
+                }
+
+                // If refresh_token provided, expires_at should be set (or 0 for unknown)
+                if !server.oauth2.refresh_token.is_empty() && server.oauth2.expires_at < 0 {
+                    return Err(Error::InvalidAccount(format!(
+                        "{} OAuth2 expires_at must be >= 0 when refresh_token provided",
+                        label
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 }

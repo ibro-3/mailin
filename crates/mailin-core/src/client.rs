@@ -6,16 +6,16 @@
 //! need to know whether an update came from the network or from a local edit.
 
 use std::fmt;
-use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use std::sync::{Arc, RwLock};
+use tokio::sync::broadcast;
 
 use crate::account::{Account, AccountId};
 use crate::config::Paths;
 use crate::credentials::CredentialsStore;
 use crate::error::{Error, Result};
 use crate::model::{
-    Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, PgpKey, PgpMime,
-    Plugin, SignatureStatus, VirtualFolderKind,
+    Folder, FolderId, MessageHeader, MessageId, OutboxEntry, OutboxState, PgpKey, PgpMime, Plugin,
+    SignatureStatus, VirtualFolderKind,
 };
 use crate::store::Store;
 use secrecy::{ExposeSecret, SecretString};
@@ -81,6 +81,8 @@ pub struct Mailin {
     credentials: Arc<dyn CredentialsStore>,
     events: broadcast::Sender<Event>,
     plugin_system: Arc<RwLock<Option<Arc<crate::plugins::PluginSystem>>>>,
+    config_cache: Arc<RwLock<Option<crate::Config>>>,
+    config_paths: Arc<Paths>,
 }
 
 impl fmt::Debug for Mailin {
@@ -103,16 +105,27 @@ impl Mailin {
         let credentials: Arc<dyn CredentialsStore> =
             Arc::new(crate::credentials::MemoryCredentials::new());
 
-        Ok(Self::with_parts(store, credentials))
+        let config = crate::Config::load(paths)?;
+        let config_cache = Arc::new(RwLock::new(Some(config)));
+        let config_paths = Arc::new(paths.clone());
+
+        Ok(Self::with_parts(store, credentials, config_cache, config_paths))
     }
 
-    pub fn with_parts(store: Arc<Store>, credentials: Arc<dyn CredentialsStore>) -> Self {
+    pub fn with_parts(
+        store: Arc<Store>,
+        credentials: Arc<dyn CredentialsStore>,
+        config_cache: Arc<RwLock<Option<crate::Config>>>,
+        config_paths: Arc<Paths>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             store,
             credentials,
             events,
             plugin_system: Arc::new(RwLock::new(None)),
+            config_cache,
+            config_paths,
         }
     }
 
@@ -314,7 +327,10 @@ impl Mailin {
 
     /// Get search history for an account.
     pub fn search_history(&self, account: &AccountId) -> Vec<crate::config::SearchHistoryEntry> {
-        self.app_config()
+        self.config_cache
+            .read()
+            .ok()
+            .and_then(|c| c.clone())
             .map(|c| c.search.get(account))
             .unwrap_or_default()
     }
@@ -326,18 +342,15 @@ impl Mailin {
         query: String,
         folder_id: Option<FolderId>,
     ) -> Result<()> {
-        let mut config = self.app_config().ok_or(Error::Config("config not loaded".into()))?;
-        config.search.add(*account, query, folder_id);
-        let paths = crate::config::Paths::from_database_file(self.store.path())?;
-        config.save(&paths)?;
+        let mut cache = self
+            .config_cache
+            .write()
+            .map_err(|_| Error::LockPoisoned)?;
+        if let Some(config) = cache.as_mut() {
+            config.search.add(*account, query, folder_id);
+            config.save(&self.config_paths)?;
+        }
         Ok(())
-    }
-
-    fn app_config(&self) -> Option<crate::Config> {
-        // This is a bit of a hack - in practice the config is managed by AppState
-        // For now, we'll load it from disk each time
-        let paths = crate::config::Paths::from_database_file(self.store.path()).ok()?;
-        crate::Config::load(&paths).ok()
     }
 
     pub fn unread_total(&self, account: &AccountId) -> Result<u32> {
@@ -412,9 +425,12 @@ impl Mailin {
             &fingerprint,
             &SecretString::new(secret_key.into()),
         )?;
-        let stored = self
-            .store
-            .upsert_pgp_key(account, &fingerprint, &crate::pgp::key_user_ids(&cert), &public_key)?;
+        let stored = self.store.upsert_pgp_key(
+            account,
+            &fingerprint,
+            &crate::pgp::key_user_ids(&cert),
+            &public_key,
+        )?;
         self.publish(Event::AccountsChanged);
         Ok(PgpKey {
             id: stored,
@@ -437,7 +453,11 @@ impl Mailin {
     }
 
     /// The stored key whose user IDs mention `address`, if any.
-    pub fn pgp_key_for_address(&self, account: &AccountId, address: &str) -> Result<Option<PgpKey>> {
+    pub fn pgp_key_for_address(
+        &self,
+        account: &AccountId,
+        address: &str,
+    ) -> Result<Option<PgpKey>> {
         let address = address.trim().to_lowercase();
         if address.is_empty() {
             return Ok(None);
@@ -446,25 +466,36 @@ impl Mailin {
             .store
             .pgp_keys_for_account(account)?
             .into_iter()
-            .find(|key| key.user_ids.iter().any(|uid| uid.to_lowercase().contains(&address))))
+            .find(|key| {
+                key.user_ids
+                    .iter()
+                    .any(|uid| uid.to_lowercase().contains(&address))
+            }))
     }
 
     /// `true` when a secret key for `fingerprint` is available to this account.
     pub fn has_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> bool {
-        matches!(self.credentials.get_pgp_secret(account, fingerprint), Ok(Some(_)))
+        matches!(
+            self.credentials.get_pgp_secret(account, fingerprint),
+            Ok(Some(_))
+        )
     }
 
     /// `true` when the account has any key pair that can sign.
     pub fn has_signing_key(&self, account: &AccountId) -> bool {
         self.store
             .pgp_keys_for_account(account)
-            .map(|keys| keys.iter().any(|key| self.has_pgp_secret(account, &key.fingerprint)))
+            .map(|keys| {
+                keys.iter()
+                    .any(|key| self.has_pgp_secret(account, &key.fingerprint))
+            })
             .unwrap_or(false)
     }
 
     /// Store the CalDAV password for an account in the keyring.
     pub fn set_caldav_password(&self, account: &AccountId, password: &str) -> Result<()> {
-        self.credentials.set_caldav_password(account, &SecretString::new(password.into()))
+        self.credentials
+            .set_caldav_password(account, &SecretString::new(password.into()))
     }
 
     /// Load the CalDAV password for an account from the keyring.
@@ -481,12 +512,14 @@ impl Mailin {
 
     /// Get the plugin system for managing Lua plugins.
     pub async fn plugin_system(&self) -> Option<Arc<crate::plugins::PluginSystem>> {
-        self.plugin_system.read().await.clone()
+        self.plugin_system.read().ok().and_then(|c| c.clone())
     }
 
     /// Set the plugin system (called by Engine after initialization).
     pub async fn set_plugin_system(&self, system: Arc<crate::plugins::PluginSystem>) {
-        *self.plugin_system.write().await = Some(system);
+        if let Ok(mut guard) = self.plugin_system.write() {
+            *guard = Some(system);
+        }
     }
 
     /// List all loaded plugins.
@@ -619,7 +652,11 @@ impl Mailin {
     }
 
     /// Addresses (from `recipients`) that have no cached public key.
-    pub fn missing_pgp_keys(&self, account: &AccountId, recipients: &[String]) -> Result<Vec<String>> {
+    pub fn missing_pgp_keys(
+        &self,
+        account: &AccountId,
+        recipients: &[String],
+    ) -> Result<Vec<String>> {
         let mut missing = Vec::new();
         for address in recipients {
             if self.pgp_key_for_address(account, address)?.is_none() {
@@ -655,12 +692,21 @@ impl Mailin {
                 missing.join(", ")
             )));
         }
-        let signer = if sign { self.pgp_signer(account)? } else { None };
+        let signer = if sign {
+            self.pgp_signer(account)?
+        } else {
+            None
+        };
         let (signer_cert, signer_secret) = match signer {
             Some((cert, secret)) => (Some(cert), Some(secret)),
             None => (None, None),
         };
-        crate::pgp::encrypt_message(plaintext, &certs, signer_cert.as_ref(), signer_secret.as_deref())
+        crate::pgp::encrypt_message(
+            plaintext,
+            &certs,
+            signer_cert.as_ref(),
+            signer_secret.as_deref(),
+        )
     }
 
     /// Sign `plaintext` as a cleartext signature using the account's own key.
@@ -717,10 +763,7 @@ impl Mailin {
     }
 
     /// The first key of `account` that has secret key material in the keyring.
-    fn pgp_signer(
-        &self,
-        account: &AccountId,
-    ) -> Result<Option<(sequoia_openpgp::Cert, String)>> {
+    fn pgp_signer(&self, account: &AccountId) -> Result<Option<(sequoia_openpgp::Cert, String)>> {
         for key in self.store.pgp_keys_for_account(account)? {
             if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)? {
                 if let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret()) {
@@ -809,8 +852,10 @@ pub async fn test_connection(
 mod tests {
     use super::*;
     use crate::account::ServerSettings;
+    use crate::config::Paths;
     use crate::credentials::MemoryCredentials;
     use secrecy::{ExposeSecret, SecretString};
+    use tempfile;
 
     fn account() -> Account {
         Account::new(
@@ -822,9 +867,15 @@ mod tests {
     }
 
     fn client() -> Mailin {
+        let paths = Paths::with_root(tempfile::tempdir().expect("temp dir").path());
+        let config = crate::Config::default();
+        let config_cache = Arc::new(RwLock::new(Some(config)));
+        let config_paths = Arc::new(paths);
         Mailin::with_parts(
             Arc::new(Store::open_in_memory().expect("store")),
             Arc::new(MemoryCredentials::new()),
+            config_cache,
+            config_paths,
         )
     }
 
@@ -861,7 +912,7 @@ mod tests {
 
     #[test]
     fn oauth2_refresh_tokens_are_kept_out_of_the_database() {
-        use crate::account::{AuthMethod, OAuth2Tokens};
+        use crate::account::{AuthMethod, OAuth2Tokens, OAuthProvider};
 
         let client = client();
         let mut acc = account();
@@ -869,6 +920,8 @@ mod tests {
             access_token: "access".into(),
             refresh_token: "refresh".into(),
             expires_at: 42,
+            provider: OAuthProvider::Google,
+            client_id: "test-client-id".into(),
             ..OAuth2Tokens::default()
         };
         acc.imap.auth_method = AuthMethod::OAuth2;
@@ -917,12 +970,18 @@ mod tests {
             .expect("lookup")
             .expect("key");
         assert_eq!(found.fingerprint, key.fingerprint);
-        assert!(client
-            .pgp_key_for_address(&acc.id, "bob@example.com")
-            .expect("lookup")
-            .is_none());
+        assert!(
+            client
+                .pgp_key_for_address(&acc.id, "bob@example.com")
+                .expect("lookup")
+                .is_none()
+        );
 
-        assert!(client.delete_pgp_key(&acc.id, &key.fingerprint).expect("delete"));
+        assert!(
+            client
+                .delete_pgp_key(&acc.id, &key.fingerprint)
+                .expect("delete")
+        );
         assert!(client.list_pgp_keys(&acc.id).expect("list").is_empty());
         assert!(!client.has_pgp_secret(&acc.id, &key.fingerprint));
     }
@@ -935,10 +994,12 @@ mod tests {
         let key = client
             .generate_pgp_key(&acc.id, "Alice <alice@example.com>")
             .expect("generate");
-        assert!(client
-            .missing_pgp_keys(&acc.id, &["alice@example.com".into()])
-            .expect("missing")
-            .is_empty());
+        assert!(
+            client
+                .missing_pgp_keys(&acc.id, &["alice@example.com".into()])
+                .expect("missing")
+                .is_empty()
+        );
         assert_eq!(
             client
                 .missing_pgp_keys(&acc.id, &["bob@example.com".into()])
@@ -973,7 +1034,11 @@ mod tests {
         let error = client
             .pgp_encrypt(&acc.id, "x", &["bob@example.com".into()], false)
             .expect_err("must fail");
-        assert!(error.to_string().contains("No public key for: bob@example.com"));
+        assert!(
+            error
+                .to_string()
+                .contains("No public key for: bob@example.com")
+        );
     }
 
     #[test]
@@ -995,7 +1060,14 @@ mod tests {
             ..crate::compose::OutgoingMessage::default()
         };
         let (raw, envelope) = client
-            .build_outgoing(&acc.id, &message, PgpOptions { encrypt: true, sign: true })
+            .build_outgoing(
+                &acc.id,
+                &message,
+                PgpOptions {
+                    encrypt: true,
+                    sign: true,
+                },
+            )
             .expect("build");
         let text = String::from_utf8(raw).expect("utf-8");
         assert!(text.contains("multipart/encrypted"));
@@ -1060,7 +1132,10 @@ mod tests {
         let (text, html, status) = client.decrypted_body(stored.id).expect("decrypt");
         assert_eq!(status, SignatureStatus::Valid);
         assert_eq!(text.as_deref(), Some("hello there"));
-        assert!(html.as_deref().is_none_or(|html| html.contains("hello there")));
+        assert!(
+            html.as_deref()
+                .is_none_or(|html| html.contains("hello there"))
+        );
     }
 
     #[test]
@@ -1082,7 +1157,14 @@ mod tests {
             ..crate::compose::OutgoingMessage::default()
         };
         let (raw, _) = client
-            .build_outgoing(&acc.id, &message, PgpOptions { encrypt: false, sign: true })
+            .build_outgoing(
+                &acc.id,
+                &message,
+                PgpOptions {
+                    encrypt: false,
+                    sign: true,
+                },
+            )
             .expect("build");
         let text = String::from_utf8(raw).expect("utf-8");
         assert!(text.contains("multipart/signed"));
@@ -1100,16 +1182,17 @@ mod tests {
         // parts[0] is the preamble; parts[1] is the signed entity.
         let entity = parts[1].strip_prefix("\r\n").expect("entity start");
         let signature = parts[2];
-        let sig_start = signature.find("-----BEGIN PGP SIGNATURE-----").expect("sig begin");
-        let sig_end = signature.find("-----END PGP SIGNATURE-----").expect("sig end")
+        let sig_start = signature
+            .find("-----BEGIN PGP SIGNATURE-----")
+            .expect("sig begin");
+        let sig_end = signature
+            .find("-----END PGP SIGNATURE-----")
+            .expect("sig end")
             + "-----END PGP SIGNATURE-----".len();
         let cert = crate::pgp::import_public_key(&key.public_key).expect("cert");
-        let status = crate::pgp::verify_detached(
-            entity.as_bytes(),
-            &signature[sig_start..sig_end],
-            &cert,
-        )
-        .expect("verify");
+        let status =
+            crate::pgp::verify_detached(entity.as_bytes(), &signature[sig_start..sig_end], &cert)
+                .expect("verify");
         assert_eq!(status, SignatureStatus::Valid);
     }
 }

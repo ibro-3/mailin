@@ -36,7 +36,11 @@ impl ComposeAttachment {
     }
 
     /// Create an inline image attachment with a generated Content-ID.
-    pub fn inline_image(filename: impl Into<String>, mime_type: impl Into<String>, data: Vec<u8>) -> Self {
+    pub fn inline_image(
+        filename: impl Into<String>,
+        mime_type: impl Into<String>,
+        data: Vec<u8>,
+    ) -> Self {
         let cid = format!("{}@mailin.local", uuid::Uuid::new_v4().simple());
         Self {
             filename: filename.into(),
@@ -123,7 +127,9 @@ impl OutgoingMessage {
             .map(|value| value.trim_matches(['<', '>']).to_owned())
             .unwrap_or_else(|| format!("{}@{}", uuid::Uuid::new_v4(), domain));
 
-        let mut message = String::with_capacity(1024 + self.body.len() + self.html_body.as_ref().map_or(0, |s| s.len()));
+        let mut message = String::with_capacity(
+            1024 + self.body.len() + self.html_body.as_ref().map_or(0, |s| s.len()),
+        );
         write_header(&mut message, "Date", &date);
         write_header(&mut message, "From", &format_mailbox(&from));
         write_header(&mut message, "To", &format_mailboxes(&to));
@@ -284,9 +290,7 @@ pub fn signature_html_block(signature_html: &str) -> String {
     if sanitized.is_empty() {
         String::new()
     } else {
-        format!(
-            "<div class=\"mailin-signature\">{SIGNATURE_SEPARATOR}<br>{sanitized}</div>"
-        )
+        format!("<div class=\"mailin-signature\">{SIGNATURE_SEPARATOR}<br>{sanitized}</div>")
     }
 }
 
@@ -344,7 +348,10 @@ pub fn apply_template(template: &str, vars: &std::collections::HashMap<&str, &st
 }
 
 /// Create an OutgoingMessage from a Template with variable substitution.
-pub fn template_draft(template: &crate::model::Template, vars: &std::collections::HashMap<&str, &str>) -> OutgoingMessage {
+pub fn template_draft(
+    template: &crate::model::Template,
+    vars: &std::collections::HashMap<&str, &str>,
+) -> OutgoingMessage {
     OutgoingMessage {
         from_name: String::new(),
         from_addr: String::new(),
@@ -780,7 +787,9 @@ pub fn wrap_encrypted(raw: &[u8], armored_ciphertext: &str) -> Result<Vec<u8>> {
     write_header(
         &mut out,
         "Content-Type",
-        &format!("multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"{boundary}\""),
+        &format!(
+            "multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"{boundary}\""
+        ),
     );
     out.push_str("\r\n");
     out.push_str("This is an OpenPGP/MIME encrypted message (RFC 4880 and 3156).\r\n");
@@ -971,7 +980,10 @@ mod tests {
             "<p>Hello <strong>world</strong></p>"
         );
         // text/plain must come before text/html inside the alternative.
-        assert!(raw.find("Content-Type: text/plain").unwrap() < raw.find("Content-Type: text/html").unwrap());
+        assert!(
+            raw.find("Content-Type: text/plain").unwrap()
+                < raw.find("Content-Type: text/html").unwrap()
+        );
     }
 
     #[test]
@@ -1220,10 +1232,17 @@ mod tests {
     #[test]
     fn encrypted_wrapper_is_multipart_encrypted() {
         let (raw, _) = draft().build().expect("build");
-        let wrapped = wrap_encrypted(&raw, "-----BEGIN PGP MESSAGE-----\r\nabc\r\n-----END PGP MESSAGE-----")
-            .expect("wrap");
+        let wrapped = wrap_encrypted(
+            &raw,
+            "-----BEGIN PGP MESSAGE-----\r\nabc\r\n-----END PGP MESSAGE-----",
+        )
+        .expect("wrap");
         let text = text(&wrapped);
-        assert!(text.contains("Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\""));
+        assert!(
+            text.contains(
+                "Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\""
+            )
+        );
         assert!(text.contains("Content-Type: application/pgp-encrypted"));
         assert!(text.contains("Version: 1"));
         assert!(text.contains("-----BEGIN PGP MESSAGE-----"));
@@ -1235,8 +1254,11 @@ mod tests {
     #[test]
     fn signed_wrapper_is_multipart_signed() {
         let (raw, _) = draft().build().expect("build");
-        let wrapped = wrap_signed(&raw, "-----BEGIN PGP SIGNATURE-----\r\nabc\r\n-----END PGP SIGNATURE-----")
-            .expect("wrap");
+        let wrapped = wrap_signed(
+            &raw,
+            "-----BEGIN PGP SIGNATURE-----\r\nabc\r\n-----END PGP SIGNATURE-----",
+        )
+        .expect("wrap");
         let text = text(&wrapped);
         assert!(text.contains("Content-Type: multipart/signed; micalg=pgp-sha256"));
         assert!(text.contains("Content-Type: application/pgp-signature"));

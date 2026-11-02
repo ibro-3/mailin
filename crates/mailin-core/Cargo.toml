@@ -54,6 +54,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ical = "0.10"
 mlua = { version = "0.10", features = ["luau", "serialize", "async", "send"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+mailparse = "0.18.0"
 
 [dev-dependencies]
 tempfile.workspace = true

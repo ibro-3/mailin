@@ -93,7 +93,11 @@ fn get_field_value(field: &str, header: &MessageHeader, body: Option<&str>) -> S
             String::new()
         }
         "has_attachment" => {
-            if header.has_attachments { "true".to_owned() } else { "false".to_owned() }
+            if header.has_attachments {
+                "true".to_owned()
+            } else {
+                "false".to_owned()
+            }
         }
         _ => String::new(),
     }
@@ -137,7 +141,8 @@ mod tests {
     fn make_rule(conditions_json: &str, actions_json: &str) -> Rule {
         Rule {
             id: 1,
-            account_id: crate::account::AccountId::parse("00000000-0000-0000-0000-000000000001").unwrap(),
+            account_id: crate::account::AccountId::parse("00000000-0000-0000-0000-000000000001")
+                .unwrap(),
             name: "Test Rule".into(),
             enabled: true,
             priority: 0,
@@ -233,7 +238,10 @@ mod tests {
 
     #[test]
     fn eval_rule_disabled() {
-        let mut rule = make_rule(r#"[{"field": "from", "op": "contains", "value": "john"}]"#, "[]");
+        let mut rule = make_rule(
+            r#"[{"field": "from", "op": "contains", "value": "john"}]"#,
+            "[]",
+        );
         rule.enabled = false;
         let mut cache = RegexCache::default();
         let header = sample_header();

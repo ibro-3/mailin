@@ -14,14 +14,16 @@ use mailin_core::compose::{
     PgpOptions, apply_template, new_draft_key, recipient_addresses, template_draft,
     with_html_signature_prefix, with_signature_prefix,
 };
-use mailin_core::{Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template};
 use mailin_core::html::sanitize_html;
+use mailin_core::{
+    Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template,
+};
 
 use crate::app::AppState;
 use crate::format;
+use webkit6::javascriptcore::Value as JSValue;
 use webkit6::prelude::*;
 use webkit6::{UserContentManager, WebView};
-use webkit6::javascriptcore::Value as JSValue;
 
 /// Maximum size of a single attached file. Larger files would make the SQLite
 /// outbox and the SMTP submission needlessly fragile.
@@ -114,7 +116,7 @@ pub fn present(
         .build();
     webview.set_vexpand(true);
     webview.set_hexpand(true);
-    
+
     // Initialize the contenteditable editor
     let initial_html = if draft.html_body.is_some() {
         draft.html_body.clone().unwrap_or_default()
@@ -122,7 +124,7 @@ pub fn present(
         // Convert plain text to simple HTML
         draft.body.replace('\n', "<br>")
     };
-    
+
     let editor_html = format!(
         r#"<!DOCTYPE html>
 <html>
@@ -204,7 +206,7 @@ pub fn present(
         initial_html
     );
     webview.load_html(&editor_html, None::<&str>);
-    
+
     // Format menu button with formatting options
     let format_btn = gtk::MenuButton::builder()
         .icon_name("format-text-symbolic")
@@ -215,7 +217,7 @@ pub fn present(
         use gtk::accessible::Property;
         format_btn.update_property(&[Property::Label("Formatting options")]);
     }
-    
+
     // Format popover
     let format_popover = gtk::Popover::builder()
         .has_arrow(true)
@@ -236,7 +238,11 @@ pub fn present(
         ("Italic", "format-text-italic-symbolic", "italic"),
         ("Underline", "format-text-underline-symbolic", "underline"),
         ("Link", "insert-link-symbolic", "link"),
-        ("Bulleted List", "format-list-bulleted-symbolic", "insertUnorderedList"),
+        (
+            "Bulleted List",
+            "format-list-bulleted-symbolic",
+            "insertUnorderedList",
+        ),
         ("Quote", "format-quote-symbolic", "formatBlock"),
         ("Heading", "format-heading-symbolic", "formatBlock"),
     ];
@@ -288,7 +294,7 @@ pub fn present(
 
     // HTML/Plain text mode state
     let is_html_mode = Rc::new(Cell::new(draft.html_body.is_some()));
-    
+
     // HTML/Plain text toggle
     let html_toggle = gtk::ToggleButton::builder()
         .label("HTML")
@@ -343,7 +349,7 @@ pub fn present(
     html_toggle.connect_toggled(move |btn| {
         is_html_mode_clone.set(btn.is_active());
     });
-    
+
     // Set up the paste bridge. The selection range was captured by the JS
     // listener before the asynchronous round-trip, so the sanitized fragment is
     // inserted at the caret instead of replacing the whole body.
@@ -367,7 +373,7 @@ pub fn present(
             );
         },
     );
-    
+
     let body_scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -658,7 +664,9 @@ pub fn present(
                                     }
                                 },
                             );
-                            let current_body = rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default();
+                            let current_body = rx
+                                .recv_timeout(std::time::Duration::from_millis(100))
+                                .unwrap_or_default();
                             if current_body.trim().is_empty() {
                                 // For WebView, we need to set HTML content
                                 let (tx2, rx2) = std::sync::mpsc::channel();
@@ -674,10 +682,15 @@ pub fn present(
                                         }
                                     },
                                 );
-                                let current_html = rx2.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default();
+                                let current_html = rx2
+                                    .recv_timeout(std::time::Duration::from_millis(100))
+                                    .unwrap_or_default();
                                 if current_html.trim().is_empty() {
                                     webview.evaluate_javascript(
-                                        &format!("document.body.innerHTML = {}", serde_json::to_string(&draft.body).unwrap()),
+                                        &format!(
+                                            "document.body.innerHTML = {}",
+                                            serde_json::to_string(&draft.body).unwrap()
+                                        ),
                                         None,
                                         None,
                                         None::<&gio::Cancellable>,
@@ -695,9 +708,7 @@ pub fn present(
                 }
             }
             templates_list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-            let save_row = adw::ActionRow::builder()
-                .title("Save as template…")
-                .build();
+            let save_row = adw::ActionRow::builder().title("Save as template…").build();
             let to_row = to_row_for_populate.clone();
             let cc_row = cc_row_for_populate.clone();
             let bcc_row = bcc_row_for_populate.clone();
@@ -710,7 +721,17 @@ pub fn present(
             let window = window_for_populate.clone();
             save_row.connect_activated(move |_| {
                 templates_popover.popdown();
-                save_as_template_dialog(&window, &app, account_id, &to_row, &cc_row, &bcc_row, &subject_row, &webview, &banner);
+                save_as_template_dialog(
+                    &window,
+                    &app,
+                    account_id,
+                    &to_row,
+                    &cc_row,
+                    &bcc_row,
+                    &subject_row,
+                    &webview,
+                    &banner,
+                );
             });
             templates_list.append(&save_row);
         }
@@ -749,11 +770,11 @@ pub fn present(
             let list_box_clone = list_box.clone();
             let app = Rc::clone(&app);
             let account_id = account_id;
-            
+
             // Store the popover as data on the entry for later access
             let popover_ref = Rc::new(RefCell::new(Some(popover_clone)));
             let list_box_ref = Rc::new(RefCell::new(Some(list_box_clone)));
-            
+
             // Connect to entry changes to show/filter suggestions
             entry.connect_changed({
                 let entry = entry.clone();
@@ -769,9 +790,11 @@ pub fn present(
                         }
                         return;
                     }
-                    
+
                     // Search contacts
-                    if let Ok(contacts) = app.mailin.store().search_contacts(&account_id, &query, 10) {
+                    if let Ok(contacts) =
+                        app.mailin.store().search_contacts(&account_id, &query, 10)
+                    {
                         // Clear list
                         if let Some(list) = list_box_ref.borrow().as_ref() {
                             while let Some(child) = list.first_child() {
@@ -785,7 +808,11 @@ pub fn present(
                                 for contact in contacts {
                                     let row = adw::ActionRow::builder()
                                         .title(&contact.email)
-                                        .subtitle(if contact.display_name.is_empty() { "" } else { &contact.display_name })
+                                        .subtitle(if contact.display_name.is_empty() {
+                                            ""
+                                        } else {
+                                            &contact.display_name
+                                        })
                                         .activatable(true)
                                         .build();
                                     let email = contact.email.clone();
@@ -823,7 +850,12 @@ pub fn present(
                                 }
                                 // Position popover under the entry
                                 if let Some(p) = popover_ref.borrow().as_ref() {
-                                    p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(0, entry.height(), entry.width(), 1)));
+                                    p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                                        0,
+                                        entry.height(),
+                                        entry.width(),
+                                        1,
+                                    )));
                                     p.popup();
                                 }
                             }
@@ -831,14 +863,17 @@ pub fn present(
                     }
                 }
             });
-            
+
             // Handle key events for navigation
             let key_controller = gtk::EventControllerKey::new();
             let entry_for_keys = entry.clone();
             let list_box_for_keys = Rc::clone(&list_box_ref);
             let popover_for_keys = Rc::clone(&popover_ref);
             key_controller.connect_key_pressed(move |_, key, _, _| {
-                if let (Some(list), Some(popover)) = (list_box_for_keys.borrow().as_ref(), popover_for_keys.borrow().as_ref()) {
+                if let (Some(list), Some(popover)) = (
+                    list_box_for_keys.borrow().as_ref(),
+                    popover_for_keys.borrow().as_ref(),
+                ) {
                     match key {
                         gtk::gdk::Key::Escape => {
                             popover.popdown();
@@ -855,9 +890,15 @@ pub fn present(
                             if children.is_empty() {
                                 return glib::Propagation::Proceed;
                             }
-                            let current_idx = selected.as_ref().and_then(|r| {
-                                children.iter().position(|c| c.upcast_ref::<glib::Object>() == r.upcast_ref::<glib::Object>())
-                            }).unwrap_or(0);
+                            let current_idx = selected
+                                .as_ref()
+                                .and_then(|r| {
+                                    children.iter().position(|c| {
+                                        c.upcast_ref::<glib::Object>()
+                                            == r.upcast_ref::<glib::Object>()
+                                    })
+                                })
+                                .unwrap_or(0);
                             let new_idx = match key {
                                 gtk::gdk::Key::Up => current_idx.saturating_sub(1),
                                 gtk::gdk::Key::Down => (current_idx + 1).min(children.len() - 1),
@@ -880,11 +921,11 @@ pub fn present(
             entry.add_controller(key_controller);
         }
     };
-    
+
     setup_autocomplete(&to_row);
     setup_autocomplete(&cc_row);
     setup_autocomplete(&bcc_row);
-    
+
     rebuild_attachments(
         &attachment_list,
         &attachments_group,
@@ -934,7 +975,8 @@ pub fn present(
                         }
                     },
                 );
-                rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default()
+                rx.recv_timeout(std::time::Duration::from_millis(100))
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
@@ -960,9 +1002,14 @@ pub fn present(
                             }
                         },
                     );
-                    rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default()
+                    rx.recv_timeout(std::time::Duration::from_millis(100))
+                        .unwrap_or_default()
                 },
-                html_body: if is_html_mode.get() { Some(html_body) } else { None },
+                html_body: if is_html_mode.get() {
+                    Some(html_body)
+                } else {
+                    None
+                },
                 in_reply_to: in_reply_to.clone(),
                 references: references.clone(),
                 draft_key: Some(draft_key.borrow().clone()),
@@ -1416,7 +1463,7 @@ fn save_as_template_dialog(
     let cc_text = cc_row.text().to_string();
     let bcc_text = bcc_row.text().to_string();
     let subject_text = subject_row.text().to_string();
-    
+
     let (tx, rx) = std::sync::mpsc::channel();
     webview.evaluate_javascript(
         "document.body.innerText",
@@ -1430,8 +1477,10 @@ fn save_as_template_dialog(
             }
         },
     );
-    let body_text = rx.recv_timeout(std::time::Duration::from_millis(100)).unwrap_or_default();
-    
+    let body_text = rx
+        .recv_timeout(std::time::Duration::from_millis(100))
+        .unwrap_or_default();
+
     let app = Rc::clone(app);
     let banner = banner.clone();
 

@@ -435,25 +435,32 @@ fn create_plugins_section(state: &Arc<AppState>, events: &ui::Revokers) -> Resul
     ui::append(&panel, &ui::heading3("Plugins")?)?;
     ui::append(
         &panel,
-        &ui::body_text("Lua plugins extend Mailin with custom functionality. Enable or disable plugins here.")?,
+        &ui::body_text(
+            "Lua plugins extend Mailin with custom functionality. Enable or disable plugins here.",
+        )?,
     )?;
 
     let state_clone = Arc::clone(state);
     let events_clone = events.clone();
     let panel_clone = panel.clone();
-    
+
     // Load plugins asynchronously
     let state_for_load = Arc::clone(state);
     let panel_for_load = panel.clone();
-    
+
     // Since we can't easily do async here, we'll load plugins synchronously for now
     // In a full implementation, this would be async
-    let plugins = state_for_load.mailin.list_plugins_blocking().unwrap_or_default();
-    
+    let plugins = state_for_load
+        .mailin
+        .list_plugins_blocking()
+        .unwrap_or_default();
+
     if plugins.is_empty() {
         ui::append(
             &panel,
-            &ui::body_text("No plugins installed. Place plugin directories in the plugins folder to install them.")?,
+            &ui::body_text(
+                "No plugins installed. Place plugin directories in the plugins folder to install them.",
+            )?,
         )?;
         return Ok(panel);
     }

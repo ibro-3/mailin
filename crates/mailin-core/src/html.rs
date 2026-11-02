@@ -224,7 +224,6 @@ pub fn escape(text: &str) -> String {
     escaped
 }
 
-
 /// Sanitize HTML for safe composition.
 /// Removes scripts, event handlers, forms, and other unsafe elements/attributes.
 /// Allows a safe subset of HTML for formatted email composition.
@@ -277,9 +276,25 @@ pub fn sanitize_html(input: &str) -> String {
             // Block dangerous tags entirely
             if matches!(
                 tag_lower.as_str(),
-                "script" | "iframe" | "frame" | "frameset" | "object" | "embed" |
-                "applet" | "form" | "input" | "button" | "select" | "textarea" |
-                "link" | "meta" | "base" | "style" | "svg" | "math" | "noscript"
+                "script"
+                    | "iframe"
+                    | "frame"
+                    | "frameset"
+                    | "object"
+                    | "embed"
+                    | "applet"
+                    | "form"
+                    | "input"
+                    | "button"
+                    | "select"
+                    | "textarea"
+                    | "link"
+                    | "meta"
+                    | "base"
+                    | "style"
+                    | "svg"
+                    | "math"
+                    | "noscript"
             ) {
                 // Skip this entire tag and its content
                 while i < chars.len() && chars[i] != '>' {
@@ -299,10 +314,44 @@ pub fn sanitize_html(input: &str) -> String {
 
             // Allow safe tags - copy the tag with sanitized attributes
             let allowed_tags = [
-                "b", "i", "u", "em", "strong", "a", "p", "br", "div", "span",
-                "ul", "ol", "li", "blockquote", "pre", "code", "h1", "h2", "h3",
-                "h4", "h5", "h6", "img", "table", "thead", "tbody", "tr", "td", "th",
-                "hr", "small", "sub", "sup", "del", "ins", "mark", "cite", "q",
+                "b",
+                "i",
+                "u",
+                "em",
+                "strong",
+                "a",
+                "p",
+                "br",
+                "div",
+                "span",
+                "ul",
+                "ol",
+                "li",
+                "blockquote",
+                "pre",
+                "code",
+                "h1",
+                "h2",
+                "h3",
+                "h4",
+                "h5",
+                "h6",
+                "img",
+                "table",
+                "thead",
+                "tbody",
+                "tr",
+                "td",
+                "th",
+                "hr",
+                "small",
+                "sub",
+                "sup",
+                "del",
+                "ins",
+                "mark",
+                "cite",
+                "q",
             ];
 
             if allowed_tags.contains(&tag_lower.as_str()) {
@@ -382,10 +431,7 @@ fn sanitize_tag_attributes(tag: &str) -> String {
         // Parse the attribute name. Attribute names start only at whitespace
         // boundaries, so `strong` or `one.html` are not mistaken for `on*`.
         let name_start = i;
-        while i < chars.len()
-            && !chars[i].is_whitespace()
-            && !matches!(chars[i], '=' | '>' | '/')
-        {
+        while i < chars.len() && !chars[i].is_whitespace() && !matches!(chars[i], '=' | '>' | '/') {
             i += 1;
         }
         if i == name_start {
@@ -420,9 +466,7 @@ fn sanitize_tag_attributes(tag: &str) -> String {
                 }
             } else {
                 let value_start = cursor;
-                while cursor < chars.len()
-                    && !chars[cursor].is_whitespace()
-                    && chars[cursor] != '>'
+                while cursor < chars.len() && !chars[cursor].is_whitespace() && chars[cursor] != '>'
                 {
                     cursor += 1;
                 }
@@ -439,8 +483,7 @@ fn sanitize_tag_attributes(tag: &str) -> String {
                 || value.starts_with("data:text/html")
         });
         let dangerous = lower.starts_with("on")
-            || (matches!(lower.as_str(), "href" | "src" | "action" | "formaction")
-                && script_url);
+            || (matches!(lower.as_str(), "href" | "src" | "action" | "formaction") && script_url);
         if dangerous {
             continue;
         }

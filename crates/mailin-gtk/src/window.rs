@@ -13,10 +13,10 @@ use std::time::Duration;
 use adw::prelude::*;
 use gdk::{Key, ModifierType};
 use gdk_pixbuf::prelude::*;
+use glib::variant::ToVariant;
 use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
-use glib::variant::ToVariant;
 use mailin_core::{
     Account, AccountId, AttachmentMeta, ClientEvent, Folder, FolderId, FolderRole, MessageHeader,
     MessageId, MessageListDensity, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
@@ -41,8 +41,7 @@ const MAX_PAGE: u32 = 1_000;
 const BREAKPOINT_MOBILE: f64 = 720.0;
 const BREAKPOINT_TABLET: f64 = 1024.0;
 
-#[derive(Debug, Default)]
-#[derive(Clone)]
+#[derive(Debug, Default, Clone)]
 struct Selection {
     account: Option<AccountId>,
     folder: Option<FolderId>,
@@ -238,19 +237,19 @@ impl MainWindow {
             .width_chars(18)
             .build();
         let sync_button = icon_button("view-refresh-symbolic", "Synchronize now (F5)");
-        
+
         // Sync status indicator
         let sync_status = gtk::Image::new();
         sync_status.add_css_class("sync-status-idle");
         sync_status.set_tooltip_text(Some("Sync status: Idle"));
-        
+
         // Scope toggle (Current folder / All mail)
         let scope_button = gtk::ToggleButton::builder()
             .label("Current folder")
             .tooltip_text("Search scope: Current folder / All mail")
             .build();
         scope_button.add_css_class("flat");
-        
+
         // Search history button
         let history_button = icon_button("view-history-symbolic", "Search history");
         history_button.add_css_class("flat");
@@ -842,7 +841,6 @@ impl MainWindow {
             });
         }
 
-
         // Account menu (edit/remove)
         let menu = gio::Menu::new();
         let edit_action = gio::SimpleAction::new("account-edit", None);
@@ -933,22 +931,28 @@ impl MainWindow {
         this.widgets.window.add_action(&outbox_edit_action);
 
         // Notification action: mark as read (accepts "account_id:message_id1,message_id2,..." parameter)
-        let mark_read = gio::SimpleAction::new("notification-mark-read", Some(&glib::VariantTy::STRING));
+        let mark_read =
+            gio::SimpleAction::new("notification-mark-read", Some(&glib::VariantTy::STRING));
         mark_read.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
-                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                let Some(param) = parameter.and_then(|v| v.str()) else {
+                    return;
+                };
                 this.notification_mark_read(&param);
             }
         });
         this.widgets.window.add_action(&mark_read);
 
         // Notification action: archive (accepts "account_id:message_id1,message_id2,..." parameter)
-        let archive = gio::SimpleAction::new("notification-archive", Some(&glib::VariantTy::STRING));
+        let archive =
+            gio::SimpleAction::new("notification-archive", Some(&glib::VariantTy::STRING));
         archive.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
-                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                let Some(param) = parameter.and_then(|v| v.str()) else {
+                    return;
+                };
                 this.notification_archive(&param);
             }
         });
@@ -1100,9 +1104,18 @@ impl MainWindow {
                 if let Some(row) = list_box.row_at_y(y as i32) {
                     let index = row.index() as usize;
                     if let Some(message) = this.messages.borrow().get(index).cloned() {
-                        let is_thread_root = message.thread_reply_count > 0 || (message.thread_root_key.as_ref().is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
+                        let is_thread_root = message.thread_reply_count > 0
+                            || (message
+                                .thread_root_key
+                                .as_ref()
+                                .is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
                         if is_thread_root {
-                            let root_key = message.thread_root_key.as_ref().or(message.message_id.as_ref()).cloned().unwrap_or_default();
+                            let root_key = message
+                                .thread_root_key
+                                .as_ref()
+                                .or(message.message_id.as_ref())
+                                .cloned()
+                                .unwrap_or_default();
                             let mut expanded = this.expanded_threads.borrow_mut();
                             if expanded.contains(&root_key) {
                                 expanded.remove(&root_key);
@@ -1283,11 +1296,8 @@ impl MainWindow {
         // Overflow-menu counterparts of the secondary search controls. They
         // drive the same widgets, so state never diverges between the toolbar
         // and the narrow-window menu.
-        let search_all_action = gio::SimpleAction::new_stateful(
-            "search-all-mail",
-            None,
-            &false.to_variant(),
-        );
+        let search_all_action =
+            gio::SimpleAction::new_stateful("search-all-mail", None, &false.to_variant());
         search_all_action.connect_activate({
             let this = Rc::clone(this);
             move |action, _| {
@@ -1321,9 +1331,7 @@ impl MainWindow {
         });
 
         // Search history popover (attached to history_button)
-        let history_popover = gtk::Popover::builder()
-            .has_arrow(true)
-            .build();
+        let history_popover = gtk::Popover::builder().has_arrow(true).build();
         let history_list = gtk::ListBox::new();
         history_list.set_selection_mode(gtk::SelectionMode::None);
         history_popover.set_child(Some(&history_list));
@@ -1350,7 +1358,10 @@ impl MainWindow {
                         for entry in history {
                             let row = adw::ActionRow::builder()
                                 .title(&entry.query)
-                                .subtitle(&format!("{} ago", format::list_time(now, entry.timestamp)))
+                                .subtitle(&format!(
+                                    "{} ago",
+                                    format::list_time(now, entry.timestamp)
+                                ))
                                 .build();
                             row.add_css_class("search-history-row");
                             row.connect_activated({
@@ -1401,51 +1412,66 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&new_folder_action);
 
-        let rename_folder_action = gio::SimpleAction::new("rename-folder", Some(&glib::VariantTy::STRING));
+        let rename_folder_action =
+            gio::SimpleAction::new("rename-folder", Some(&glib::VariantTy::STRING));
         rename_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
-                let Some(param) = param.and_then(|v| v.str()) else { return };
+                let Some(param) = param.and_then(|v| v.str()) else {
+                    return;
+                };
                 Self::rename_folder(this.clone(), param.to_string())
             }
         });
         this.widgets.window.add_action(&rename_folder_action);
 
-        let delete_folder_action = gio::SimpleAction::new("delete-folder", Some(&glib::VariantTy::STRING));
+        let delete_folder_action =
+            gio::SimpleAction::new("delete-folder", Some(&glib::VariantTy::STRING));
         delete_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
-                let Some(param) = param.and_then(|v| v.str()) else { return };
+                let Some(param) = param.and_then(|v| v.str()) else {
+                    return;
+                };
                 Self::delete_folder(this.clone(), param.to_string())
             }
         });
         this.widgets.window.add_action(&delete_folder_action);
 
-        let subscribe_folder_action = gio::SimpleAction::new("subscribe-folder", Some(&glib::VariantTy::STRING));
+        let subscribe_folder_action =
+            gio::SimpleAction::new("subscribe-folder", Some(&glib::VariantTy::STRING));
         subscribe_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
-                let Some(param) = param.and_then(|v| v.str()) else { return };
+                let Some(param) = param.and_then(|v| v.str()) else {
+                    return;
+                };
                 Self::subscribe_folder(this.clone(), param.to_string(), true)
             }
         });
         this.widgets.window.add_action(&subscribe_folder_action);
 
-        let unsubscribe_folder_action = gio::SimpleAction::new("unsubscribe-folder", Some(&glib::VariantTy::STRING));
+        let unsubscribe_folder_action =
+            gio::SimpleAction::new("unsubscribe-folder", Some(&glib::VariantTy::STRING));
         unsubscribe_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
-                let Some(param) = param.and_then(|v| v.str()) else { return };
+                let Some(param) = param.and_then(|v| v.str()) else {
+                    return;
+                };
                 Self::subscribe_folder(this.clone(), param.to_string(), false)
             }
         });
         this.widgets.window.add_action(&unsubscribe_folder_action);
 
-        let folder_properties_action = gio::SimpleAction::new("folder-properties", Some(&glib::VariantTy::STRING));
+        let folder_properties_action =
+            gio::SimpleAction::new("folder-properties", Some(&glib::VariantTy::STRING));
         folder_properties_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
-                let Some(param) = param.and_then(|v| v.str()) else { return };
+                let Some(param) = param.and_then(|v| v.str()) else {
+                    return;
+                };
                 Self::folder_properties(Rc::clone(&this), param.to_string())
             }
         });
@@ -1521,29 +1547,47 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&sync_action);
 
-        let move_to_folder_action = gio::SimpleAction::new("move-messages-to-folder", Some(&glib::VariantTy::STRING));
+        let move_to_folder_action =
+            gio::SimpleAction::new("move-messages-to-folder", Some(&glib::VariantTy::STRING));
         move_to_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
-                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                let Some(param) = parameter.and_then(|v| v.str()) else {
+                    return;
+                };
                 let mut parts = param.splitn(2, ':');
-                let (Some(folder_str), Some(msg_str)) = (parts.next(), parts.next()) else { return };
-                let Ok(folder_id) = folder_str.parse::<i64>() else { return };
-                let Ok(msg_id) = msg_str.parse::<i64>() else { return };
+                let (Some(folder_str), Some(msg_str)) = (parts.next(), parts.next()) else {
+                    return;
+                };
+                let Ok(folder_id) = folder_str.parse::<i64>() else {
+                    return;
+                };
+                let Ok(msg_id) = msg_str.parse::<i64>() else {
+                    return;
+                };
                 this.move_message_to_folder(MessageId(msg_id), FolderId(folder_id));
             }
         });
         this.widgets.window.add_action(&move_to_folder_action);
 
-        let undo_move_action = gio::SimpleAction::new("undo-move-message", Some(&glib::VariantTy::STRING));
+        let undo_move_action =
+            gio::SimpleAction::new("undo-move-message", Some(&glib::VariantTy::STRING));
         undo_move_action.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
-                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                let Some(param) = parameter.and_then(|v| v.str()) else {
+                    return;
+                };
                 let mut parts = param.splitn(2, ':');
-                let (Some(source_str), Some(msg_str)) = (parts.next(), parts.next()) else { return };
-                let Ok(source_id) = source_str.parse::<i64>() else { return };
-                let Ok(msg_id) = msg_str.parse::<i64>() else { return };
+                let (Some(source_str), Some(msg_str)) = (parts.next(), parts.next()) else {
+                    return;
+                };
+                let Ok(source_id) = source_str.parse::<i64>() else {
+                    return;
+                };
+                let Ok(msg_id) = msg_str.parse::<i64>() else {
+                    return;
+                };
                 this.undo_move_message(FolderId(source_id), MessageId(msg_id));
             }
         });
@@ -1611,7 +1655,9 @@ impl MainWindow {
             keep.and_then(|id| accounts.iter().position(|account| account.id == id))
         {
             // +1 because we inserted "All Accounts" at index 0
-            self.widgets.account_dropdown.set_selected((index + 1) as u32);
+            self.widgets
+                .account_dropdown
+                .set_selected((index + 1) as u32);
         } else if accounts.is_empty() {
             // No accounts, select "All Accounts" (which will show empty)
             self.widgets.account_dropdown.set_selected(0);
@@ -1670,7 +1716,9 @@ impl MainWindow {
             .iter()
             .position(|account| account.id == id)
         {
-            self.widgets.account_dropdown.set_selected((index + 1) as u32); // +1 for "All Accounts"
+            self.widgets
+                .account_dropdown
+                .set_selected((index + 1) as u32); // +1 for "All Accounts"
         }
         self.programmatic.set(false);
         self.update_subtitle();
@@ -1701,7 +1749,9 @@ impl MainWindow {
         let selection = self.selection.borrow();
         if selection.unified_inbox {
             let total_accounts = self.accounts.borrow().len();
-            self.widgets.title.set_subtitle(&format!("Unified Inbox ({} accounts)", total_accounts));
+            self.widgets
+                .title
+                .set_subtitle(&format!("Unified Inbox ({} accounts)", total_accounts));
         } else {
             let account = selection.account;
             let subtitle = account
@@ -1733,25 +1783,27 @@ impl MainWindow {
                 message_count: 0,
                 unread_count: unread_total,
             };
-            
+
             self.programmatic.set(true);
             clear_list(&self.widgets.folder_list);
-            self.widgets.folder_list.append(&folder_row(&unified_folder));
+            self.widgets
+                .folder_list
+                .append(&folder_row(&unified_folder));
             self.widgets.folder_list.select_row(Some(
-                &self.widgets.folder_list.row_at_index(0).expect("row")
+                &self.widgets.folder_list.row_at_index(0).expect("row"),
             ));
             self.widgets.folder_stack.set_visible_child_name("list");
             *self.folders.borrow_mut() = vec![unified_folder];
             self.programmatic.set(false);
             return;
         }
-        
+
         let Some(account_id) = selection.account else {
             self.clear_folders();
             return;
         };
         drop(selection);
-        
+
         let mut folders = match self.app.mailin.list_folders(&account_id) {
             Ok(folders) => folders,
             Err(error) => {
@@ -1910,9 +1962,11 @@ impl MainWindow {
                 0,
             ) {
                 Ok(messages) => {
-                    let title = format!("Unified Inbox ({} accounts)", self.accounts.borrow().len());
+                    let title =
+                        format!("Unified Inbox ({} accounts)", self.accounts.borrow().len());
                     let more = messages.len() as u32 >= limit && limit < MAX_PAGE;
-                    let message_headers: Vec<MessageHeader> = messages.into_iter().map(|(h, _, _)| h).collect();
+                    let message_headers: Vec<MessageHeader> =
+                        messages.into_iter().map(|(h, _, _)| h).collect();
                     self.show_messages(message_headers, title, more);
                 }
                 Err(error) => self.show_error(&error.to_string()),
@@ -1925,11 +1979,27 @@ impl MainWindow {
                 return;
             };
             let search_all_mail = self.selection.borrow().search_all_mail;
-            let folder_id = if search_all_mail { None } else { self.selection.borrow().folder };
-            match self.app.mailin.search_messages(&account_id, folder_id, &query, SEARCH_LIMIT) {
+            let folder_id = if search_all_mail {
+                None
+            } else {
+                self.selection.borrow().folder
+            };
+            match self
+                .app
+                .mailin
+                .search_messages(&account_id, folder_id, &query, SEARCH_LIMIT)
+            {
                 Ok(results) => {
-                    let scope_label = if search_all_mail { "All mail" } else { "Current folder" };
-                    self.show_messages(results, format!("Results for “{query}” ({scope_label})"), false);
+                    let scope_label = if search_all_mail {
+                        "All mail"
+                    } else {
+                        "Current folder"
+                    };
+                    self.show_messages(
+                        results,
+                        format!("Results for “{query}” ({scope_label})"),
+                        false,
+                    );
                 }
                 Err(error) => self.show_error(&error.to_string()),
             }
@@ -2036,7 +2106,12 @@ impl MainWindow {
         for message in &messages {
             let row = message_row(message, now, density);
             if quick_actions_enabled {
-                attach_quick_actions(&row, Rc::clone(&app), quick_action_items.clone(), message.id);
+                attach_quick_actions(
+                    &row,
+                    Rc::clone(&app),
+                    quick_action_items.clone(),
+                    message.id,
+                );
             }
             // Drag source carrying the message id so it can be dropped onto a
             // folder row to move it.
@@ -2044,7 +2119,9 @@ impl MainWindow {
             drag_source.set_actions(gdk::DragAction::MOVE);
             let payload = message.id.to_string();
             drag_source.connect_prepare(move |_, _, _| {
-                Some(gdk::ContentProvider::for_value(&glib::Value::from(payload.clone())))
+                Some(gdk::ContentProvider::for_value(&glib::Value::from(
+                    payload.clone(),
+                )))
             });
             row.add_controller(drag_source);
             self.widgets.message_list.append(&row);
@@ -2095,7 +2172,7 @@ impl MainWindow {
         let selected = self.selection.borrow().message;
         let previous = self.selected_message_ids();
         let now = format::now_unix();
-        
+
         // Fetch thread roots
         let limit = self.selection.borrow().limit.max(self.page_size());
         let roots = match self.app.mailin.store().get_thread_roots(folder_id, limit) {
@@ -2109,7 +2186,7 @@ impl MainWindow {
         // Build flat list: roots + expanded replies
         let mut flat_messages = Vec::new();
         let expanded = self.expanded_threads.borrow();
-        
+
         for root in &roots {
             flat_messages.push(root.clone());
             let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
@@ -2134,22 +2211,29 @@ impl MainWindow {
         let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
         let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
         let app = Rc::clone(&self.app);
-        
+
         for message in &flat_messages {
             let row = message_row(message, now, density);
             if quick_actions_enabled {
-                attach_quick_actions(&row, Rc::clone(&app), quick_action_items.clone(), message.id);
+                attach_quick_actions(
+                    &row,
+                    Rc::clone(&app),
+                    quick_action_items.clone(),
+                    message.id,
+                );
             }
             let drag_source = gtk::DragSource::new();
             drag_source.set_actions(gdk::DragAction::MOVE);
             let payload = message.id.to_string();
             drag_source.connect_prepare(move |_, _, _| {
-                Some(gdk::ContentProvider::for_value(&glib::Value::from(payload.clone())))
+                Some(gdk::ContentProvider::for_value(&glib::Value::from(
+                    payload.clone(),
+                )))
             });
             row.add_controller(drag_source);
             self.widgets.message_list.append(&row);
         }
-        
+
         // Restore selection
         for (index, message) in flat_messages.iter().enumerate() {
             if Some(message.id) != selected && !previous.contains(&message.id) {
@@ -2227,7 +2311,11 @@ impl MainWindow {
         }
         // Add to search history
         if let Some(account) = self.selection.borrow().account {
-            let _ = self.app.mailin.add_search_history(&account, query.clone(), self.selection.borrow().folder);
+            let _ = self.app.mailin.add_search_history(
+                &account,
+                query.clone(),
+                self.selection.borrow().folder,
+            );
         }
         self.refresh_messages();
     }
@@ -2297,7 +2385,10 @@ impl MainWindow {
 
         // Mobile: push to navigation stack and show back button
         if is_mobile {
-            self.selection.borrow_mut().nav_stack.push(NavTarget::MessageReader(message.id));
+            self.selection
+                .borrow_mut()
+                .nav_stack
+                .push(NavTarget::MessageReader(message.id));
             let back_button = &self.widgets.back_button;
             back_button.set_visible(true);
         }
@@ -2629,7 +2720,7 @@ impl MainWindow {
             self.widgets.reader_attachments.set_visible(false);
             return;
         }
-        
+
         // "Download all" button when multiple attachments
         if visible.len() > 1 {
             let download_all_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
@@ -2660,7 +2751,7 @@ impl MainWindow {
             download_all_row.append(&download_all);
             self.widgets.reader_attachments.append(&download_all_row);
         }
-        
+
         for attachment in visible {
             self.widgets
                 .reader_attachments
@@ -2673,30 +2764,30 @@ impl MainWindow {
         let is_image = attachment.mime_type.starts_with("image/");
         let is_pdf = attachment.mime_type == "application/pdf";
         let is_large = attachment.size.map(|s| s > 40_000_000).unwrap_or(false);
-        
+
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         row.add_css_class("card");
         row.set_margin_top(2);
         row.set_margin_bottom(2);
-        
+
         // Preview for images and PDFs
         if is_image || is_pdf {
             if let Ok(preview) = self.attachment_preview(message_id, attachment.clone()) {
                 row.append(&preview);
             }
         }
-        
+
         let icon = gtk::Image::from_icon_name("mail-attachment-symbolic");
         icon.set_pixel_size(16);
         icon.set_margin_start(10);
         row.append(&icon);
-        
+
         let name = gtk::Label::new(Some(&attachment.display_name()));
         name.set_xalign(0.0);
         name.set_hexpand(true);
         name.set_ellipsize(pango::EllipsizeMode::Middle);
         row.append(&name);
-        
+
         if let Some(size) = attachment.size {
             let size_label = gtk::Label::new(Some(&format::file_size(size)));
             size_label.add_css_class("caption");
@@ -2706,7 +2797,7 @@ impl MainWindow {
             }
             row.append(&size_label);
         }
-        
+
         if is_large {
             let warning = gtk::Label::new(Some("⚠ Large file"));
             warning.add_css_class("error");
@@ -2719,7 +2810,7 @@ impl MainWindow {
             }
             row.append(&warning);
         }
-        
+
         let save = gtk::Button::with_label("Save");
         save.add_css_class("flat");
         save.set_margin_end(4);
@@ -2748,13 +2839,17 @@ impl MainWindow {
         row.upcast()
     }
 
-    fn attachment_preview(&self, message_id: MessageId, attachment: AttachmentMeta) -> Result<gtk::Widget, glib::Error> {
+    fn attachment_preview(
+        &self,
+        message_id: MessageId,
+        attachment: AttachmentMeta,
+    ) -> Result<gtk::Widget, glib::Error> {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
         container.set_size_request(60, 60);
-        
+
         let is_image = attachment.mime_type.starts_with("image/");
         let is_pdf = attachment.mime_type == "application/pdf";
-        
+
         if is_image {
             // Image preview - show thumbnail
             if let Ok(Some(data)) = self.app.mailin.attachment(message_id, &attachment.part_id) {
@@ -2778,18 +2873,20 @@ impl MainWindow {
             label.set_halign(gtk::Align::Center);
             container.append(&label);
         }
-        
+
         Ok(container.upcast())
     }
-    
+
     fn bytes_to_pixbuf(bytes: &[u8]) -> Result<gdk_pixbuf::Pixbuf, glib::Error> {
         let loader = gdk_pixbuf::PixbufLoader::new();
         loader.write(bytes)?;
         loader.close()?;
-        loader.pixbuf().ok_or_else(|| glib::Error::new(
-            gdk_pixbuf::PixbufError::InsufficientMemory,
-            "Failed to load pixbuf"
-        ))
+        loader.pixbuf().ok_or_else(|| {
+            glib::Error::new(
+                gdk_pixbuf::PixbufError::InsufficientMemory,
+                "Failed to load pixbuf",
+            )
+        })
     }
 
     /// Finish a save that was waiting for attachment bytes to be downloaded.
@@ -2832,7 +2929,11 @@ impl MainWindow {
         }));
         {
             use gtk::accessible::Property;
-            let name = if flagged { "Remove star" } else { "Star message" };
+            let name = if flagged {
+                "Remove star"
+            } else {
+                "Star message"
+            };
             self.widgets
                 .flag_button
                 .update_property(&[Property::Label(name)]);
@@ -2910,7 +3011,7 @@ impl MainWindow {
         let Ok(account_id) = account_id_str.parse::<AccountId>() else {
             return;
         };
-        
+
         // If message IDs provided, use them; otherwise fetch unread messages from inbox
         let ids: Vec<MessageId> = if !ids_str.is_empty() {
             ids_str
@@ -2920,12 +3021,14 @@ impl MainWindow {
         } else {
             self.get_unread_inbox_messages(account_id)
         };
-        
+
         if ids.is_empty() {
             return;
         }
         // Mark as read by adding \Seen flag
-        self.app.engine.bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+        self.app
+            .engine
+            .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
         self.toast("Marked as read");
     }
 
@@ -2936,7 +3039,7 @@ impl MainWindow {
         let Ok(account_id) = account_id_str.parse::<AccountId>() else {
             return;
         };
-        
+
         // If message IDs provided, use them; otherwise fetch unread messages from inbox
         let ids: Vec<MessageId> = if !ids_str.is_empty() {
             ids_str
@@ -2946,7 +3049,7 @@ impl MainWindow {
         } else {
             self.get_unread_inbox_messages(account_id)
         };
-        
+
         if ids.is_empty() {
             return;
         }
@@ -3324,11 +3427,21 @@ impl MainWindow {
                     if selection.account == Some(account_id) {
                         let sync_status = &self.widgets.sync_status;
                         let (css_class, tooltip) = match status {
-                            mailin_core::model::SyncStatus::Idle => ("sync-status-idle", "Sync status: Idle"),
-                            mailin_core::model::SyncStatus::Syncing => ("sync-status-syncing", "Sync status: Syncing..."),
-                            mailin_core::model::SyncStatus::Connected => ("sync-status-connected", "Sync status: Connected"),
-                            mailin_core::model::SyncStatus::Offline => ("sync-status-offline", "Sync status: Offline"),
-                            mailin_core::model::SyncStatus::Error => ("sync-status-error", "Sync status: Error"),
+                            mailin_core::model::SyncStatus::Idle => {
+                                ("sync-status-idle", "Sync status: Idle")
+                            }
+                            mailin_core::model::SyncStatus::Syncing => {
+                                ("sync-status-syncing", "Sync status: Syncing...")
+                            }
+                            mailin_core::model::SyncStatus::Connected => {
+                                ("sync-status-connected", "Sync status: Connected")
+                            }
+                            mailin_core::model::SyncStatus::Offline => {
+                                ("sync-status-offline", "Sync status: Offline")
+                            }
+                            mailin_core::model::SyncStatus::Error => {
+                                ("sync-status-error", "Sync status: Error")
+                            }
                         };
                         sync_status.remove_css_class("sync-status-idle");
                         sync_status.remove_css_class("sync-status-syncing");
@@ -3441,10 +3554,7 @@ impl MainWindow {
             &format!("app.notification-mark-read::{}", param),
         );
         // Add "Archive" button
-        notification.add_button(
-            "Archive",
-            &format!("app.notification-archive::{}", param),
-        );
+        notification.add_button("Archive", &format!("app.notification-archive::{}", param));
 
         application.send_notification(Some(&format!("mailin-{account_id}")), &notification);
     }
@@ -3498,7 +3608,11 @@ impl MainWindow {
             // pressed.
             let window = self.widgets.window.clone();
             toast.connect_button_clicked(move |_| {
-                let _ = gtk::prelude::WidgetExt::activate_action(&window, "undo-move-message", Some(&param.to_variant()));
+                let _ = gtk::prelude::WidgetExt::activate_action(
+                    &window,
+                    "undo-move-message",
+                    Some(&param.to_variant()),
+                );
             });
             self.widgets.toast.add_toast(toast);
         }
@@ -3728,9 +3842,7 @@ impl MainWindow {
         let app = this.app.clone();
         let this = Rc::clone(&this);
         glib::spawn_future_local(async move {
-            let response = confirm
-                .choose_future(Some(&this.widgets.window))
-                .await;
+            let response = confirm.choose_future(Some(&this.widgets.window)).await;
             if response == Ok(1) {
                 app.engine.delete_folder(folder_id);
                 this.refresh_folders();
@@ -3771,7 +3883,10 @@ impl MainWindow {
             .transient_for(&this.widgets.window)
             .modal(true)
             .heading("Folder properties")
-            .body(format!("Details reported by the server for “{}”.", folder.name))
+            .body(format!(
+                "Details reported by the server for “{}”.",
+                folder.name
+            ))
             .build();
         dialog.add_response("close", "Close");
         dialog.set_default_response(Some("close"));
@@ -4073,7 +4188,7 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     menu_box.set_margin_bottom(6);
     menu_box.set_margin_start(8);
     menu_box.set_margin_end(8);
-    
+
     let actions = [
         ("New Folder", "win.new-folder", false),
         ("Rename Folder", "win.rename-folder", true),
@@ -4093,10 +4208,10 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
         btn.set_halign(gtk::Align::Start);
         menu_box.append(&btn);
     }
-    
+
     popover.set_child(Some(&menu_box));
     popover.set_parent(&row);
-    
+
     let gesture = gtk::GestureClick::new();
     gesture.set_button(0); // Handle all buttons
     let row_for_gesture = row.clone();
@@ -4134,9 +4249,13 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
     use MessageListDensity::{Compact, Cozy};
 
     let seen = message.is_seen();
-    let is_thread_root = message.thread_reply_count > 0 || (message.thread_root_key.as_ref().is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
+    let is_thread_root = message.thread_reply_count > 0
+        || (message
+            .thread_root_key
+            .as_ref()
+            .is_some_and(|k| k == message.message_id.as_deref().unwrap_or("")));
     let depth = message.thread_depth;
-    
+
     let row = gtk::ListBoxRow::new();
     let outer = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let (margin_vertical, margin_horizontal, spacing, show_snippet) = match density {
@@ -4257,7 +4376,11 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
     let summary = format!(
         "{}{}{}{} — {}",
         if seen { "" } else { "Unread. " },
-        if message.is_flagged() { "Starred. " } else { "" },
+        if message.is_flagged() {
+            "Starred. "
+        } else {
+            ""
+        },
         if message.has_attachments {
             "Has attachments. "
         } else {

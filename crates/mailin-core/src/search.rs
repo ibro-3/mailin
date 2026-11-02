@@ -142,21 +142,17 @@ fn apply_field(query: &mut SearchQuery, field: String, value: String) {
         "to" => query.filters.to = Some(value),
         "subject" => query.filters.subject = Some(value),
         "cc" => query.filters.cc = Some(value),
-        "has" => {
-            match value.as_str() {
-                "attachment" | "attachments" => query.filters.has_attachment = Some(true),
-                _ => query.fts_terms.push(format!("has:{}", value)),
-            }
-        }
-        "is" => {
-            match value.as_str() {
-                "unread" => query.filters.is_unread = Some(true),
-                "read" => query.filters.is_unread = Some(false),
-                "flagged" | "starred" => query.filters.is_flagged = Some(true),
-                "unflagged" | "unstarred" => query.filters.is_flagged = Some(false),
-                _ => query.fts_terms.push(format!("is:{}", value)),
-            }
-        }
+        "has" => match value.as_str() {
+            "attachment" | "attachments" => query.filters.has_attachment = Some(true),
+            _ => query.fts_terms.push(format!("has:{}", value)),
+        },
+        "is" => match value.as_str() {
+            "unread" => query.filters.is_unread = Some(true),
+            "read" => query.filters.is_unread = Some(false),
+            "flagged" | "starred" => query.filters.is_flagged = Some(true),
+            "unflagged" | "unstarred" => query.filters.is_flagged = Some(false),
+            _ => query.fts_terms.push(format!("is:{}", value)),
+        },
         "before" => {
             if let Ok(date) = parse_date(&value) {
                 query.filters.before = Some(date);
@@ -198,11 +194,7 @@ pub fn build_fts_query(terms: &[String]) -> Option<String> {
     // Escape special FTS5 characters
     let escaped: Vec<String> = terms
         .iter()
-        .map(|t| {
-            t.replace('"', "\"\"")
-                .replace('*', "")
-                .replace('?', "")
-        })
+        .map(|t| t.replace('"', "\"\"").replace('*', "").replace('?', ""))
         .collect();
 
     Some(escaped.join(" "))

@@ -63,33 +63,25 @@ impl PluginSystem {
         // mailin.config.get(key)
         api.set(
             "config_get",
-            lua.create_function(|_, key: String| {
-                Ok(Value::Nil)
-            })?,
+            lua.create_function(|_, key: String| Ok(Value::Nil))?,
         )?;
 
         // mailin.accounts.list()
         api.set(
             "accounts_list",
-            lua.create_function(|lua, ()| {
-                Ok(lua.create_table()?)
-            })?,
+            lua.create_function(|lua, ()| Ok(lua.create_table()?))?,
         )?;
 
         // mailin.messages.query(filter)
         api.set(
             "messages_query",
-            lua.create_function(|lua, _filter: Table| {
-                Ok(lua.create_table()?)
-            })?,
+            lua.create_function(|lua, _filter: Table| Ok(lua.create_table()?))?,
         )?;
 
         // mailin.rules.add(action)
         api.set(
             "rules_add",
-            lua.create_function(|_, _action: Table| {
-                Ok(Value::Nil)
-            })?,
+            lua.create_function(|_, _action: Table| Ok(Value::Nil))?,
         )?;
 
         // mailin.ui.notify(title, body)
@@ -114,15 +106,11 @@ impl PluginSystem {
         let storage = lua.create_table()?;
         storage.set(
             "get",
-            lua.create_function(|_, _key: String| {
-                Ok(Value::Nil)
-            })?,
+            lua.create_function(|_, _key: String| Ok(Value::Nil))?,
         )?;
         storage.set(
             "set",
-            lua.create_function(|_, (_key, _value): (String, Value)| {
-                Ok(())
-            })?,
+            lua.create_function(|_, (_key, _value): (String, Value)| Ok(()))?,
         )?;
         api.set("storage", storage)?;
 
@@ -130,9 +118,7 @@ impl PluginSystem {
         let events = lua.create_table()?;
         events.set(
             "on",
-            lua.create_function(|_, (_event_name, _handler): (String, Value)| {
-                Ok(())
-            })?,
+            lua.create_function(|_, (_event_name, _handler): (String, Value)| Ok(()))?,
         )?;
         api.set("events", events)?;
 
@@ -143,7 +129,8 @@ impl PluginSystem {
             lua.create_function(|lua, url: String| {
                 let resp = reqwest::blocking::get(&url)
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-                let text = resp.text()
+                let text = resp
+                    .text()
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
                 Ok(lua.create_string(&text)?)
             })?,
@@ -152,9 +139,13 @@ impl PluginSystem {
             "post",
             lua.create_function(|lua, (url, body): (String, String)| {
                 let client = reqwest::blocking::Client::new();
-                let resp = client.post(&url).body(body).send()
+                let resp = client
+                    .post(&url)
+                    .body(body)
+                    .send()
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-                let text = resp.text()
+                let text = resp
+                    .text()
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
                 Ok(lua.create_string(&text)?)
             })?,
@@ -211,7 +202,10 @@ impl PluginSystem {
     async fn load_plugin_lua(&self, plugin: &Plugin) -> Result<()> {
         let plugin_path = PathBuf::from(&plugin.source_path);
         if !plugin_path.exists() {
-            return Err(Error::Config(format!("Plugin source not found: {}", plugin.source_path)));
+            return Err(Error::Config(format!(
+                "Plugin source not found: {}",
+                plugin.source_path
+            )));
         }
         self.load_plugin_from_dir(&plugin_path).await
     }
@@ -232,21 +226,32 @@ impl PluginSystem {
         // Execute the plugin in the sandboxed Lua state
         {
             let lua = self.lua.lock().unwrap();
-            lua.load(&script).set_mode(ChunkMode::Text).exec()
+            lua.load(&script)
+                .set_mode(ChunkMode::Text)
+                .exec()
                 .map_err(|e| Error::Plugin(e.to_string()))?;
         }
 
-        let name = manifest.get("name")
+        let name = manifest
+            .get("name")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| plugin_dir.file_name().unwrap().to_string_lossy().to_string());
+            .unwrap_or_else(|| {
+                plugin_dir
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            });
 
-        let version = manifest.get("version")
+        let version = manifest
+            .get("version")
             .and_then(|v| v.as_str())
             .unwrap_or("0.1.0")
             .to_string();
 
-        let permissions = manifest.get("permissions")
+        let permissions = manifest
+            .get("permissions")
             .and_then(|v| v.as_array())
             .map(|arr| serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string()))
             .unwrap_or_else(|| "[]".to_string());
@@ -321,9 +326,11 @@ impl PluginSystem {
     pub async fn run_hook(&self, hook: &str, args: Value) -> Result<Value> {
         let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
-        let hook_fn: mlua::Function = globals.get(hook)
+        let hook_fn: mlua::Function = globals
+            .get(hook)
             .map_err(|e| Error::Plugin(e.to_string()))?;
-        let result = hook_fn.call(args)
+        let result = hook_fn
+            .call(args)
             .map_err(|e| Error::Plugin(format!("Hook {} failed: {}", hook, e)))?;
         Ok(result)
     }
@@ -338,13 +345,19 @@ impl PluginSystem {
 
         let lua = self.lua.lock().unwrap();
         let globals = lua.globals();
-        let plugin_table: Table = globals.get(plugin_name)
+        let plugin_table: Table = globals
+            .get(plugin_name)
             .map_err(|e| Error::Plugin(e.to_string()))?;
         let func_name = func;
-        let func: mlua::Function = plugin_table.get(func_name)
+        let func: mlua::Function = plugin_table
+            .get(func_name)
             .map_err(|e| Error::Plugin(e.to_string()))?;
-        let result = func.call(args)
-            .map_err(|e| Error::Plugin(format!("Plugin '{}' function '{}' failed: {}", plugin_name, func_name, e)))?;
+        let result = func.call(args).map_err(|e| {
+            Error::Plugin(format!(
+                "Plugin '{}' function '{}' failed: {}",
+                plugin_name, func_name, e
+            ))
+        })?;
         Ok(result)
     }
 }
@@ -353,7 +366,10 @@ impl PluginSystem {
 static PLUGIN_SYSTEM: tokio::sync::OnceCell<Arc<PluginSystem>> = tokio::sync::OnceCell::const_new();
 
 /// Initialize the global plugin system.
-pub async fn init_plugin_system(store: &Store, data_dir: impl AsRef<Path>) -> Result<Arc<PluginSystem>> {
+pub async fn init_plugin_system(
+    store: &Store,
+    data_dir: impl AsRef<Path>,
+) -> Result<Arc<PluginSystem>> {
     let store = Arc::new(store.clone());
     let system = Arc::new(PluginSystem::new(store, data_dir)?);
     system.load_all().await?;

@@ -18,6 +18,7 @@ pub(crate) struct ParsedHeader {
     pub sent_at: Option<i64>,
     pub message_id: Option<String>,
     pub thread_key: Option<String>,
+    pub references: Option<String>, // Full References header for thread depth
 }
 
 /// An OpenPGP/MIME payload found while parsing a message.
@@ -153,6 +154,14 @@ fn header_from(message: &Message<'_>) -> ParsedHeader {
         })
         .unwrap_or_default();
 
+    // Extract full References header for thread depth computation
+    let references = message.references().as_text_list().map(|list| {
+        list.iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+
     ParsedHeader {
         subject: message.subject().unwrap_or_default().to_owned(),
         from_name,
@@ -162,6 +171,7 @@ fn header_from(message: &Message<'_>) -> ParsedHeader {
         sent_at: message.date().map(|date| date.to_timestamp()),
         message_id: message.message_id().map(str::to_owned),
         thread_key: thread_key(message),
+        references,
     }
 }
 
@@ -335,10 +345,11 @@ mod tests {
         assert_eq!(pgp.kind, PgpMimeKind::Signed);
         assert!(pgp.payload.contains("Content-Type: text/plain"));
         assert!(!pgp.payload.contains("Subject:"));
-        assert!(pgp
-            .signature
-            .expect("signature")
-            .contains("BEGIN PGP SIGNATURE"));
+        assert!(
+            pgp.signature
+                .expect("signature")
+                .contains("BEGIN PGP SIGNATURE")
+        );
     }
 
     #[test]

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use mailin_core::autoconfig::{self, Suggestion};
 use mailin_core::{
-    Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
-    ServerSettings,
+    Account, AccountId, AuthMethod, Contact, OAuth2Tokens, OAuthProvider, PendingAuthorization,
+    Security, ServerSettings,
 };
 use mailin_winui_sys::{ComboBox, Grid, PasswordBox, TextBlock, TextBox, Window};
 use secrecy::SecretString;
@@ -116,8 +116,9 @@ struct FormRows {
     smtp_security: ComboBox,
     signature: TextBox,
     signature_html: TextBox,
-    trust_list: mailin_winui_sys::ListView,
+    trust_container: mailin_winui_sys::StackPanel,
     allowlist: Arc<Mutex<Vec<String>>>,
+    contacts_container: mailin_winui_sys::StackPanel,
 }
 
 impl FormRows {
@@ -228,14 +229,18 @@ pub fn present(
     let oauth_panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical)?;
     let oauth_provider = ui::combo(&provider_labels(), 0, Some("OAuth2 provider"))?;
     let oauth_client_id = ui::text_box("OAuth2 client ID", Some("OAuth2 client ID"))?;
-    let oauth_sign_in = ui::button("Sign in with browser…", Some("Sign in with browser"), Some("Sign in with your mail provider via browser"))?;
+    let oauth_sign_in = ui::button(
+        "Sign in with browser…",
+        Some("Sign in with browser"),
+        Some("Sign in with your mail provider via browser"),
+    )?;
     let oauth_status = ui::text("")?;
     // Live region for sign-in status announcements
-    AutomationProperties::SetLiveSetting(&oauth_status, mailin_winui_sys::AutomationLiveSetting::Polite)?;
-    ui::append(
-        &oauth_panel,
-        &ui::subheading("OAuth2 sign-in")?,
+    AutomationProperties::SetLiveSetting(
+        &oauth_status,
+        mailin_winui_sys::AutomationLiveSetting::Polite,
     )?;
+    ui::append(&oauth_panel, &ui::subheading("OAuth2 sign-in")?)?;
     ui::append(&oauth_panel, &ui::field("Provider", &oauth_provider)?)?;
     ui::append(
         &oauth_panel,
@@ -303,6 +308,19 @@ pub fn present(
     trust_list.SetHeight(120.0)?;
     ui::append(&form, &trust_list)?;
 
+    // Contacts manager: per-account contacts for compose autocomplete.
+    let contacts_heading = ui::subheading("Contacts")?;
+    let contacts_desc = ui::body_text(
+        "Manage contacts for autocomplete in compose. Auto-seeded from mail or added manually.",
+    )?;
+    ui::append(&form, &contacts_heading)?;
+    ui::append(&form, &contacts_desc)?;
+    let contacts_list =
+        mailin_winui_sys::ListView::new().context("could not create the contacts list")?;
+    contacts_list.SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
+    contacts_list.SetHeight(120.0)?;
+    ui::append(&form, &contacts_list)?;
+
     let scroller = ui::scroll(&form)?;
     ui::set_row(&scroller, 1)?;
     ui::append(&root, &scroller)?;
@@ -312,16 +330,27 @@ pub fn present(
     ui::margin_vertical(&footer, 8.0)?;
     let error: TextBlock = ui::text("")?;
     // Live region for validation/connection error announcements
-    AutomationProperties::SetLiveSetting(&error, mailin_winui_sys::AutomationLiveSetting::Assertive)?;
+    AutomationProperties::SetLiveSetting(
+        &error,
+        mailin_winui_sys::AutomationLiveSetting::Assertive,
+    )?;
     ui::set_visible(&error, false)?;
     ui::append(&footer, &error)?;
     let spacer = ui::text("")?;
     ui::stretch_horizontal(&spacer)?;
     ui::append(&footer, &spacer)?;
 
-    let test = ui::button("Test Connection", Some("Test Connection"), Some("Test IMAP and SMTP connection"))?;
+    let test = ui::button(
+        "Test Connection",
+        Some("Test Connection"),
+        Some("Test IMAP and SMTP connection"),
+    )?;
     let cancel = ui::button("Cancel", Some("Cancel"), Some("Cancel without saving"))?;
-    let save = ui::button(save_label, Some("Save account"), Some("Save account settings"))?;
+    let save = ui::button(
+        save_label,
+        Some("Save account"),
+        Some("Save account settings"),
+    )?;
 
     // Remove button for edit mode
     let remove = match mode {
@@ -397,6 +426,111 @@ pub fn present(
         }
     }
     repopulate_trust_list(&trust_container, &allowlist)?;
+
+    // Contacts container: a vertical stack of rows (email + name + edit/remove buttons)
+    let contacts_container = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&form, &contacts_container)?;
+
+    // Helper to rebuild the contacts list UI
+    fn repopulate_contacts_list(
+        contacts_container: &mailin_winui_sys::StackPanel,
+        app: &Arc<AppState>,
+        account_id: AccountId,
+        window: &Window,
+        revokers: &ui::Revokers,
+    ) -> Result<()> {
+        let children = contacts_container.Children().expect("Children");
+        let _ = children.Clear();
+        if let Ok(contacts) = app.mailin.store().list_contacts(&account_id) {
+            for contact in contacts {
+                let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+                let labels = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+                let email_label = ui::text(&contact.email)?;
+                ui::append(&labels, &email_label)?;
+                if !contact.display_name.is_empty() {
+                    let name_label = ui::caption(&contact.display_name)?;
+                    ui::append(&labels, &name_label)?;
+                }
+                ui::stretch_horizontal(&labels)?;
+                ui::append(&row, &labels)?;
+
+                let edit = ui::button(
+                    "Edit",
+                    Some(&format!("Edit contact {}", contact.email)),
+                    Some("Edit this contact"),
+                )?;
+                let tokens = design_tokens::tokens();
+                edit.SetPadding(mailin_winui_sys::Thickness::new(
+                    tokens.spacing.xs,
+                    2.0,
+                    tokens.spacing.xs,
+                    2.0,
+                ))?;
+                ui::append(&row, &edit)?;
+
+                let remove = ui::button(
+                    "Remove",
+                    Some(&format!("Remove contact {}", contact.email)),
+                    Some("Delete this contact"),
+                )?;
+                remove.SetPadding(mailin_winui_sys::Thickness::new(
+                    tokens.spacing.xs,
+                    2.0,
+                    tokens.spacing.xs,
+                    2.0,
+                ))?;
+                ui::append(&row, &remove)?;
+
+                children.Append(&row)?;
+
+                let app = Arc::clone(app);
+                let contacts_container = contacts_container.clone();
+                let window = window.clone();
+                let revokers = revokers.clone();
+                let account_id = account_id;
+                let contact_email = contact.email.clone();
+                let contact_name = contact.display_name.clone();
+                ui::on_click(&edit, move || {
+                    if let Err(failure) = new_contact_dialog(
+                        &window,
+                        Arc::clone(&app),
+                        account_id,
+                        &contact_email,
+                        &contact_name,
+                        true, // is_edit
+                    ) {
+                        tracing::error!(%failure, "could not open edit contact dialog");
+                    }
+                })?;
+
+                let app = Arc::clone(app);
+                let contacts_container = contacts_container.clone();
+                let window = window.clone();
+                let revokers = revokers.clone();
+                let account_id = account_id;
+                let contact_email = contact.email.clone();
+                ui::on_click(&remove, move || {
+                    if let Err(failure) = app
+                        .mailin
+                        .store()
+                        .delete_contact(&account_id, &contact_email)
+                    {
+                        tracing::error!(%failure, "could not delete contact");
+                    } else {
+                        let _ = repopulate_contacts_list(
+                            &contacts_container,
+                            &app,
+                            account_id,
+                            &window,
+                            &revokers,
+                        );
+                    }
+                })?;
+            }
+        }
+        Ok(())
+    }
+    repopulate_contacts_list(&contacts_container, &app, account_id, &window, &revokers)?;
 
     // Pre-fill form if editing
     if let Some(account) = existing_account.clone() {
@@ -568,6 +702,7 @@ pub fn present(
         signature_html,
         trust_container,
         allowlist: Arc::clone(&allowlist),
+        contacts_container,
     };
     revokers.keep(ui::on_text_changed(&rows.email, {
         let rows_email = rows.email.clone();
@@ -884,6 +1019,80 @@ fn provider_at(index: usize) -> OAuthProvider {
         4 => OAuthProvider::Custom,
         _ => OAuthProvider::Google,
     }
+}
+
+/// Dialog to create or edit a contact.
+fn new_contact_dialog(
+    parent: &Window,
+    app: &Arc<AppState>,
+    account_id: AccountId,
+    current_email: &str,
+    current_name: &str,
+    is_edit: bool,
+) -> Result<()> {
+    let (title, save_label) = if is_edit {
+        ("Edit Contact", "Save")
+    } else {
+        ("New Contact", "Add")
+    };
+
+    let dialog = mailin_winui_sys::ContentDialog::new()?;
+    dialog.SetTitle(title)?;
+    dialog.SetPrimaryButtonText(save_label)?;
+    dialog.SetCloseButtonText("Cancel")?;
+    dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Primary)?;
+
+    let panel = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
+    ui::margin_lg(&panel)?;
+    ui::margin_vertical(&panel, 8.0)?;
+
+    let email_label = ui::text("Email")?;
+    let email_box = ui::text_box(current_email, Some("Email address"))?;
+    ui::append(&panel, &email_label)?;
+    ui::append(&panel, &email_box)?;
+
+    let name_label = ui::text("Display name (optional)")?;
+    let name_box = ui::text_box(current_name, Some("Display name"))?;
+    ui::append(&panel, &name_label)?;
+    ui::append(&panel, &name_box)?;
+
+    ui::set_content(&dialog, &panel)?;
+
+    let app = Arc::clone(app);
+    let parent = parent.clone();
+    let account_id = account_id;
+    let current_email = current_email.to_owned();
+
+    dialog.PrimaryButtonClick({
+        let dialog = dialog.clone();
+        let email_box = email_box.clone();
+        let name_box = name_box.clone();
+        let app = Arc::clone(&app);
+        let parent = parent.clone();
+        let account_id = account_id;
+        let current_email = current_email.clone();
+        move |_, _| {
+            let email = ui::text_value(&email_box).trim().to_owned();
+            let display_name = ui::text_value(&name_box);
+            if !email.is_empty() && email.contains('@') {
+                // If editing and email changed, delete old contact
+                if is_edit && email != current_email {
+                    let _ = app
+                        .mailin
+                        .store()
+                        .delete_contact(&account_id, &current_email);
+                }
+                let _ = app
+                    .mailin
+                    .store()
+                    .upsert_contact(&account_id, &email, &display_name, true);
+            }
+            let _ = dialog.Hide();
+        }
+    })?;
+
+    let _ = dialog.ShowAsync()?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -14,10 +14,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mailin_core::{
-    Account, AccountId, AuthMethod, Engine, Mailin, MemoryCredentials, MessageHeader, OAuth2Tokens,
-    OutgoingEnvelope, Security, ServerSettings, Store,
+    Account, AccountId, AuthMethod, Config, Engine, Mailin, MemoryCredentials, MessageHeader,
+    OAuth2Tokens, OutgoingEnvelope, Security, ServerSettings, Store,
 };
+use mailin_core::config::Paths;
 use secrecy::SecretString;
+use tempfile;
 
 const ADDRESS: &str = "ada@example.com";
 const LOGIN: &str = "ada";
@@ -39,9 +41,15 @@ fn host_and_port(value: &str) -> (String, u16) {
 
 fn client() -> (Arc<Store>, Arc<Mailin>) {
     let store = Arc::new(Store::open_in_memory().expect("in-memory store"));
+    let paths = Paths::with_root(tempfile::tempdir().expect("temp dir").path());
+    let config = Config::default();
+    let config_cache = Arc::new(std::sync::RwLock::new(Some(config)));
+    let config_paths = Arc::new(paths);
     let mailin = Arc::new(Mailin::with_parts(
         store.clone(),
         Arc::new(MemoryCredentials::new()),
+        config_cache,
+        config_paths,
     ));
     (store, mailin)
 }

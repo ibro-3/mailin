@@ -11,6 +11,7 @@ use crate::error::Result;
 use crate::imap::{ImapSession, RemoteFolder, RemoteHeader};
 use crate::model::{Folder, FolderRole, FolderSyncState, NewMessage};
 use crate::store::FolderUpsert;
+use mailparse::addrparse;
 
 /// Header fetches are batched to keep single IMAP responses modest.
 const HEADER_CHUNK: usize = 50;
@@ -19,25 +20,26 @@ const HEADER_CHUNK: usize = 50;
 const FLAG_REFRESH_LIMIT: usize = 50_000;
 
 /// Parse a comma-separated address list into individual email addresses.
-/// Handles "Name <email>" format and bare emails.
+/// Handles "Name <email>" format, quoted names with commas, and bare emails.
 pub(crate) fn parse_address_list(input: &str) -> Vec<String> {
-    let mut addresses = Vec::new();
-    for token in input.split(',') {
-        let token = token.trim();
-        if token.is_empty() {
-            continue;
-        }
-        // Extract email from "Name <email>" format
-        let email = if let Some((_, rest)) = token.rsplit_once('<') {
-            rest.trim_end().trim_end_matches('>').trim().to_string()
-        } else {
-            token.to_string()
-        };
-        if !email.is_empty() && !email.contains(char::is_whitespace) {
-            addresses.push(email.to_lowercase());
+    let addrs = match mailparse::addrparse(input) {
+        Ok(list) => list,
+        Err(_) => return Vec::new(),
+    };
+    let mut result = Vec::new();
+    for addr in &*addrs {  // Deref to Vec<MailAddr>
+        match addr {
+            mailparse::MailAddr::Single(info) => {
+                result.push(info.addr.to_lowercase());
+            }
+            mailparse::MailAddr::Group(group) => {
+                for info in &group.addrs {
+                    result.push(info.addr.to_lowercase());
+                }
+            }
         }
     }
-    addresses
+    result
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,15 +185,21 @@ pub(crate) async fn sync_folder(
             // From address
             if let Some(addr) = &message.from_addr {
                 let name = message.from_name.as_deref().unwrap_or("");
-                let _ = mailbox.store().upsert_contact(&account_id, addr, name, false);
+                let _ = mailbox
+                    .store()
+                    .upsert_contact(&account_id, addr, name, false);
             }
             // To addresses
             for addr in parse_address_list(&message.to_addrs) {
-                let _ = mailbox.store().upsert_contact(&account_id, &addr, "", false);
+                let _ = mailbox
+                    .store()
+                    .upsert_contact(&account_id, &addr, "", false);
             }
             // Cc addresses
             for addr in parse_address_list(&message.cc_addrs) {
-                let _ = mailbox.store().upsert_contact(&account_id, &addr, "", false);
+                let _ = mailbox
+                    .store()
+                    .upsert_contact(&account_id, &addr, "", false);
             }
         }
     }
@@ -260,7 +268,11 @@ pub(crate) fn message_from_header(
         uid: header.uid,
         message_id: parsed.message_id.clone(),
         thread_key: parsed.thread_key.clone(),
-        thread_root_key: parsed.thread_key.clone().or_else(|| parsed.message_id.clone()),
+        thread_root_key: parsed
+            .thread_key
+            .clone()
+            .or_else(|| parsed.message_id.clone()),
+        references: parsed.references.clone(),
         subject: parsed.subject.clone(),
         from_name: parsed.from_name.clone(),
         from_addr: parsed.from_addr.clone(),

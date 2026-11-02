@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::account::{AccountId, Account};
+use crate::account::{Account, AccountId};
 use crate::error::{Error, Result};
 use crate::model::FolderId;
 
@@ -58,12 +58,12 @@ impl Paths {
     /// Assumes standard layout: data_dir/mailin.db, sibling config_dir/config.toml
     pub fn from_database_file(db_path: impl AsRef<Path>) -> Result<Self> {
         let db_path = db_path.as_ref();
-        let data_dir = db_path.parent().ok_or_else(|| {
-            Error::Config("database file has no parent directory".into())
-        })?;
-        let root = data_dir.parent().ok_or_else(|| {
-            Error::Config("data directory has no parent directory".into())
-        })?;
+        let data_dir = db_path
+            .parent()
+            .ok_or_else(|| Error::Config("database file has no parent directory".into()))?;
+        let root = data_dir
+            .parent()
+            .ok_or_else(|| Error::Config("data directory has no parent directory".into()))?;
         Ok(Self {
             config_dir: root.join("config"),
             data_dir: data_dir.to_path_buf(),

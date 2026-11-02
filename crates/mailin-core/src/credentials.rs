@@ -95,7 +95,11 @@ impl CredentialsStore for MemoryCredentials {
         Ok(())
     }
 
-    fn get_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<Option<SecretString>> {
+    fn get_pgp_secret(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+    ) -> Result<Option<SecretString>> {
         Ok(self
             .pgp_guard()?
             .get(&(*account, fingerprint.to_owned()))
@@ -109,16 +113,27 @@ impl CredentialsStore for MemoryCredentials {
     }
 
     fn set_caldav_password(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
-        self.caldav_secrets.lock().map_err(|_| Error::LockPoisoned)?.insert(*account, secret.clone());
+        self.caldav_secrets
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .insert(*account, secret.clone());
         Ok(())
     }
 
     fn get_caldav_password(&self, account: &AccountId) -> Result<Option<SecretString>> {
-        Ok(self.caldav_secrets.lock().map_err(|_| Error::LockPoisoned)?.get(account).cloned())
+        Ok(self
+            .caldav_secrets
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .get(account)
+            .cloned())
     }
 
     fn delete_caldav_password(&self, account: &AccountId) -> Result<()> {
-        self.caldav_secrets.lock().map_err(|_| Error::LockPoisoned)?.remove(account);
+        self.caldav_secrets
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .remove(account);
         Ok(())
     }
 }
@@ -207,7 +222,11 @@ impl CredentialsStore for KeyringCredentials {
             .map_err(|e| Error::Credentials(e.to_string()))
     }
 
-    fn get_pgp_secret(&self, account: &AccountId, fingerprint: &str) -> Result<Option<SecretString>> {
+    fn get_pgp_secret(
+        &self,
+        account: &AccountId,
+        fingerprint: &str,
+    ) -> Result<Option<SecretString>> {
         match self.entry_pgp(account, fingerprint)?.get_password() {
             Ok(secret) => Ok(Some(SecretString::new(secret.into()))),
             Err(keyring::Error::NoEntry) => Ok(None),

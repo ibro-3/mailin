@@ -88,7 +88,8 @@ pub fn show_preferences(
     appearance_group.add(&density_row);
 
     // Thread mode
-    let thread_mode_combo = gtk::DropDown::from_strings(&["Off (flat list)", "Flat (grouped)", "Nested"]);
+    let thread_mode_combo =
+        gtk::DropDown::from_strings(&["Off (flat list)", "Flat (grouped)", "Nested"]);
     thread_mode_combo.set_selected(match config.borrow().ui.thread_mode {
         ThreadMode::Off => 0,
         ThreadMode::Flat => 1,
@@ -425,7 +426,9 @@ pub fn show_preferences(
 
     let plugins_group = adw::PreferencesGroup::builder()
         .title("Installed Plugins")
-        .description("Lua plugins extend Mailin with custom functionality. Enable or disable plugins here.")
+        .description(
+            "Lua plugins extend Mailin with custom functionality. Enable or disable plugins here.",
+        )
         .build();
 
     // Load plugins asynchronously and populate the group
@@ -443,7 +446,10 @@ pub fn show_preferences(
             for plugin in plugins {
                 let row = adw::ActionRow::builder()
                     .title(gtk::glib::markup_escape_text(&plugin.name))
-                    .subtitle(gtk::glib::markup_escape_text(&format!("v{} · {}", plugin.version, plugin.source_path)))
+                    .subtitle(gtk::glib::markup_escape_text(&format!(
+                        "v{} · {}",
+                        plugin.version, plugin.source_path
+                    )))
                     .build();
                 let toggle = gtk::Switch::new();
                 toggle.set_active(plugin.enabled);

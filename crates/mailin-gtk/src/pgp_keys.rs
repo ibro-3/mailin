@@ -25,10 +25,7 @@ pub fn present(parent: &gtk::Window, app: Rc<AppState>, account: AccountId) {
         .build();
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new(
-        "PGP Keys",
-        &account_row.email,
-    )));
+    header.set_title_widget(Some(&adw::WindowTitle::new("PGP Keys", &account_row.email)));
 
     let import = gtk::Button::with_label("Import");
     import.set_tooltip_text(Some("Import an armored public or secret key"));

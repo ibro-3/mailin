@@ -29,7 +29,13 @@ impl CalDavClient {
     }
 
     /// Make a WebDAV/CalDAV request with basic auth.
-    fn request(&self, method: &str, url: &str, body: Option<&str>, content_type: Option<&str>) -> Result<String> {
+    fn request(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+        content_type: Option<&str>,
+    ) -> Result<String> {
         let method = method.parse::<Method>().unwrap();
         let mut req = http::Request::builder()
             .method(method)
@@ -43,11 +49,20 @@ impl CalDavClient {
         } else {
             req.body(String::new()).unwrap()
         };
-        let resp = self.agent.run(req).map_err(|e| Error::Protocol(format!("HTTP error: {e}")))?;
+        let resp = self
+            .agent
+            .run(req)
+            .map_err(|e| Error::Protocol(format!("HTTP error: {e}")))?;
         let status = resp.status();
-        let body = resp.into_body().read_to_string().map_err(|e| Error::Protocol(format!("Body read error: {e}")))?;
+        let body = resp
+            .into_body()
+            .read_to_string()
+            .map_err(|e| Error::Protocol(format!("Body read error: {e}")))?;
         if !(200..300).contains(&status.as_u16()) {
-            return Err(Error::Protocol(format!("CalDAV error {}: {}", status, body)));
+            return Err(Error::Protocol(format!(
+                "CalDAV error {}: {}",
+                status, body
+            )));
         }
         Ok(body)
     }
@@ -64,7 +79,11 @@ impl CalDavClient {
                     if loc.starts_with("http") {
                         return Ok(loc.to_string());
                     }
-                    return Ok(format!("{}/{}", self.base_url.trim_end_matches('/'), loc.trim_start_matches('/')));
+                    return Ok(format!(
+                        "{}/{}",
+                        self.base_url.trim_end_matches('/'),
+                        loc.trim_start_matches('/')
+                    ));
                 }
             }
         }
@@ -83,7 +102,12 @@ impl CalDavClient {
     <D:getctag/>
   </D:prop>
 </D:propfind>"#;
-        let xml = self.request("PROPFIND", home_url, Some(body), Some("application/xml; charset=utf-8"))?;
+        let xml = self.request(
+            "PROPFIND",
+            home_url,
+            Some(body),
+            Some("application/xml; charset=utf-8"),
+        )?;
         parse_calendar_multistatus(&xml, home_url)
     }
 
@@ -110,14 +134,22 @@ impl CalDavClient {
 </D:propfind>"#
                 .to_string()
         };
-        let xml = self.request("REPORT", calendar_url, Some(&body), Some("application/xml; charset=utf-8"))?;
+        let xml = self.request(
+            "REPORT",
+            calendar_url,
+            Some(&body),
+            Some("application/xml; charset=utf-8"),
+        )?;
         parse_event_multistatus(&xml)
     }
 }
 
 fn basic_auth(username: &str, password: &str) -> String {
     let creds = format!("{}:{}", username, password);
-    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(creds))
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(creds)
+    )
 }
 
 /// Calendar info from CalDAV discovery.
@@ -139,7 +171,8 @@ pub struct EventInfo {
 
 /// Parse PROPFIND multistatus response for calendar listing.
 fn parse_calendar_multistatus(xml: &str, base_url: &str) -> Result<Vec<CalendarInfo>> {
-    let root = Element::parse(xml.as_bytes()).map_err(|e| Error::Protocol(format!("XML parse error: {e}")))?;
+    let root = Element::parse(xml.as_bytes())
+        .map_err(|e| Error::Protocol(format!("XML parse error: {e}")))?;
     let mut calendars = Vec::new();
 
     for response in root.children.iter().filter_map(|c| c.as_element()) {
@@ -169,11 +202,15 @@ fn parse_calendar_multistatus(xml: &str, base_url: &str) -> Result<Vec<CalendarI
                     if let Some(elem) = child.as_element() {
                         match elem.name.as_str() {
                             "href" => href = elem.get_text().unwrap_or_default().into_owned(),
-                            "displayname" => display_name = elem.get_text().unwrap_or_default().into_owned(),
+                            "displayname" => {
+                                display_name = elem.get_text().unwrap_or_default().into_owned()
+                            }
                             "resourcetype" => {
                                 is_calendar = elem.children.iter().any(|c| {
                                     if let Some(e) = c.as_element() {
-                                        e.name == "calendar" && e.namespace.as_deref() == Some("urn:ietf:params:xml:ns:caldav")
+                                        e.name == "calendar"
+                                            && e.namespace.as_deref()
+                                                == Some("urn:ietf:params:xml:ns:caldav")
                                     } else {
                                         false
                                     }
@@ -196,7 +233,11 @@ fn parse_calendar_multistatus(xml: &str, base_url: &str) -> Result<Vec<CalendarI
             }
             calendars.push(CalendarInfo {
                 href,
-                display_name: if display_name.is_empty() { "Unnamed".into() } else { display_name },
+                display_name: if display_name.is_empty() {
+                    "Unnamed".into()
+                } else {
+                    display_name
+                },
                 color,
                 ctag,
             });
@@ -207,7 +248,8 @@ fn parse_calendar_multistatus(xml: &str, base_url: &str) -> Result<Vec<CalendarI
 
 /// Parse REPORT multistatus response for events.
 fn parse_event_multistatus(xml: &str) -> Result<Vec<EventInfo>> {
-    let root = Element::parse(xml.as_bytes()).map_err(|e| Error::Protocol(format!("XML parse error: {e}")))?;
+    let root = Element::parse(xml.as_bytes())
+        .map_err(|e| Error::Protocol(format!("XML parse error: {e}")))?;
     let mut events = Vec::new();
 
     for response in root.children.iter().filter_map(|c| c.as_element()) {
@@ -235,8 +277,16 @@ fn parse_event_multistatus(xml: &str) -> Result<Vec<EventInfo>> {
                     if let Some(elem) = child.as_element() {
                         match elem.name.as_str() {
                             "href" => href = elem.get_text().unwrap_or_default().into_owned(),
-                            "getetag" => etag = elem.get_text().unwrap_or_default().trim_matches('"').to_string(),
-                            "calendar-data" => ical = elem.get_text().unwrap_or_default().into_owned(),
+                            "getetag" => {
+                                etag = elem
+                                    .get_text()
+                                    .unwrap_or_default()
+                                    .trim_matches('"')
+                                    .to_string()
+                            }
+                            "calendar-data" => {
+                                ical = elem.get_text().unwrap_or_default().into_owned()
+                            }
                             _ => {}
                         }
                     }
@@ -325,7 +375,11 @@ pub fn parse_ical_event(ical_data: &str, calendar_id: i64) -> Result<CalendarEve
         id: 0, // Will be assigned by store
         calendar_id,
         uid,
-        summary: if summary.is_empty() { String::new() } else { summary },
+        summary: if summary.is_empty() {
+            String::new()
+        } else {
+            summary
+        },
         start_at: start,
         end_at: end,
         all_day,
@@ -348,7 +402,10 @@ fn parse_ical_property(line: &str) -> (String, String, HashMap<String, Vec<Strin
     for param in &parts[1..] {
         if let Some(eq) = param.find('=') {
             let (k, v) = param.split_at(eq);
-            params.entry(k.to_uppercase()).or_default().push(v[1..].to_string());
+            params
+                .entry(k.to_uppercase())
+                .or_default()
+                .push(v[1..].to_string());
         }
     }
     (name, value.to_string(), params)

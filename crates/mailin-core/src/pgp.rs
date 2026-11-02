@@ -2,15 +2,15 @@
 
 use crate::error::{Error, Result};
 use crate::model::SignatureStatus;
-use sequoia_openpgp as openpgp;
+use openpgp::KeyHandle;
 use openpgp::cert::prelude::*;
-use openpgp::parse::{stream::*, Parse};
+use openpgp::parse::{Parse, stream::*};
 use openpgp::policy::StandardPolicy;
-use openpgp::serialize::stream::{Encryptor2, LiteralWriter, Message, Recipient, Signer};
 use openpgp::serialize::SerializeInto;
+use openpgp::serialize::stream::{Encryptor2, LiteralWriter, Message, Recipient, Signer};
 use openpgp::types::KeyFlags;
 use openpgp::types::SymmetricAlgorithm;
-use openpgp::KeyHandle;
+use sequoia_openpgp as openpgp;
 use sha1::{Digest, Sha1};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -104,9 +104,7 @@ pub fn key_fingerprint(cert: &Cert) -> String {
 
 /// Extract user IDs from a certificate.
 pub fn key_user_ids(cert: &Cert) -> Vec<String> {
-    cert.userids()
-        .map(|uid| uid.userid().to_string())
-        .collect()
+    cert.userids().map(|uid| uid.userid().to_string()).collect()
 }
 
 /// Export the public part of a certificate as armored text.
@@ -165,9 +163,7 @@ pub fn encrypt_message(
     signer_secret: Option<&str>,
 ) -> Result<String> {
     if recipient_certs.is_empty() {
-        return Err(Error::Protocol(
-            "No recipient certificates provided".into(),
-        ));
+        return Err(Error::Protocol("No recipient certificates provided".into()));
     }
 
     // Collect all valid encryption keys from all recipients.
@@ -621,9 +617,13 @@ mod tests {
         let secret_cert = import_secret_key(&secret).unwrap();
 
         let plaintext = "Signed and sealed.";
-        let encrypted =
-            encrypt_message(plaintext, &[cert.clone()], Some(&secret_cert), Some(&secret))
-                .unwrap();
+        let encrypted = encrypt_message(
+            plaintext,
+            &[cert.clone()],
+            Some(&secret_cert),
+            Some(&secret),
+        )
+        .unwrap();
         let (decrypted, status) = decrypt_message(&encrypted, &[secret_cert]).unwrap();
         assert_eq!(decrypted, plaintext);
         assert_eq!(status, SignatureStatus::Valid);

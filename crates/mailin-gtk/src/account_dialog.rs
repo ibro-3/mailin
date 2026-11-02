@@ -9,12 +9,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
+use tempfile;
 
 use adw::prelude::*;
 use gtk::glib;
 use mailin_core::{
-    Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
-    ServerSettings,
+    Account, AccountId, AuthMethod, Config, Mailin, MemoryCredentials, OAuth2Tokens, OAuthProvider,
+    PendingAuthorization, Security, ServerSettings, Store,
 };
 
 use crate::app::AppState;
@@ -233,9 +234,7 @@ pub fn present(
         use gtk::accessible::Property;
         signature_view.update_property(&[Property::Label("Signature")]);
     }
-    let signature_row = adw::ActionRow::builder()
-        .title("Signature")
-        .build();
+    let signature_row = adw::ActionRow::builder().title("Signature").build();
     let signature_scroll = gtk::ScrolledWindow::builder()
         .min_content_height(120)
         .child(&signature_view)
@@ -246,7 +245,9 @@ pub fn present(
 
     let signatures = adw::PreferencesGroup::builder()
         .title("Signature")
-        .description("Plain text and optional HTML signature, appended below the RFC 3676 “-- ” separator.")
+        .description(
+            "Plain text and optional HTML signature, appended below the RFC 3676 “-- ” separator.",
+        )
         .build();
     signatures.add(&signature_row);
 
@@ -267,9 +268,7 @@ pub fn present(
         use gtk::accessible::Property;
         signature_html_view.update_property(&[Property::Label("HTML signature")]);
     }
-    let signature_html_row = adw::ActionRow::builder()
-        .title("HTML signature")
-        .build();
+    let signature_html_row = adw::ActionRow::builder().title("HTML signature").build();
     let signature_html_scroll = gtk::ScrolledWindow::builder()
         .min_content_height(120)
         .child(&signature_html_view)
@@ -326,6 +325,33 @@ pub fn present(
     templates_group.add(&templates_scroll);
     templates_group.set_header_suffix(Some(&templates_add));
 
+    // Contacts manager
+    let contacts_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let contacts_placeholder = gtk::Label::builder()
+        .label("No contacts yet. Contacts are auto-seeded from sent/received mail, or add them manually.")
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["dim-label"])
+        .build();
+    contacts_list.set_placeholder(Some(&contacts_placeholder));
+    let contacts_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(150)
+        .child(&contacts_list)
+        .build();
+    let contacts_add = gtk::Button::with_label("New Contact");
+    contacts_add.add_css_class("suggested-action");
+    let contacts_group = adw::PreferencesGroup::builder()
+        .title("Contacts")
+        .description(
+            "Manage contacts for autocomplete in compose. Auto-seeded from mail or added manually.",
+        )
+        .build();
+    contacts_group.add(&contacts_scroll);
+    contacts_group.set_header_suffix(Some(&contacts_add));
+
     let page = adw::PreferencesPage::new();
     page.add(&identity);
     page.add(&oauth_group);
@@ -334,6 +360,7 @@ pub fn present(
     page.add(&signatures);
     page.add(&trust_group);
     page.add(&templates_group);
+    page.add(&contacts_group);
 
     let header = adw::HeaderBar::new();
     let window_title = adw::WindowTitle::new(title, subtitle);
@@ -750,11 +777,13 @@ pub fn present(
                             row_box.set_margin_bottom(4);
                             row_box.set_margin_start(8);
                             row_box.set_margin_end(4);
-                            row_box.append(&gtk::Label::builder()
-                                .label(&template.name)
-                                .xalign(0.0)
-                                .hexpand(true)
-                                .build());
+                            row_box.append(
+                                &gtk::Label::builder()
+                                    .label(&template.name)
+                                    .xalign(0.0)
+                                    .hexpand(true)
+                                    .build(),
+                            );
                             row_box.append(&edit_btn);
                             row_box.append(&delete_btn);
                             row.set_child(Some(&row_box));
@@ -774,12 +803,25 @@ pub fn present(
                             edit_btn.connect_clicked({
                                 let dialog = dialog.clone();
                                 move |_| {
-                                    edit_template_dialog(&dialog, &app_for_edit, account_id, &template_name_for_edit, &template_subject, &template_body, &error_label_for_edit);
+                                    edit_template_dialog(
+                                        &dialog,
+                                        &app_for_edit,
+                                        account_id,
+                                        &template_name_for_edit,
+                                        &template_subject,
+                                        &template_body,
+                                        &error_label_for_edit,
+                                    );
                                 }
                             });
                             delete_btn.connect_clicked(move |_| {
-                                if let Err(e) = app_for_delete.mailin.store().delete_template(&account_id, &template_name_for_delete) {
-                                    error_label_for_delete.set_text(&format!("Could not delete template: {e}"));
+                                if let Err(e) = app_for_delete
+                                    .mailin
+                                    .store()
+                                    .delete_template(&account_id, &template_name_for_delete)
+                                {
+                                    error_label_for_delete
+                                        .set_text(&format!("Could not delete template: {e}"));
                                     error_label_for_delete.set_visible(true);
                                 } else {
                                     error_label_for_delete.set_visible(false);
@@ -793,6 +835,144 @@ pub fn present(
         }
     };
     refresh_templates();
+
+    // Contacts manager: populate list and handle add/edit/delete
+    // Use Rc<RefCell> to allow the closure to be called from within itself
+    let refresh_contacts: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    {
+        let app = Rc::clone(&app);
+        let account_id = existing_account.as_ref().map(|a| a.id);
+        let contacts_list = contacts_list.clone();
+        let dialog = dialog.clone();
+        let error_label = error_label.clone();
+
+        // Clone refresh_contacts for the main closure and for the sub-closures
+        let refresh_contacts_main = Rc::clone(&refresh_contacts);
+        let refresh_contacts_for_edit = Rc::clone(&refresh_contacts);
+        let refresh_contacts_for_delete = Rc::clone(&refresh_contacts);
+
+        *refresh_contacts_main.borrow_mut() = Some(Box::new(move || {
+            if let Some(account_id) = account_id {
+                while let Some(child) = contacts_list.first_child() {
+                    contacts_list.remove(&child);
+                }
+                if let Ok(contacts) = app.mailin.store().list_contacts(&account_id) {
+                    if contacts.is_empty() {
+                        // Placeholder is shown automatically
+                    } else {
+                        for contact in contacts {
+                            let row = adw::ActionRow::builder()
+                                .title(&contact.email)
+                                .subtitle(if contact.display_name.is_empty() {
+                                    ""
+                                } else {
+                                    &contact.display_name
+                                })
+                                .activatable(true)
+                                .build();
+                            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+                            edit_btn.add_css_class("flat");
+                            edit_btn.set_tooltip_text(Some("Edit contact"));
+                            let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                            delete_btn.add_css_class("flat");
+                            delete_btn.add_css_class("destructive-action");
+                            delete_btn.set_tooltip_text(Some("Delete contact"));
+                            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                            row_box.set_margin_top(4);
+                            row_box.set_margin_bottom(4);
+                            row_box.set_margin_start(8);
+                            row_box.set_margin_end(4);
+                            row_box.append(
+                                &gtk::Label::builder()
+                                    .label(&contact.email)
+                                    .xalign(0.0)
+                                    .hexpand(true)
+                                    .build(),
+                            );
+                            row_box.append(&edit_btn);
+                            row_box.append(&delete_btn);
+                            row.set_child(Some(&row_box));
+
+                            // Clone values for use in both button closures
+                            let app_for_edit = Rc::clone(&app);
+                            let app_for_delete = Rc::clone(&app);
+                            let contacts_list_for_edit = contacts_list.clone();
+                            let contacts_list_for_delete = contacts_list.clone();
+                            let error_label_for_edit = error_label.clone();
+                            let error_label_for_delete = error_label.clone();
+                            let account_id = account_id;
+                            let contact_email_for_edit = contact.email.clone();
+                            let contact_email_for_delete = contact.email.clone();
+                            let contact_name_for_edit = contact.display_name.clone();
+
+                            // Use the pre-cloned refresh_contacts for each button
+                            let refresh_contacts_for_edit = Rc::clone(&refresh_contacts_for_edit);
+                            let refresh_contacts_for_delete =
+                                Rc::clone(&refresh_contacts_for_delete);
+
+                            edit_btn.connect_clicked({
+                                let dialog = dialog.clone();
+                                move |_| {
+                                    if let Some(refresh) =
+                                        refresh_contacts_for_edit.borrow().as_ref()
+                                    {
+                                        refresh();
+                                    }
+                                    edit_contact_dialog(
+                                        &dialog,
+                                        &app_for_edit,
+                                        account_id,
+                                        &contact_email_for_edit,
+                                        &contact_name_for_edit,
+                                        &error_label_for_edit,
+                                        Rc::clone(&refresh_contacts_for_edit),
+                                    );
+                                }
+                            });
+                            delete_btn.connect_clicked(move |_| {
+                                if let Err(e) = app_for_delete
+                                    .mailin
+                                    .store()
+                                    .delete_contact(&account_id, &contact_email_for_delete)
+                                {
+                                    error_label_for_delete
+                                        .set_text(&format!("Could not delete contact: {e}"));
+                                    error_label_for_delete.set_visible(true);
+                                } else {
+                                    error_label_for_delete.set_visible(false);
+                                    if let Some(refresh) =
+                                        refresh_contacts_for_delete.borrow().as_ref()
+                                    {
+                                        refresh();
+                                    }
+                                }
+                            });
+                            contacts_list.append(&row);
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    // Initialize by calling the refresh function
+    if let Some(refresh) = refresh_contacts.borrow().as_ref() {
+        refresh();
+    }
+
+    contacts_add.connect_clicked({
+        let app = Rc::clone(&app);
+        let account_id = existing_account.as_ref().map(|a| a.id);
+        let contacts_list = contacts_list.clone();
+        let dialog = dialog.clone();
+        let error_label = error_label.clone();
+        let refresh = Rc::clone(&refresh_contacts);
+        move |_| {
+            if let Some(account_id) = account_id {
+                let refresh = Rc::clone(&refresh);
+                new_contact_dialog(&dialog, &app, account_id, &error_label, refresh);
+            }
+        }
+    });
 
     templates_add.connect_clicked({
         let app = Rc::clone(&app);
@@ -1101,9 +1281,7 @@ fn new_template_dialog(
         .min_content_height(150)
         .child(&body_view)
         .build();
-    let body_row = adw::ActionRow::builder()
-        .title("Body")
-        .build();
+    let body_row = adw::ActionRow::builder().title("Body").build();
     body_row.add_suffix(&body_scroll);
     body_row.set_activatable(false);
 
@@ -1129,7 +1307,11 @@ fn new_template_dialog(
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
                 .to_string();
             if !name.is_empty() {
-                match app.mailin.store().upsert_template(&account_id, &name, &subject, &body) {
+                match app
+                    .mailin
+                    .store()
+                    .upsert_template(&account_id, &name, &subject, &body)
+                {
                     Ok(_) => {
                         error_label.set_visible(false);
                         refresh();
@@ -1190,9 +1372,7 @@ fn edit_template_dialog(
         .min_content_height(150)
         .child(&body_view)
         .build();
-    let body_row = adw::ActionRow::builder()
-        .title("Body")
-        .build();
+    let body_row = adw::ActionRow::builder().title("Body").build();
     body_row.add_suffix(&body_scroll);
     body_row.set_activatable(false);
 
@@ -1222,12 +1402,161 @@ fn edit_template_dialog(
                 if name != old_name {
                     let _ = app.mailin.store().delete_template(&account_id, &old_name);
                 }
-                match app.mailin.store().upsert_template(&account_id, &name, &subject, &body) {
+                match app
+                    .mailin
+                    .store()
+                    .upsert_template(&account_id, &name, &subject, &body)
+                {
                     Ok(_) => {
                         error_label.set_visible(false);
                     }
                     Err(e) => {
                         error_label.set_text(&format!("Could not save template: {e}"));
+                        error_label.set_visible(true);
+                    }
+                }
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
+/// Dialog to create a new contact.
+fn new_contact_dialog(
+    parent: &adw::Dialog,
+    app: &Rc<AppState>,
+    account_id: AccountId,
+    error_label: &gtk::Label,
+    refresh: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+) {
+    let dialog = adw::MessageDialog::builder()
+        .heading("New Contact")
+        .body("Enter contact details:")
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+
+    let email_entry = adw::EntryRow::builder()
+        .title("Email")
+        .show_apply_button(true)
+        .build();
+    let name_entry = adw::EntryRow::builder()
+        .title("Display name (optional)")
+        .show_apply_button(true)
+        .build();
+
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    container.set_margin_top(12);
+    container.set_margin_bottom(12);
+    container.set_margin_start(12);
+    container.set_margin_end(12);
+    container.append(&email_entry);
+    container.append(&name_entry);
+    dialog.set_extra_child(Some(&container));
+
+    let app = Rc::clone(app);
+    let error_label = error_label.clone();
+    let refresh = Rc::clone(&refresh);
+    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+        if response == "save" {
+            let email = email_entry.text().to_string().trim().to_owned();
+            let display_name = name_entry.text().to_string();
+            if !email.is_empty() && email.contains('@') {
+                match app
+                    .mailin
+                    .store()
+                    .upsert_contact(&account_id, &email, &display_name, true)
+                {
+                    Ok(_) => {
+                        error_label.set_visible(false);
+                        if let Some(r) = refresh.borrow().as_ref() {
+                            r();
+                        }
+                    }
+                    Err(e) => {
+                        error_label.set_text(&format!("Could not save contact: {e}"));
+                        error_label.set_visible(true);
+                    }
+                }
+            }
+        }
+        d.close();
+    });
+
+    dialog.present();
+}
+
+/// Dialog to edit an existing contact.
+fn edit_contact_dialog(
+    parent: &adw::Dialog,
+    app: &Rc<AppState>,
+    account_id: AccountId,
+    current_email: &str,
+    current_name: &str,
+    error_label: &gtk::Label,
+    refresh: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+) {
+    let dialog = adw::MessageDialog::builder()
+        .heading("Edit Contact")
+        .body("Modify contact details:")
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+
+    let email_entry = adw::EntryRow::builder()
+        .title("Email")
+        .show_apply_button(true)
+        .build();
+    email_entry.set_text(current_email);
+    let name_entry = adw::EntryRow::builder()
+        .title("Display name (optional)")
+        .show_apply_button(true)
+        .build();
+    name_entry.set_text(current_name);
+
+    let container = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    container.set_margin_top(12);
+    container.set_margin_bottom(12);
+    container.set_margin_start(12);
+    container.set_margin_end(12);
+    container.append(&email_entry);
+    container.append(&name_entry);
+    dialog.set_extra_child(Some(&container));
+
+    let app = Rc::clone(app);
+    let error_label = error_label.clone();
+    let refresh = Rc::clone(&refresh);
+    let old_email = current_email.to_owned();
+    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+        if response == "save" {
+            let email = email_entry.text().to_string().trim().to_owned();
+            let display_name = name_entry.text().to_string();
+            if !email.is_empty() && email.contains('@') {
+                // Delete old if email changed
+                if email != old_email {
+                    let _ = app.mailin.store().delete_contact(&account_id, &old_email);
+                }
+                match app
+                    .mailin
+                    .store()
+                    .upsert_contact(&account_id, &email, &display_name, true)
+                {
+                    Ok(_) => {
+                        error_label.set_visible(false);
+                        if let Some(r) = refresh.borrow().as_ref() {
+                            r();
+                        }
+                    }
+                    Err(e) => {
+                        error_label.set_text(&format!("Could not save contact: {e}"));
                         error_label.set_visible(true);
                     }
                 }
@@ -1359,9 +1688,15 @@ mod tests {
             .build();
         window.present();
 
+        let paths = crate::config::Paths::with_root(tempfile::tempdir().expect("temp dir").path());
+        let config = Config::default();
+        let config_cache = Arc::new(std::sync::RwLock::new(Some(config)));
+        let config_paths = Arc::new(paths);
         let mailin = Arc::new(Mailin::with_parts(
             Arc::new(Store::open_in_memory().expect("store")),
             Arc::new(MemoryCredentials::new()),
+            config_cache,
+            config_paths,
         ));
         let engine = Engine::start(Arc::clone(&mailin)).expect("engine");
         let app = Rc::new(crate::app::AppState {

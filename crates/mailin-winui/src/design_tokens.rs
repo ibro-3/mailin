@@ -291,7 +291,7 @@ pub fn apply_theme(mode: ThemeMode) {
     let high_contrast = mailin_winui_sys::AccessibilitySettings::new()
         .map(|s| s.HighContrast().unwrap_or(false))
         .unwrap_or(false);
-    
+
     let new_tokens = match mode {
         ThemeMode::System | ThemeMode::Light | ThemeMode::Dark => {
             if high_contrast {

@@ -17,8 +17,8 @@ use mailin_winui_sys::{
     FrameworkElement, Grid, GridLength, GridUnitType, HorizontalAlignment, IButtonBase,
     IContentControl, IControl, IItemsControl, IPanel, ISelector, ITextBox, IUIElement,
     KeyboardAccelerator, Orientation, RowDefinition, ScrollBarVisibility, ScrollViewer,
-    SolidColorBrush, StackPanel, TextBlock, TextBox, TextWrapping, Thickness,
-    VerticalAlignment, Visibility, Window, XamlReader, XamlRoot,
+    SolidColorBrush, StackPanel, TextBlock, TextBox, TextWrapping, Thickness, VerticalAlignment,
+    Visibility, Window, XamlReader, XamlRoot,
 };
 use windows_core::{EventRevoker, Interface};
 
@@ -102,7 +102,10 @@ pub fn heading(
         block.SetFontWeight(FontWeight { weight })?;
     }
     if let Some(level) = heading_level {
-        AutomationProperties::SetHeadingLevel(&block, mailin_winui_sys::AutomationHeadingLevel(level))?;
+        AutomationProperties::SetHeadingLevel(
+            &block,
+            mailin_winui_sys::AutomationHeadingLevel(level),
+        )?;
     }
     Ok(block)
 }
@@ -473,7 +476,9 @@ pub fn pixel_column(grid: &Grid, width: f64) -> Result<()> {
 /// Star-sized column with minimum width (responsive).
 /// Uses GridUnitType::Star with a MinWidth constraint.
 pub fn star_column_min(grid: &Grid, min_width: f64, max_width: f64) -> Result<()> {
-    let column: ColumnDefinition = load(&format!("<ColumnDefinition xmlns=\"{XMLNS}\" MinWidth=\"{min_width}\" />"))?;
+    let column: ColumnDefinition = load(&format!(
+        "<ColumnDefinition xmlns=\"{XMLNS}\" MinWidth=\"{min_width}\" />"
+    ))?;
     if max_width > 0.0 {
         column.SetMaxWidth(max_width)?;
     }
@@ -645,7 +650,10 @@ pub fn padding_xl(element: &impl Interface) -> Result<()> {
 /// Create a text box with a placeholder. The caller decides whether it accepts
 /// newlines with [`TextBox::SetAcceptsReturn`].
 /// `accessible_name` sets the AutomationProperties.Name.
-pub fn text_box(placeholder: &str, accessible_name: Option<&str>) -> Result<mailin_winui_sys::TextBox> {
+pub fn text_box(
+    placeholder: &str,
+    accessible_name: Option<&str>,
+) -> Result<mailin_winui_sys::TextBox> {
     let textbox = mailin_winui_sys::TextBox::new().context("could not create a text box")?;
     textbox.SetPlaceholderText(placeholder)?;
     if let Some(name) = accessible_name {

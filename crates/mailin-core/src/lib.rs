@@ -14,6 +14,7 @@
 
 pub mod account;
 pub mod autoconfig;
+mod caldav;
 pub mod client;
 pub mod compose;
 pub mod config;
@@ -21,14 +22,13 @@ pub mod credentials;
 pub mod engine;
 pub mod error;
 pub mod html;
-mod caldav;
 mod imap;
 pub mod model;
-pub mod search;
 pub mod oauth;
 pub mod pgp;
 pub mod plugins;
 pub mod rules;
+pub mod search;
 mod smtp;
 pub mod store;
 mod sync;
@@ -40,18 +40,23 @@ pub use account::{
 };
 pub use client::{ClientEvent, Event, Mailin};
 pub use compose::{ComposeAttachment, OutgoingMessage};
-pub use config::{Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode, UiPreferences};
+pub use config::{
+    Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode,
+    UiPreferences,
+};
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use model::{
-    AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole, FolderSyncState, MessageHeader,
-    MessageId, NewMessage, OutboxEntry, OutboxState, OutgoingEnvelope, PgpKey, PgpMime, PgpMimeKind, Plugin, Rule, RuleAction, RuleCondition,
-    ScheduledAction, SignatureStatus, SnoozePayload, SyncStatus, Template, VirtualFolder, VirtualFolderKind, UpsertedMessage,
+    AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole,
+    FolderSyncState, MessageHeader, MessageId, NewMessage, OutboxEntry, OutboxState,
+    OutgoingEnvelope, PgpKey, PgpMime, PgpMimeKind, Plugin, Rule, RuleAction, RuleCondition,
+    ScheduledAction, SignatureStatus, SnoozePayload, SyncStatus, Template, UpsertedMessage,
+    VirtualFolder, VirtualFolderKind,
 };
 
-pub use plugins::PluginSystem;
 pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
+pub use plugins::PluginSystem;
 pub use store::{FolderUpsert, Store};
 
 #[cfg(feature = "keyring")]
