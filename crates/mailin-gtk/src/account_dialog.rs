@@ -246,9 +246,38 @@ pub fn present(
 
     let signatures = adw::PreferencesGroup::builder()
         .title("Signature")
-        .description("Plain text, appended below the RFC 3676 “-- ” separator.")
+        .description("Plain text and optional HTML signature, appended below the RFC 3676 “-- ” separator.")
         .build();
     signatures.add(&signature_row);
+
+    // HTML signature: sanitized before it is inserted into a rich composer.
+    let signature_html_view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(6)
+        .bottom_margin(6)
+        .left_margin(6)
+        .right_margin(6)
+        .accepts_tab(false)
+        .build();
+    signature_html_view.set_tooltip_text(Some(
+        "Optional HTML signature used by the rich composer. Scripts and event handlers are removed when composing.",
+    ));
+    let signature_html_buffer = Rc::new(RefCell::new(signature_html_view.buffer()));
+    {
+        use gtk::accessible::Property;
+        signature_html_view.update_property(&[Property::Label("HTML signature")]);
+    }
+    let signature_html_row = adw::ActionRow::builder()
+        .title("HTML signature")
+        .build();
+    let signature_html_scroll = gtk::ScrolledWindow::builder()
+        .min_content_height(120)
+        .child(&signature_html_view)
+        .build();
+    signature_html_scroll.set_valign(gtk::Align::Start);
+    signature_html_row.add_suffix(&signature_html_scroll);
+    signature_html_row.set_activatable(false);
+    signatures.add(&signature_html_row);
 
     // Remote-content allowlist: domains whose images and resources always load.
     let trust_list = gtk::ListBox::builder()
@@ -411,6 +440,9 @@ pub fn present(
         signature_buffer
             .borrow()
             .set_text(account.signature.as_str());
+        signature_html_buffer
+            .borrow()
+            .set_text(account.signature_html.as_str());
 
         let oauth = account.imap.auth_method == AuthMethod::OAuth2;
         auth_method_row.set_selected(auth_index(account.imap.auth_method));
@@ -840,6 +872,13 @@ pub fn present(
                     .to_string()
             };
             account.signature = text;
+            let html = {
+                let buffer = signature_html_buffer.borrow();
+                buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string()
+            };
+            account.signature_html = html;
             account
                 .remote_allowed_domains
                 .clone_from(&allowlist.borrow());

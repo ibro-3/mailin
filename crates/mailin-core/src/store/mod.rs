@@ -782,7 +782,7 @@ impl Store {
             if let Some(key) = root_key {
                 // Count replies
                 let reply_count: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND (thread_root_key != message_id OR thread_root_key IS NULL)",
+                    "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND (message_id IS NULL OR message_id != ?2)",
                     params![folder.0, key],
                     |row| row.get(0),
                 )?;
@@ -807,9 +807,10 @@ impl Store {
         let conn = self.lock()?;
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS}
-             FROM messages
+             FROM messages m
              WHERE thread_root_key = ?1
-             ORDER BY received_at ASC, uid ASC"
+               AND (m.message_id IS NULL OR m.message_id != ?1)
+             ORDER BY m.received_at ASC, m.uid ASC"
         );
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![thread_root_key], map_message)?;
@@ -1854,7 +1855,11 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
     }
 
     let flags = message.flags.join(" ");
-    let thread_root_key = message.thread_root_key.as_ref().or(message.thread_key.as_ref());
+    let thread_root_key = message
+        .thread_root_key
+        .as_ref()
+        .or(message.thread_key.as_ref())
+        .or(message.message_id.as_ref());
     let existing: Option<i64> = tx
         .query_row(
             "SELECT id FROM messages WHERE folder_id = ?1 AND uid = ?2",

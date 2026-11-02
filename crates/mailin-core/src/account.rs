@@ -219,6 +219,10 @@ pub struct Account {
     /// the composer helpers, not stored here.
     #[serde(default)]
     pub signature: String,
+    /// Rich-text signature appended to HTML messages. Sanitized before it is
+    /// inserted into a draft.
+    #[serde(default)]
+    pub signature_html: String,
     /// Sender domains (bare, lowercase) whose remote content is always
     /// rendered for this account.
     #[serde(default)]
@@ -249,6 +253,7 @@ impl Account {
             smtp,
             sync: AccountSyncSettings::default(),
             signature: String::new(),
+            signature_html: String::new(),
             remote_allowed_domains: Vec::new(),
             caldav_url: None,
             caldav_username: None,
@@ -332,6 +337,11 @@ impl Account {
         if self.signature.chars().count() > 4_096 {
             return Err(Error::InvalidAccount(
                 "signature is longer than 4096 characters".to_owned(),
+            ));
+        }
+        if self.signature_html.chars().count() > 8_192 {
+            return Err(Error::InvalidAccount(
+                "signature_html is longer than 8192 characters".to_owned(),
             ));
         }
         Ok(())

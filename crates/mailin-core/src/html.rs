@@ -229,8 +229,6 @@ pub fn escape(text: &str) -> String {
 /// Removes scripts, event handlers, forms, and other unsafe elements/attributes.
 /// Allows a safe subset of HTML for formatted email composition.
 pub fn sanitize_html(input: &str) -> String {
-    use std::borrow::Cow;
-
     // Quick check - if no suspicious content, return as-is
     if !input.contains('<') {
         return input.to_owned();
@@ -347,49 +345,108 @@ pub fn sanitize_html(input: &str) -> String {
     output
 }
 
-/// Sanitize attributes in an HTML tag - remove event handlers, javascript: URLs, etc.
+/// Sanitize attributes in an HTML tag - remove event handlers, `javascript:`
+/// URLs and other active content, while preserving ordinary attributes.
 fn sanitize_tag_attributes(tag: &str) -> String {
-    // Simple approach: remove on* attributes and javascript: URLs
-    let mut result = String::new();
-    let mut i = 0;
     let chars: Vec<char> = tag.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::with_capacity(tag.len());
+    out.push('<');
+    let mut i = 1;
+    // Copy the element name verbatim; only attributes are filtered.
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-' || chars[i] == ':') {
+        out.push(chars[i]);
+        i += 1;
+    }
 
     while i < chars.len() {
-        // Check for event handler attributes (on*)
-        if i + 2 < chars.len() && chars[i] == 'o' && chars[i + 1] == 'n' && chars[i + 2].is_alphabetic() {
-            // Skip this attribute
-            while i < chars.len() && chars[i] != ' ' && chars[i] != '>' && chars[i] != '/' {
-                if chars[i] == '"' || chars[i] == '\'' {
-                    let quote = chars[i];
-                    i += 1;
-                    while i < chars.len() && chars[i] != quote {
-                        i += 1;
-                    }
-                }
-                i += 1;
-            }
+        let character = chars[i];
+        if character == '>' {
+            out.push('>');
+            break;
+        }
+        if character == '/' {
+            out.push('/');
+            i += 1;
+            continue;
+        }
+        if character.is_whitespace() {
+            out.push(' ');
+            i += 1;
             continue;
         }
 
-        // Check for javascript: URLs in href/src
-        if i + 10 < chars.len() {
-            let slice: String = chars[i..i + 11].iter().collect();
-            if slice.to_lowercase().starts_with("href=\"javascript:") ||
-               slice.to_lowercase().starts_with("src=\"javascript:") ||
-               slice.to_lowercase().starts_with("href='javascript:") ||
-               slice.to_lowercase().starts_with("src='javascript:") {
-                // Skip this attribute
-                while i < chars.len() && chars[i] != ' ' && chars[i] != '>' && chars[i] != '/' {
-                    i += 1;
-                }
-                continue;
+        // Parse the attribute name. Attribute names start only at whitespace
+        // boundaries, so `strong` or `one.html` are not mistaken for `on*`.
+        let name_start = i;
+        while i < chars.len()
+            && !chars[i].is_whitespace()
+            && !matches!(chars[i], '=' | '>' | '/')
+        {
+            i += 1;
+        }
+        if i == name_start {
+            // Unexpected character (for example a stray '='); keep it verbatim.
+            out.push(character);
+            i += 1;
+            continue;
+        }
+        let name: String = chars[name_start..i].iter().collect();
+
+        // Collect the optional value so URL-valued attributes can be checked.
+        let mut value: Option<String> = None;
+        let mut cursor = i;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if cursor < chars.len() && chars[cursor] == '=' {
+            cursor += 1;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
             }
+            if cursor < chars.len() && (chars[cursor] == '"' || chars[cursor] == '\'') {
+                let quote = chars[cursor];
+                cursor += 1;
+                let value_start = cursor;
+                while cursor < chars.len() && chars[cursor] != quote {
+                    cursor += 1;
+                }
+                value = Some(chars[value_start..cursor].iter().collect());
+                if cursor < chars.len() {
+                    cursor += 1;
+                }
+            } else {
+                let value_start = cursor;
+                while cursor < chars.len()
+                    && !chars[cursor].is_whitespace()
+                    && chars[cursor] != '>'
+                {
+                    cursor += 1;
+                }
+                value = Some(chars[value_start..cursor].iter().collect());
+            }
+            i = cursor;
         }
 
-        result.push(chars[i]);
-        i += 1;
+        let lower = name.to_ascii_lowercase();
+        let script_url = value.as_deref().is_some_and(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value.starts_with("javascript:")
+                || value.starts_with("vbscript:")
+                || value.starts_with("data:text/html")
+        });
+        let dangerous = lower.starts_with("on")
+            || (matches!(lower.as_str(), "href" | "src" | "action" | "formaction")
+                && script_url);
+        if dangerous {
+            continue;
+        }
+        out.extend(chars[name_start..i].iter());
     }
-    result
+    out
 }
 #[cfg(test)]
 mod tests {

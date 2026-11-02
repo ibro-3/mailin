@@ -933,3 +933,56 @@ fn pgp_mime_payloads_round_trip_and_replace() {
     store.delete_message_by_id(stored.id).expect("delete message");
     assert!(store.pgp_mime(stored.id).expect("get").is_none());
 }
+
+#[test]
+fn thread_roots_group_replies_and_count_them() {
+    let (store, account) = store_with_account();
+    let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);
+
+    let mut root = NewMessage::new(inbox, 1);
+    root.message_id = Some("root@example.com".into());
+    root.subject = "Root".into();
+    root.received_at = 1_700_000_000;
+    store.upsert_message(&root).expect("root");
+
+    for uid in [2u32, 3] {
+        let mut reply = NewMessage::new(inbox, uid);
+        reply.message_id = Some(format!("reply{uid}@example.com"));
+        reply.thread_key = Some("root@example.com".into());
+        reply.thread_root_key = Some("root@example.com".into());
+        reply.subject = format!("Re: Root {uid}");
+        reply.received_at = 1_700_000_000 + i64::from(uid);
+        store.upsert_message(&reply).expect("reply");
+    }
+
+    let roots = store.get_thread_roots(inbox, 50).expect("roots");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].thread_reply_count, 2);
+
+    let replies = store
+        .list_thread_replies("root@example.com")
+        .expect("replies");
+    assert_eq!(replies.len(), 2);
+    assert!(replies.iter().all(|m| m.thread_depth == 0)); // depth computed later
+}
+
+#[test]
+fn unthreaded_messages_are_their_own_roots() {
+    let (store, account) = store_with_account();
+    let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);
+
+    store
+        .upsert_message(&message(inbox, 1, "Standalone"))
+        .expect("msg");
+
+    let roots = store.get_thread_roots(inbox, 50).expect("roots");
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].thread_reply_count, 0);
+
+    // A message with no thread root key of its own has no replies.
+    let key = roots[0].thread_root_key.clone().or(roots[0].message_id.clone());
+    if let Some(key) = key {
+        let replies = store.list_thread_replies(&key).expect("replies");
+        assert!(replies.is_empty());
+    }
+}

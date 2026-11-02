@@ -3,11 +3,17 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
 use adw::prelude::*;
 use gtk::{gio, glib};
 use libadwaita as adw;
 
-use mailin_core::compose::{apply_template, new_draft_key, recipient_addresses, template_draft, with_signature_prefix, PgpOptions};
+use mailin_core::compose::{
+    PgpOptions, apply_template, new_draft_key, recipient_addresses, template_draft,
+    with_html_signature_prefix, with_signature_prefix,
+};
 use mailin_core::{Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template};
 use mailin_core::html::sanitize_html;
 
@@ -29,11 +35,33 @@ pub fn present(
     on_sent: impl Fn() + 'static,
 ) -> Option<adw::Window> {
     let account = app.mailin.account(&account_id).ok().flatten()?;
-    let draft = OutgoingMessage {
+    let mut draft = OutgoingMessage {
         from_name: account.display_name.clone(),
         from_addr: account.email.clone(),
         ..draft
     };
+    // Accounts with a rich signature compose in HTML: prepend the sanitized
+    // HTML signature once, converting a plain reply/forward body so nothing is
+    // lost in the process. The plain-text mirror keeps working for clients that
+    // only understand text/plain.
+    if !account.signature_html.trim().is_empty() {
+        let html = match draft.html_body.take() {
+            Some(html) => with_html_signature_prefix(&account.signature_html, &html),
+            None => {
+                let plain_block = mailin_core::compose::signature_block(&account.signature);
+                let mut text = draft.body.as_str();
+                if !plain_block.is_empty() {
+                    text = text.trim_start();
+                    if let Some(rest) = text.strip_prefix(&plain_block) {
+                        text = rest.trim_start_matches('\n');
+                    }
+                }
+                let escaped = mailin_core::html::escape(text).replace('\n', "<br>");
+                with_html_signature_prefix(&account.signature_html, &escaped)
+            }
+        };
+        draft.html_body = Some(html);
+    }
 
     let window = adw::Window::builder()
         .title("New Message")
@@ -115,15 +143,57 @@ pub fn present(
         pre {{ background: #f5f5f5; padding: 0.5em; overflow: auto; }}
     </style>
     <script>
+        window.__mailinRange = null;
+        function __mailinSaveRange() {{
+            var selection = window.getSelection();
+            window.__mailinRange = selection && selection.rangeCount
+                ? selection.getRangeAt(0).cloneRange()
+                : null;
+        }}
+        function __mailinInsert(html) {{
+            var selection = window.getSelection();
+            if (window.__mailinRange) {{
+                selection.removeAllRanges();
+                selection.addRange(window.__mailinRange);
+            }}
+            document.execCommand('insertHTML', false, html);
+        }}
         document.addEventListener('paste', function(e) {{
+            var data = e.clipboardData || window.clipboardData;
+            if (!data) {{
+                return;
+            }}
+            // Images copied from a screenshot tool or another app become
+            // inline attachments with a Content-ID.
+            var items = data.items;
+            if (items) {{
+                for (var i = 0; i < items.length; i++) {{
+                    var item = items[i];
+                    if (item.kind === 'file' && item.type.indexOf('image/') === 0) {{
+                        e.preventDefault();
+                        __mailinSaveRange();
+                        var file = item.getAsFile();
+                        var reader = new FileReader();
+                        reader.onload = function(event) {{
+                            window.webkit.messageHandlers.imagePasteHandler.postMessage(JSON.stringify({{
+                                name: file && file.name ? file.name : 'pasted-image.png',
+                                mime: file && file.type ? file.type : 'image/png',
+                                data: event.target.result
+                            }}));
+                        }};
+                        reader.readAsDataURL(file);
+                        return;
+                    }}
+                }}
+            }}
             e.preventDefault();
-            var html = e.clipboardData.getData('text/html');
-            var text = e.clipboardData.getData('text/plain');
+            var html = data.getData('text/html');
+            var text = data.getData('text/plain');
             if (html) {{
-                // Send HTML to Rust for sanitization
+                __mailinSaveRange();
+                // Sanitization happens in Rust before re-insertion.
                 window.webkit.messageHandlers.pasteHandler.postMessage(html);
             }} else if (text) {{
-                // Insert plain text at cursor
                 document.execCommand('insertText', false, text);
             }}
         }});
@@ -267,101 +337,33 @@ pub fn present(
     recipients.add(&bcc_row);
     recipients.add(&subject_row);
 
-    // Rich text editor with WebKit WebView
-    let user_content = UserContentManager::new();
-    let webview = WebView::builder()
-        .user_content_manager(&user_content)
-        .build();
-    webview.set_vexpand(true);
-    webview.set_hexpand(true);
-    
-    // Initialize the contenteditable editor
-    let initial_html = if draft.html_body.is_some() {
-        draft.html_body.clone().unwrap_or_default()
-    } else {
-        // Convert plain text to simple HTML
-        draft.body.replace('\n', "<br>")
-    };
-    
-    let editor_html = format!(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <style>
-        body {{
-            font-family: system-ui, sans-serif;
-            font-size: 14px;
-            line-height: 1.5;
-            padding: 12px;
-            margin: 0;
-            min-height: 200px;
-        }}
-        img {{ max-width: 100%; height: auto; }}
-        blockquote {{ margin-left: 1em; padding-left: 1em; border-left: 3px solid #ccc; }}
-        ul, ol {{ padding-left: 2em; }}
-        pre {{ background: #f5f5f5; padding: 0.5em; overflow: auto; }}
-    </style>
-    <script>
-        document.addEventListener('paste', function(e) {{
-            e.preventDefault();
-            var html = e.clipboardData.getData('text/html');
-            var text = e.clipboardData.getData('text/plain');
-            if (html) {{
-                // Send HTML to Rust for sanitization
-                window.webkit.messageHandlers.pasteHandler.postMessage(html);
-            }} else if (text) {{
-                // Insert plain text at cursor
-                document.execCommand('insertText', false, text);
-            }}
-        }});
-    </script>
-</head>
-<body contenteditable="true" spellcheck="true">{}</body>
-</html>"#,
-        initial_html
-    );
-    webview.load_html(&editor_html, None::<&str>);
-    
-    // Connect HTML toggle
+    // Connect HTML toggle. A full editor rebuild on mode switch would need a
+    // reload of the WebView; the plain-text mirror is always captured on save.
     let is_html_mode_clone = is_html_mode.clone();
-    let webview_for_toggle = webview.clone();
     html_toggle.connect_toggled(move |btn| {
         is_html_mode_clone.set(btn.is_active());
-        // When switching modes, we need to rebuild the editor content
-        // For now, just toggle the mode; a full rebuild would require reloading the WebView
     });
     
-    // Set up paste handler via UserContentManager
+    // Set up the paste bridge. The selection range was captured by the JS
+    // listener before the asynchronous round-trip, so the sanitized fragment is
+    // inserted at the caret instead of replacing the whole body.
     let user_content_for_paste = user_content.clone();
     user_content_for_paste.register_script_message_handler("pasteHandler", None);
     let webview_for_paste = webview.clone();
     user_content_for_paste.connect_script_message_received(
         Some("pasteHandler"),
         move |_, value: &JSValue| {
-            let webview_inner = webview_for_paste.clone();
-            webview_inner.evaluate_javascript(
-                "document.body.innerHTML",
+            let sanitized = sanitize_html(&value.to_string());
+            let script = format!(
+                "__mailinInsert({});",
+                serde_json::to_string(&sanitized).unwrap_or_else(|_| "\"\"".to_owned())
+            );
+            let _ = webview_for_paste.evaluate_javascript(
+                &script,
                 None,
                 None,
                 None::<&gio::Cancellable>,
-                {
-                    let webview_inner2 = webview_for_paste.clone();
-                    move |result| {
-                        if let Ok(value) = result {
-                            let html_str = value.to_string();
-                            // Sanitize the pasted HTML and re-insert
-                            let sanitized = sanitize_html(&html_str);
-                            let _ = webview_inner2.evaluate_javascript(
-                                &format!("document.body.innerHTML = {}", serde_json::to_string(&sanitized).unwrap()),
-                                None,
-                                None,
-                                None::<&gio::Cancellable>,
-                                |_| {},
-                            );
-                        }
-                    }
-                }
+                |_| {},
             );
         },
     );
@@ -474,6 +476,101 @@ pub fn present(
         &attachments,
         Some(Rc::clone(&dirty)),
     );
+
+    // Clipboard images become inline attachments referenced from the HTML body
+    // with `cid:`. The JS listener sends a data URL; we store the bytes and
+    // insert an <img> element at the saved caret position.
+    {
+        let user_content = user_content.clone();
+        user_content.register_script_message_handler("imagePasteHandler", None);
+        let webview = webview.clone();
+        let list = attachment_list.clone();
+        let group = attachments_group.clone();
+        let attachments = Rc::clone(&attachments);
+        let dirty = Rc::clone(&dirty);
+        user_content.connect_script_message_received(
+            Some("imagePasteHandler"),
+            move |_, value: &JSValue| {
+                let raw = value.to_string();
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    return;
+                };
+                let data_url = payload
+                    .get("data")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let Some((_, encoded)) = data_url.split_once(',') else {
+                    return;
+                };
+                let Ok(bytes) = STANDARD.decode(encoded) else {
+                    return;
+                };
+                if bytes.len() as u64 > MAX_ATTACHMENT_BYTES {
+                    return;
+                }
+                let mime = payload
+                    .get("mime")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("image/png");
+                let name = payload
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("pasted-image.png");
+                let attachment = ComposeAttachment::inline_image(name, mime, bytes);
+                let Some(cid) = attachment.cid.clone() else {
+                    return;
+                };
+                attachments.borrow_mut().push(attachment);
+                dirty.set(true);
+                rebuild_attachments(&list, &group, &attachments, Some(Rc::clone(&dirty)));
+                let html = format!("<img src=\"cid:{cid}\" alt=\"pasted image\">");
+                let script = format!(
+                    "__mailinInsert({});",
+                    serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_owned())
+                );
+                let _ = webview.evaluate_javascript(
+                    &script,
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    |_| {},
+                );
+            },
+        );
+    }
+
+    // Files dropped onto the editor are attached just like files chosen with
+    // the attach button.
+    {
+        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        let list = attachment_list.clone();
+        let group = attachments_group.clone();
+        let attachments = Rc::clone(&attachments);
+        let dirty = Rc::clone(&dirty);
+        let banner = banner.clone();
+        drop.connect_drop(move |_, value, _, _| {
+            let Some(files) = value.get::<gdk::FileList>().ok() else {
+                return false;
+            };
+            let mut failed = None;
+            for file in files.files() {
+                match load_attachment(&file) {
+                    Ok(attachment) => {
+                        attachments.borrow_mut().push(attachment);
+                        dirty.set(true);
+                    }
+                    Err(message) => failed = Some(message),
+                }
+            }
+            if let Some(message) = failed {
+                banner.set_title(&message);
+                banner.set_revealed(true);
+            }
+            rebuild_attachments(&list, &group, &attachments, Some(Rc::clone(&dirty)));
+            true
+        });
+        webview.add_controller(drop);
+    }
 
     // Templates popover
     let templates_popover = gtk::Popover::builder()

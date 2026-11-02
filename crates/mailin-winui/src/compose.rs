@@ -7,7 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use mailin_core::compose::{PgpOptions, new_draft_key, recipient_addresses, with_signature_prefix};
+use mailin_core::compose::{
+    PgpOptions, new_draft_key, recipient_addresses, with_html_signature_prefix,
+    with_signature_prefix,
+};
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
 use mailin_winui_sys::{
     DispatcherQueue, Grid, Orientation, StackPanel, TextBlock, TextWrapping, Window,
@@ -28,11 +31,29 @@ pub fn present(
     let Some(account) = app.mailin.account(&account_id).ok().flatten() else {
         anyhow::bail!("the selected account no longer exists");
     };
-    let draft = OutgoingMessage {
+    let mut draft = OutgoingMessage {
         from_name: account.display_name.clone(),
         from_addr: account.email.clone(),
         ..draft
     };
+    if !account.signature_html.trim().is_empty() {
+        let html = match draft.html_body.take() {
+            Some(html) => with_html_signature_prefix(&account.signature_html, &html),
+            None => {
+                let plain_block = mailin_core::compose::signature_block(&account.signature);
+                let mut text = draft.body.as_str();
+                if !plain_block.is_empty() {
+                    text = text.trim_start();
+                    if let Some(rest) = text.strip_prefix(&plain_block) {
+                        text = rest.trim_start_matches('\n');
+                    }
+                }
+                let escaped = mailin_core::html::escape(text).replace('\n', "<br>");
+                with_html_signature_prefix(&account.signature_html, &escaped)
+            }
+        };
+        draft.html_body = Some(html);
+    }
 
     let revokers = ui::Revokers::default();
     let attachment_events = ui::Revokers::default();

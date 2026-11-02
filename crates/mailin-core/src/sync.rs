@@ -260,7 +260,7 @@ pub(crate) fn message_from_header(
         uid: header.uid,
         message_id: parsed.message_id.clone(),
         thread_key: parsed.thread_key.clone(),
-        thread_root_key: parsed.thread_key.clone(),
+        thread_root_key: parsed.thread_key.clone().or_else(|| parsed.message_id.clone()),
         subject: parsed.subject.clone(),
         from_name: parsed.from_name.clone(),
         from_addr: parsed.from_addr.clone(),

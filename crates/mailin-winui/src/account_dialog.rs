@@ -115,6 +115,7 @@ struct FormRows {
     smtp_user: TextBox,
     smtp_security: ComboBox,
     signature: TextBox,
+    signature_html: TextBox,
     trust_list: mailin_winui_sys::ListView,
     allowlist: Arc<Mutex<Vec<String>>>,
 }
@@ -276,8 +277,18 @@ pub fn present(
     signature.SetAcceptsReturn(true)?;
     signature.SetTextWrapping(mailin_winui_sys::TextWrapping::Wrap)?;
     signature.SetHeight(120.0)?;
+    let signature_html_heading = ui::subheading("HTML signature")?;
+    let signature_html = ui::text_box("", Some("HTML signature"))?;
+    signature_html.SetPlaceholderText(
+        "Optional HTML signature used by the rich composer. Scripts and event handlers are removed when composing.",
+    )?;
+    signature_html.SetAcceptsReturn(true)?;
+    signature_html.SetTextWrapping(mailin_winui_sys::TextWrapping::Wrap)?;
+    signature_html.SetHeight(120.0)?;
     ui::append(&form, &signature_heading)?;
     ui::append(&form, &signature)?;
+    ui::append(&form, &signature_html_heading)?;
+    ui::append(&form, &signature_html)?;
 
     // Remote-content allowlist: domains whose images and resources always load.
     let trust_heading = ui::subheading("Trusted senders for remote content")?;
@@ -428,6 +439,7 @@ pub fn present(
 
         // Pre-fill signature
         let _ = signature.SetText(&account.signature);
+        let _ = signature_html.SetText(&account.signature_html);
 
         // Pre-fill trust list (already populated from allowlist above)
     }
@@ -553,6 +565,7 @@ pub fn present(
         smtp_user,
         smtp_security,
         signature,
+        signature_html,
         trust_container,
         allowlist: Arc::clone(&allowlist),
     };
@@ -639,6 +652,7 @@ pub fn present(
             smtp_user: rows.smtp_user.clone(),
             smtp_security: rows.smtp_security.clone(),
             signature: rows.signature.clone(),
+            signature_html: rows.signature_html.clone(),
             trust_container: rows.trust_container.clone(),
             allowlist: Arc::clone(&rows.allowlist),
         };
@@ -708,6 +722,7 @@ pub fn present(
             smtp_user: rows.smtp_user.clone(),
             smtp_security: rows.smtp_security.clone(),
             signature: rows.signature.clone(),
+            signature_html: rows.signature_html.clone(),
             trust_container: rows.trust_container.clone(),
             allowlist: Arc::clone(&rows.allowlist),
         };
@@ -745,8 +760,9 @@ pub fn present(
                     }
                 }
             }
-            // Apply signature from the form field
+            // Apply signatures from the form fields
             account.signature = ui::text_value(&rows.signature);
+            account.signature_html = ui::text_value(&rows.signature_html);
             // Apply allowlist from the shared cell
             account
                 .remote_allowed_domains

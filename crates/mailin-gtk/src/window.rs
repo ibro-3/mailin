@@ -16,6 +16,7 @@ use gdk_pixbuf::prelude::*;
 use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
+use glib::variant::ToVariant;
 use mailin_core::{
     Account, AccountId, AttachmentMeta, ClientEvent, Folder, FolderId, FolderRole, MessageHeader,
     MessageId, MessageListDensity, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
@@ -41,6 +42,7 @@ const BREAKPOINT_MOBILE: f64 = 720.0;
 const BREAKPOINT_TABLET: f64 = 1024.0;
 
 #[derive(Debug, Default)]
+#[derive(Clone)]
 struct Selection {
     account: Option<AccountId>,
     folder: Option<FolderId>,
@@ -105,6 +107,7 @@ struct Widgets {
     search: gtk::SearchEntry,
     scope_button: gtk::ToggleButton,
     history_button: gtk::Button,
+    overflow_button: gtk::MenuButton,
     reader_stack: gtk::Stack,
     reader_subject: gtk::Label,
     reader_from: gtk::Label,
@@ -251,12 +254,32 @@ impl MainWindow {
         // Search history button
         let history_button = icon_button("view-history-symbolic", "Search history");
         history_button.add_css_class("flat");
-        
+
+        // Narrow windows collapse the secondary search controls into this
+        // overflow menu so the search entry and sync status stay visible.
+        let overflow_menu = gio::Menu::new();
+        overflow_menu.append(Some("Search in all mail"), Some("win.search-all-mail"));
+        overflow_menu.append(Some("Search history"), Some("win.search-history"));
+        overflow_menu.append(Some("Synchronize now"), Some("win.sync"));
+        overflow_menu.append(Some("New message"), Some("win.compose"));
+        let overflow_button = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("More actions")
+            .menu_model(&overflow_menu)
+            .build();
+        overflow_button.add_css_class("flat");
+        overflow_button.set_visible(false);
+        {
+            use gtk::accessible::Property;
+            overflow_button.update_property(&[Property::Label("More actions")]);
+        }
+
         header.pack_end(&sync_button);
         header.pack_end(&sync_status);
         header.pack_end(&scope_button);
         header.pack_end(&history_button);
         header.pack_end(&search);
+        header.pack_end(&overflow_button);
 
         // ---------------------------------------------------------- sidebar
         let account_dropdown = gtk::DropDown::new(
@@ -652,6 +675,7 @@ impl MainWindow {
                 search,
                 scope_button,
                 history_button,
+                overflow_button,
                 reader_stack,
                 reader_subject,
                 reader_from,
@@ -725,11 +749,18 @@ impl MainWindow {
         });
         this.widgets.window.add_controller(key_controller);
 
-        // Responsive layout update function
+        // Responsive layout update function. `GtkWindow` has no resize signal,
+        // so a lightweight poll compares the allocated width and only rebuilds
+        // when it actually changed.
         let update_responsive_layout = {
             let this = Rc::clone(this);
             move || {
-                let width = this.widgets.window.default_width() as f64;
+                let allocated = this.widgets.window.width();
+                let width = if allocated > 0 {
+                    allocated as f64
+                } else {
+                    this.widgets.window.default_width() as f64
+                };
                 let is_mobile = width < BREAKPOINT_MOBILE;
                 let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
                 let is_desktop = width >= BREAKPOINT_TABLET;
@@ -741,6 +772,11 @@ impl MainWindow {
                 // Update hamburger button visibility
                 let hamburger = &this.widgets.hamburger_button;
                 hamburger.set_visible(is_mobile || is_tablet);
+
+                // Secondary search controls collapse into the overflow menu.
+                this.widgets.scope_button.set_visible(is_desktop);
+                this.widgets.history_button.set_visible(is_desktop);
+                this.widgets.overflow_button.set_visible(!is_desktop);
 
                 // Update responsive layout
                 if is_mobile {
@@ -763,8 +799,48 @@ impl MainWindow {
             }
         };
 
-        // Call it once initially
+        // Call it once initially, then on width changes.
         update_responsive_layout();
+        {
+            let this = Rc::clone(this);
+            let last_width = Cell::new(0.0f64);
+            glib::timeout_add_local(Duration::from_millis(200), move || {
+                let width = this.widgets.window.width() as f64;
+                if (width - last_width.get()).abs() > 1.0 {
+                    last_width.set(width);
+                    // Recompute using the same logic as the initial pass.
+                    let is_mobile = width < BREAKPOINT_MOBILE;
+                    let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
+                    let is_desktop = width >= BREAKPOINT_TABLET;
+                    {
+                        let mut selection = this.selection.borrow_mut();
+                        selection.window_width = width;
+                        selection.is_mobile = is_mobile;
+                    }
+                    this.widgets
+                        .hamburger_button
+                        .set_visible(is_mobile || is_tablet);
+                    this.widgets.scope_button.set_visible(is_desktop);
+                    this.widgets.history_button.set_visible(is_desktop);
+                    this.widgets.overflow_button.set_visible(!is_desktop);
+                    if is_mobile {
+                        this.widgets.split.set_collapsed(true);
+                        this.widgets.split.set_show_sidebar(false);
+                    } else if is_tablet {
+                        this.widgets.split.set_collapsed(false);
+                        this.widgets.split.set_show_sidebar(true);
+                        this.widgets.split.set_min_sidebar_width(200.0);
+                        this.widgets.split.set_max_sidebar_width(280.0);
+                    } else {
+                        this.widgets.split.set_collapsed(false);
+                        this.widgets.split.set_show_sidebar(true);
+                        this.widgets.split.set_min_sidebar_width(220.0);
+                        this.widgets.split.set_max_sidebar_width(320.0);
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
 
 
         // Account menu (edit/remove)
@@ -1204,6 +1280,46 @@ impl MainWindow {
             move |_| this.run_search()
         });
 
+        // Overflow-menu counterparts of the secondary search controls. They
+        // drive the same widgets, so state never diverges between the toolbar
+        // and the narrow-window menu.
+        let search_all_action = gio::SimpleAction::new_stateful(
+            "search-all-mail",
+            None,
+            &false.to_variant(),
+        );
+        search_all_action.connect_activate({
+            let this = Rc::clone(this);
+            move |action, _| {
+                let active = !this.widgets.scope_button.is_active();
+                this.widgets.scope_button.set_active(active);
+                action.set_state(&active.to_variant());
+                if this.selection.borrow().search {
+                    this.run_search();
+                }
+            }
+        });
+        this.widgets.window.add_action(&search_all_action);
+
+        let search_history_action = gio::SimpleAction::new("search-history", None);
+        search_history_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| this.widgets.history_button.emit_clicked()
+        });
+        this.widgets.window.add_action(&search_history_action);
+
+        // Keep the checkable overflow item in step with the toolbar toggle.
+        this.widgets.scope_button.connect_toggled({
+            let this = Rc::clone(this);
+            move |button| {
+                if let Some(action) = this.widgets.window.lookup_action("search-all-mail") {
+                    if let Some(action) = action.downcast_ref::<gio::SimpleAction>() {
+                        action.set_state(&button.is_active().to_variant());
+                    }
+                }
+            }
+        });
+
         // Search history popover (attached to history_button)
         let history_popover = gtk::Popover::builder()
             .has_arrow(true)
@@ -1276,14 +1392,12 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&add_action);
 
-        // Folder management actions
-        let new_folder_action = gio::SimpleAction::new("new-folder", Some(&glib::VariantTy::STRING));
+        // Folder management actions. Folder-specific actions take the folder id
+        // as a string parameter so every menu button can target its own row.
+        let new_folder_action = gio::SimpleAction::new("new-folder", None);
         new_folder_action.connect_activate({
             let this = Rc::clone(this);
-            move |_, param| {
-                let Some(param) = param.and_then(|v| v.str()) else { return };
-                Self::create_folder(this.clone(), param.to_string())
-            }
+            move |_, _| Self::create_folder(this.clone())
         });
         this.widgets.window.add_action(&new_folder_action);
 
@@ -1406,6 +1520,44 @@ impl MainWindow {
             move |_, _| this.sync_now()
         });
         this.widgets.window.add_action(&sync_action);
+
+        let move_to_folder_action = gio::SimpleAction::new("move-messages-to-folder", Some(&glib::VariantTy::STRING));
+        move_to_folder_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, parameter| {
+                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                let mut parts = param.splitn(2, ':');
+                let (Some(folder_str), Some(msg_str)) = (parts.next(), parts.next()) else { return };
+                let Ok(folder_id) = folder_str.parse::<i64>() else { return };
+                let Ok(msg_id) = msg_str.parse::<i64>() else { return };
+                this.move_message_to_folder(MessageId(msg_id), FolderId(folder_id));
+            }
+        });
+        this.widgets.window.add_action(&move_to_folder_action);
+
+        let undo_move_action = gio::SimpleAction::new("undo-move-message", Some(&glib::VariantTy::STRING));
+        undo_move_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, parameter| {
+                let Some(param) = parameter.and_then(|v| v.str()) else { return };
+                let mut parts = param.splitn(2, ':');
+                let (Some(source_str), Some(msg_str)) = (parts.next(), parts.next()) else { return };
+                let Ok(source_id) = source_str.parse::<i64>() else { return };
+                let Ok(msg_id) = msg_str.parse::<i64>() else { return };
+                this.undo_move_message(FolderId(source_id), MessageId(msg_id));
+            }
+        });
+        this.widgets.window.add_action(&undo_move_action);
+
+        // Surface a Retry button on the account/sync error banner. Activating
+        // it runs the same action as the F5 "Synchronize now" shortcut.
+        this.widgets.banner.set_button_label(Some("Retry"));
+        this.widgets.banner.connect_button_clicked({
+            let this = Rc::clone(this);
+            move |_| {
+                this.sync_now();
+            }
+        });
 
         let preferences_action = gio::SimpleAction::new("preferences", None);
         preferences_action.connect_activate({
@@ -1886,6 +2038,15 @@ impl MainWindow {
             if quick_actions_enabled {
                 attach_quick_actions(&row, Rc::clone(&app), quick_action_items.clone(), message.id);
             }
+            // Drag source carrying the message id so it can be dropped onto a
+            // folder row to move it.
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gdk::DragAction::MOVE);
+            let payload = message.id.to_string();
+            drag_source.connect_prepare(move |_, _, _| {
+                Some(gdk::ContentProvider::for_value(&glib::Value::from(payload.clone())))
+            });
+            row.add_controller(drag_source);
             self.widgets.message_list.append(&row);
         }
         for (index, message) in messages.iter().enumerate() {
@@ -1979,6 +2140,13 @@ impl MainWindow {
             if quick_actions_enabled {
                 attach_quick_actions(&row, Rc::clone(&app), quick_action_items.clone(), message.id);
             }
+            let drag_source = gtk::DragSource::new();
+            drag_source.set_actions(gdk::DragAction::MOVE);
+            let payload = message.id.to_string();
+            drag_source.connect_prepare(move |_, _, _| {
+                Some(gdk::ContentProvider::for_value(&glib::Value::from(payload.clone())))
+            });
+            row.add_controller(drag_source);
             self.widgets.message_list.append(&row);
         }
         
@@ -3169,6 +3337,11 @@ impl MainWindow {
                         sync_status.remove_css_class("sync-status-error");
                         sync_status.add_css_class(css_class);
                         sync_status.set_tooltip_text(Some(tooltip));
+                        if matches!(status, mailin_core::model::SyncStatus::Error) {
+                            self.widgets.banner.set_button_label(Some("Retry"));
+                            self.widgets.banner.set_title("Sync failed");
+                            self.widgets.banner.set_revealed(true);
+                        }
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -3277,6 +3450,7 @@ impl MainWindow {
     }
 
     fn show_error(&self, message: &str) {
+        self.widgets.banner.set_button_label(Some("Retry"));
         let mut text = message.split_whitespace().collect::<Vec<_>>().join(" ");
         if text.chars().count() > 180 {
             text = text.chars().take(179).collect();
@@ -3298,6 +3472,46 @@ impl MainWindow {
         self.widgets
             .toast
             .add_toast(adw::Toast::new("Synchronizing…"));
+    }
+
+    fn move_message_to_folder(&self, message_id: MessageId, target_folder: FolderId) {
+        // Find the source folder for undo.
+        let source_folder = self
+            .messages
+            .borrow()
+            .iter()
+            .find(|m| m.id == message_id)
+            .map(|m| m.folder_id);
+
+        self.app.engine.move_messages(&[message_id], target_folder);
+
+        // Refresh the visible list/folders so the move is reflected.
+        self.refresh_folders();
+        self.refresh_messages();
+
+        if let Some(source_folder) = source_folder {
+            let toast = adw::Toast::new("Moved 1 message");
+            toast.set_button_label(Some("Undo"));
+            toast.set_timeout(5);
+            let param = format!("{}:{}", source_folder.0, message_id.0);
+            // Activate the undo action through the window when the button is
+            // pressed.
+            let window = self.widgets.window.clone();
+            toast.connect_button_clicked(move |_| {
+                let _ = gtk::prelude::WidgetExt::activate_action(&window, "undo-move-message", Some(&param.to_variant()));
+            });
+            self.widgets.toast.add_toast(toast);
+        }
+    }
+
+    fn move_message_to_folder_silent(&self, message_id: MessageId, target_folder: FolderId) {
+        self.app.engine.move_messages(&[message_id], target_folder);
+        self.refresh_folders();
+        self.refresh_messages();
+    }
+
+    fn undo_move_message(&self, source_folder: FolderId, message_id: MessageId) {
+        self.move_message_to_folder_silent(message_id, source_folder);
     }
 
     fn add_account(this: &Rc<Self>) {
@@ -3389,65 +3603,150 @@ impl MainWindow {
     }
 
     // Folder management actions
-    fn create_folder(this: Rc<Self>, folder_id: String) {
-        let account = this.selection.borrow().account;
-        let Some(account_id) = account else { return };
-        let folder_name = folder_id;
-        if folder_name.trim().is_empty() {
+    fn create_folder(this: Rc<Self>) {
+        let Some(account_id) = this.selection.borrow().account else {
             return;
-        }
+        };
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&this.widgets.window)
+            .modal(true)
+            .heading("New folder")
+            .body("Enter the name of the new folder. Use “/” to nest it, for example Archive/2025.")
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("create", "Create");
+        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("create"));
+        dialog.set_close_response("cancel");
+
+        let entry = adw::EntryRow::builder()
+            .title("Folder name")
+            .show_apply_button(true)
+            .build();
+        dialog.set_extra_child(Some(&entry));
+
         let app = this.app.clone();
-        glib::spawn_future_local(async move {
-            app.engine.create_folder(account_id, folder_name, "/".to_string(), FolderRole::Other);
+        let this = Rc::clone(&this);
+        let entry_for_response = entry.clone();
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response != "create" {
+                return;
+            }
+            let name = entry_for_response.text().trim().to_owned();
+            if name.is_empty() {
+                return;
+            }
+            app.engine
+                .create_folder(account_id, name, "/".to_owned(), FolderRole::Other);
             this.refresh_folders();
         });
+        dialog.present();
     }
 
     fn rename_folder(this: Rc<Self>, folder_id: String) {
-        let parts: Vec<&str> = folder_id.split(':').collect();
-        if parts.len() != 2 {
+        let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
+            return;
+        };
+        let Some(folder) = this
+            .folders
+            .borrow()
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .cloned()
+        else {
+            return;
+        };
+        if folder.id.0 < 0 {
+            this.toast("The outbox cannot be renamed");
             return;
         }
-        let folder_id = parts[0].parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
-        let new_name = parts[1].to_string();
-        if new_name.trim().is_empty() {
-            return;
-        }
+
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&this.widgets.window)
+            .modal(true)
+            .heading("Rename folder")
+            .body(format!("Choose a new name for “{}”.", folder.name))
+            .build();
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("rename", "Rename");
+        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("rename"));
+        dialog.set_close_response("cancel");
+
+        let entry = adw::EntryRow::builder()
+            .title("Folder name")
+            .show_apply_button(true)
+            .build();
+        entry.set_text(&folder.name);
+        dialog.set_extra_child(Some(&entry));
+
         let app = this.app.clone();
-        glib::spawn_future_local(async move {
-            app.engine.rename_folder(folder_id, new_name);
+        let this = Rc::clone(&this);
+        let entry_for_response = entry.clone();
+        dialog.connect_response(None, move |dialog, response| {
+            dialog.close();
+            if response != "rename" {
+                return;
+            }
+            let name = entry_for_response.text().trim().to_owned();
+            if name.is_empty() || name == folder.name {
+                return;
+            }
+            app.engine.rename_folder(folder_id, name);
             this.refresh_folders();
         });
+        dialog.present();
     }
 
     fn delete_folder(this: Rc<Self>, folder_id: String) {
-        let folder_id = folder_id.parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
-        let app = this.app.clone();
+        let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
+            return;
+        };
+        if folder_id.0 < 0 {
+            this.toast("The outbox cannot be deleted");
+            return;
+        }
+        let Some(folder) = this
+            .folders
+            .borrow()
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .cloned()
+        else {
+            return;
+        };
         let confirm = gtk::AlertDialog::builder()
-            .message("Delete folder?")
-            .detail("Are you sure you want to delete this folder? This will move all messages to Trash.")
+            .modal(true)
+            .message(format!("Delete “{}”?", folder.name))
+            .detail("This removes the folder from the server. Messages inside it may be deleted as well.")
             .build();
         confirm.set_buttons(&["Cancel", "Delete"]);
         confirm.set_cancel_button(0);
         confirm.set_default_button(0);
 
         let app = this.app.clone();
-        let this = this.clone();
+        let this = Rc::clone(&this);
         glib::spawn_future_local(async move {
-            let response = confirm.choose_future(None::<&gtk::Window>).await;
-            match response {
-                Ok(1) => {
-                    app.engine.delete_folder(folder_id);
-                    this.refresh_folders();
-                }
-                _ => {}
+            let response = confirm
+                .choose_future(Some(&this.widgets.window))
+                .await;
+            if response == Ok(1) {
+                app.engine.delete_folder(folder_id);
+                this.refresh_folders();
             }
         });
     }
 
     fn subscribe_folder(this: Rc<Self>, folder_id: String, subscribe: bool) {
-        let folder_id = folder_id.parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
+        let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
+            return;
+        };
+        if folder_id.0 < 0 {
+            return;
+        }
         let app = this.app.clone();
+        let this = Rc::clone(&this);
         glib::spawn_future_local(async move {
             app.engine.subscribe_folder(folder_id, subscribe);
             this.refresh_folders();
@@ -3455,10 +3754,84 @@ impl MainWindow {
     }
 
     fn folder_properties(this: Rc<Self>, folder_id: String) {
-        // TODO: Show folder properties dialog
-        let _folder_id = folder_id.parse::<i64>().ok().map(FolderId).unwrap_or(FolderId(0));
-        let toast = adw::Toast::new("Folder properties not yet implemented");
-        this.widgets.toast.add_toast(toast);
+        let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
+            return;
+        };
+        let Some(folder) = this
+            .folders
+            .borrow()
+            .iter()
+            .find(|folder| folder.id == folder_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        let dialog = adw::MessageDialog::builder()
+            .transient_for(&this.widgets.window)
+            .modal(true)
+            .heading("Folder properties")
+            .body(format!("Details reported by the server for “{}”.", folder.name))
+            .build();
+        dialog.add_response("close", "Close");
+        dialog.set_default_response(Some("close"));
+        dialog.set_close_response("close");
+
+        let rows = gtk::ListBox::new();
+        rows.set_selection_mode(gtk::SelectionMode::None);
+        rows.add_css_class("boxed-list");
+        let mut add_row = |title: &str, value: String| {
+            let row = adw::ActionRow::builder()
+                .title(title)
+                .subtitle(value)
+                .build();
+            row.set_activatable(false);
+            rows.append(&row);
+        };
+        add_row("Name", folder.name.clone());
+        add_row("Role", folder.role.as_str().to_owned());
+        add_row("Messages", folder.message_count.to_string());
+        add_row("Unread", folder.unread_count.to_string());
+        add_row(
+            "Delimiter",
+            if folder.delimiter.is_empty() {
+                "None".to_owned()
+            } else {
+                folder.delimiter.clone()
+            },
+        );
+        add_row(
+            "UID validity",
+            folder
+                .uid_validity
+                .map_or_else(|| "Unknown".to_owned(), |value| value.to_string()),
+        );
+        add_row(
+            "Next UID",
+            folder
+                .uid_next
+                .map_or_else(|| "Unknown".to_owned(), |value| value.to_string()),
+        );
+        add_row(
+            "Highest mod-sequence",
+            folder
+                .highest_modseq
+                .map_or_else(|| "Unknown".to_owned(), |value| value.to_string()),
+        );
+        add_row(
+            "Last synchronized",
+            folder
+                .last_synced_at
+                .map_or_else(|| "Never".to_owned(), format::full_date),
+        );
+
+        let scroller = gtk::ScrolledWindow::builder()
+            .min_content_height(260)
+            .min_content_width(360)
+            .child(&rows)
+            .build();
+        dialog.set_extra_child(Some(&scroller));
+        dialog.present();
     }
 }
 
@@ -3702,19 +4075,20 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     menu_box.set_margin_end(8);
     
     let actions = [
-        ("New Folder", "win.new-folder"),
-        ("Rename Folder", "win.rename-folder"),
-        ("Delete Folder", "win.delete-folder"),
-        ("Subscribe", "win.subscribe-folder"),
-        ("Unsubscribe", "win.unsubscribe-folder"),
-        ("Properties", "win.folder-properties"),
+        ("New Folder", "win.new-folder", false),
+        ("Rename Folder", "win.rename-folder", true),
+        ("Delete Folder", "win.delete-folder", true),
+        ("Subscribe", "win.subscribe-folder", true),
+        ("Unsubscribe", "win.unsubscribe-folder", true),
+        ("Properties", "win.folder-properties", true),
     ];
-    
-    for (label, action) in actions {
-        let btn = gtk::Button::builder()
-            .label(label)
-            .action_name(action)
-            .build();
+    let target = folder.id.0.to_string();
+    for (label, action, needs_target) in actions {
+        let mut builder = gtk::Button::builder().label(label).action_name(action);
+        if needs_target {
+            builder = builder.action_target(&target.to_variant());
+        }
+        let btn = builder.build();
         btn.add_css_class("flat");
         btn.set_halign(gtk::Align::Start);
         menu_box.append(&btn);
@@ -3736,6 +4110,22 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
         }
     });
     row.add_controller(gesture);
+
+    // Accept messages dragged from the list onto this folder row.
+    let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+    let folder_id = folder.id.0;
+    drop_target.connect_drop(move |target, value, _, _| {
+        let Ok(msg_id) = value.get::<String>() else {
+            return false;
+        };
+        let Some(widget) = target.widget() else {
+            return false;
+        };
+        let param = format!("{folder_id}:{msg_id}");
+        let _ = widget.activate_action("move-messages-to-folder", Some(&param.to_variant()));
+        true
+    });
+    row.add_controller(drop_target);
 
     row
 }
