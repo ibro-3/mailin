@@ -9,17 +9,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::Duration;
-use tempfile;
 
 use adw::prelude::*;
 use gtk::glib;
 use mailin_core::{
-    Account, AccountId, AuthMethod, Config, Mailin, MemoryCredentials, OAuth2Tokens, OAuthProvider,
-    PendingAuthorization, Security, ServerSettings, Store,
+    Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
+    ServerSettings,
 };
 
 use crate::app::AppState;
 use crate::autoconfig::{self, Suggestion};
+
+/// A shared, replaceable refresh callback stored behind interior mutability.
+type RefreshFn = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
 /// Values read back from the form. Kept separate from the widgets so account
 /// construction can be unit tested.
@@ -791,11 +793,10 @@ pub fn present(
                             // Clone values for use in both button closures
                             let app_for_edit = Rc::clone(&app);
                             let app_for_delete = Rc::clone(&app);
-                            let templates_list_for_edit = templates_list.clone();
-                            let templates_list_for_delete = templates_list.clone();
+                            let _templates_list_for_edit = templates_list.clone();
+                            let _templates_list_for_delete = templates_list.clone();
                             let error_label_for_edit = error_label.clone();
                             let error_label_for_delete = error_label.clone();
-                            let account_id = account_id;
                             let template_name_for_edit = template.name.clone();
                             let template_name_for_delete = template.name.clone();
                             let template_subject = template.subject.clone();
@@ -838,7 +839,7 @@ pub fn present(
 
     // Contacts manager: populate list and handle add/edit/delete
     // Use Rc<RefCell> to allow the closure to be called from within itself
-    let refresh_contacts: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let refresh_contacts: RefreshFn = Rc::new(RefCell::new(None));
     {
         let app = Rc::clone(&app);
         let account_id = existing_account.as_ref().map(|a| a.id);
@@ -896,11 +897,10 @@ pub fn present(
                             // Clone values for use in both button closures
                             let app_for_edit = Rc::clone(&app);
                             let app_for_delete = Rc::clone(&app);
-                            let contacts_list_for_edit = contacts_list.clone();
-                            let contacts_list_for_delete = contacts_list.clone();
+                            let _contacts_list_for_edit = contacts_list.clone();
+                            let _contacts_list_for_delete = contacts_list.clone();
                             let error_label_for_edit = error_label.clone();
                             let error_label_for_delete = error_label.clone();
-                            let account_id = account_id;
                             let contact_email_for_edit = contact.email.clone();
                             let contact_email_for_delete = contact.email.clone();
                             let contact_name_for_edit = contact.display_name.clone();
@@ -962,7 +962,7 @@ pub fn present(
     contacts_add.connect_clicked({
         let app = Rc::clone(&app);
         let account_id = existing_account.as_ref().map(|a| a.id);
-        let contacts_list = contacts_list.clone();
+        let _contacts_list = contacts_list.clone();
         let dialog = dialog.clone();
         let error_label = error_label.clone();
         let refresh = Rc::clone(&refresh_contacts);
@@ -977,7 +977,7 @@ pub fn present(
     templates_add.connect_clicked({
         let app = Rc::clone(&app);
         let account_id = existing_account.as_ref().map(|a| a.id);
-        let templates_list = templates_list.clone();
+        let _templates_list = templates_list.clone();
         let dialog = dialog.clone();
         let error_label = error_label.clone();
         let refresh: Rc<dyn Fn()> = Rc::new(refresh_templates.clone());
@@ -1245,7 +1245,7 @@ fn provider_at(index: u32) -> OAuthProvider {
 
 /// Dialog to create a new template.
 fn new_template_dialog(
-    parent: &adw::Dialog,
+    _parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     error_label: &gtk::Label,
@@ -1331,7 +1331,7 @@ fn new_template_dialog(
 
 /// Dialog to edit an existing template.
 fn edit_template_dialog(
-    parent: &adw::Dialog,
+    _parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     current_name: &str,
@@ -1425,11 +1425,11 @@ fn edit_template_dialog(
 
 /// Dialog to create a new contact.
 fn new_contact_dialog(
-    parent: &adw::Dialog,
+    _parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     error_label: &gtk::Label,
-    refresh: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    refresh: RefreshFn,
 ) {
     let dialog = adw::MessageDialog::builder()
         .heading("New Contact")
@@ -1493,13 +1493,13 @@ fn new_contact_dialog(
 
 /// Dialog to edit an existing contact.
 fn edit_contact_dialog(
-    parent: &adw::Dialog,
+    _parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     current_email: &str,
     current_name: &str,
     error_label: &gtk::Label,
-    refresh: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    refresh: RefreshFn,
 ) {
     let dialog = adw::MessageDialog::builder()
         .heading("Edit Contact")
@@ -1615,6 +1615,9 @@ mod tests {
         let mut draft = sample();
         draft.password.clear();
         draft.auth_method = AuthMethod::OAuth2;
+        // A client_id is also required for OAuth2; supply one so this test
+        // isolates the access-token requirement.
+        draft.oauth2.client_id = "client-id".into();
         assert!(draft.build(true).is_err());
 
         draft.oauth2.access_token = "token".into();
@@ -1688,7 +1691,8 @@ mod tests {
             .build();
         window.present();
 
-        let paths = crate::config::Paths::with_root(tempfile::tempdir().expect("temp dir").path());
+        let paths =
+            mailin_core::config::Paths::with_root(tempfile::tempdir().expect("temp dir").path());
         let config = Config::default();
         let config_cache = Arc::new(std::sync::RwLock::new(Some(config)));
         let config_paths = Arc::new(paths);

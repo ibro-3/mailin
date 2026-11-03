@@ -11,13 +11,11 @@ use gtk::{gio, glib};
 use libadwaita as adw;
 
 use mailin_core::compose::{
-    PgpOptions, apply_template, new_draft_key, recipient_addresses, template_draft,
-    with_html_signature_prefix, with_signature_prefix,
+    PgpOptions, new_draft_key, recipient_addresses, template_draft, with_html_signature_prefix,
+    with_signature_prefix,
 };
 use mailin_core::html::sanitize_html;
-use mailin_core::{
-    Account, AccountId, ComposeAttachment, Contact, MessageHeader, OutgoingMessage, Template,
-};
+use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
 
 use crate::app::AppState;
 use crate::format;
@@ -29,6 +27,24 @@ use webkit6::{UserContentManager, WebView};
 /// outbox and the SMTP submission needlessly fragile.
 const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
+/// Collects the composer state and hands a finished message to a one-shot callback.
+type SnapshotFn = Rc<dyn Fn(Box<dyn FnOnce(OutgoingMessage)>)>;
+
+/// A one-shot message callback shared behind a take-once slot.
+type SnapshotCallback = Rc<RefCell<Option<Box<dyn FnOnce(OutgoingMessage)>>>>;
+
+/// Extract the Rust string from a JavaScript value returned by
+/// `WebView::evaluate_javascript`. `Value::to_string` may render a JS string as
+/// JSON (surrounded by quotes), so unwrap that form when present.
+fn jsc_string(value: &JSValue) -> String {
+    let raw = value.to_string();
+    if raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"') {
+        serde_json::from_str::<String>(&raw).unwrap_or(raw)
+    } else {
+        raw
+    }
+}
+
 pub fn present(
     parent: &gtk::Window,
     app: Rc<AppState>,
@@ -36,6 +52,7 @@ pub fn present(
     draft: OutgoingMessage,
     on_sent: impl Fn() + 'static,
 ) -> Option<adw::Window> {
+    let on_sent: Rc<dyn Fn()> = Rc::new(on_sent);
     let account = app.mailin.account(&account_id).ok().flatten()?;
     let mut draft = OutgoingMessage {
         from_name: account.display_name.clone(),
@@ -364,7 +381,7 @@ pub fn present(
                 "__mailinInsert({});",
                 serde_json::to_string(&sanitized).unwrap_or_else(|_| "\"\"".to_owned())
             );
-            let _ = webview_for_paste.evaluate_javascript(
+            webview_for_paste.evaluate_javascript(
                 &script,
                 None,
                 None,
@@ -534,13 +551,7 @@ pub fn present(
                     "__mailinInsert({});",
                     serde_json::to_string(&html).unwrap_or_else(|_| "\"\"".to_owned())
                 );
-                let _ = webview.evaluate_javascript(
-                    &script,
-                    None,
-                    None,
-                    None::<&gio::Cancellable>,
-                    |_| {},
-                );
+                webview.evaluate_javascript(&script, None, None, None::<&gio::Cancellable>, |_| {});
             },
         );
     }
@@ -601,12 +612,12 @@ pub fn present(
     let dirty_for_populate = Rc::clone(&dirty);
 
     // Populate templates list
-    let populate_templates = {
+    let populate_templates: Rc<dyn Fn()> = {
         let app = Rc::clone(&app);
         let account_id = account.id;
         let templates_list = templates_list.clone();
         let templates_popover = templates_popover.clone();
-        move || {
+        Rc::new(move || {
             while let Some(child) = templates_list.first_child() {
                 templates_list.remove(&child);
             }
@@ -651,53 +662,51 @@ pub fn present(
                             if subject_row.text().is_empty() {
                                 subject_row.set_text(&draft.subject);
                             }
-                            let (tx, rx) = std::sync::mpsc::channel();
+                            // Inspect the current body asynchronously. The result
+                            // callback runs on the GTK main loop, so it must not
+                            // be awaited with a blocking `recv_timeout` here.
+                            let draft_body = draft.body.clone();
+                            let webview_inner = webview.clone();
                             webview.evaluate_javascript(
                                 "document.body.innerText",
                                 None,
                                 None,
                                 None::<&gio::Cancellable>,
                                 move |result| {
-                                    if let Ok(value) = result {
-                                        let text = value.to_string();
-                                        let _ = tx.send(text);
+                                    let current_body =
+                                        result.map(|value| jsc_string(&value)).unwrap_or_default();
+                                    if !current_body.trim().is_empty() {
+                                        return;
                                     }
-                                },
-                            );
-                            let current_body = rx
-                                .recv_timeout(std::time::Duration::from_millis(100))
-                                .unwrap_or_default();
-                            if current_body.trim().is_empty() {
-                                // For WebView, we need to set HTML content
-                                let (tx2, rx2) = std::sync::mpsc::channel();
-                                webview.evaluate_javascript(
-                                    "document.body.innerHTML",
-                                    None,
-                                    None,
-                                    None::<&gio::Cancellable>,
-                                    move |result| {
-                                        if let Ok(value) = result {
-                                            let html = value.to_string();
-                                            let _ = tx2.send(html);
-                                        }
-                                    },
-                                );
-                                let current_html = rx2
-                                    .recv_timeout(std::time::Duration::from_millis(100))
-                                    .unwrap_or_default();
-                                if current_html.trim().is_empty() {
-                                    webview.evaluate_javascript(
-                                        &format!(
-                                            "document.body.innerHTML = {}",
-                                            serde_json::to_string(&draft.body).unwrap()
-                                        ),
+                                    // No plain text; fall back to checking the HTML.
+                                    let draft_body = draft_body.clone();
+                                    let webview_outer = webview_inner.clone();
+                                    webview_inner.evaluate_javascript(
+                                        "document.body.innerHTML",
                                         None,
                                         None,
                                         None::<&gio::Cancellable>,
-                                        |_| {},
+                                        move |result| {
+                                            let current_html = result
+                                                .map(|value| jsc_string(&value))
+                                                .unwrap_or_default();
+                                            if current_html.trim().is_empty() {
+                                                webview_outer.evaluate_javascript(
+                                                    &format!(
+                                                        "document.body.innerHTML = {}",
+                                                        serde_json::to_string(&draft_body)
+                                                            .unwrap_or_else(|_| "\"\"".to_owned())
+                                                    ),
+                                                    None,
+                                                    None,
+                                                    None::<&gio::Cancellable>,
+                                                    |_| {},
+                                                );
+                                            }
+                                        },
                                     );
-                                }
-                            }
+                                },
+                            );
                             dirty.set(true);
                             templates_popover.popdown();
                             banner.set_title("Template applied");
@@ -709,9 +718,9 @@ pub fn present(
             }
             templates_list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
             let save_row = adw::ActionRow::builder().title("Save as template…").build();
-            let to_row = to_row_for_populate.clone();
-            let cc_row = cc_row_for_populate.clone();
-            let bcc_row = bcc_row_for_populate.clone();
+            let _to_row = to_row_for_populate.clone();
+            let _cc_row = cc_row_for_populate.clone();
+            let _bcc_row = bcc_row_for_populate.clone();
             let subject_row = subject_row_for_populate.clone();
             let webview = webview_for_populate.clone();
             let app = Rc::clone(&app);
@@ -721,32 +730,18 @@ pub fn present(
             let window = window_for_populate.clone();
             save_row.connect_activated(move |_| {
                 templates_popover.popdown();
-                save_as_template_dialog(
-                    &window,
-                    &app,
-                    account_id,
-                    &to_row,
-                    &cc_row,
-                    &bcc_row,
-                    &subject_row,
-                    &webview,
-                    &banner,
-                );
+                save_as_template_dialog(&window, &app, account_id, &subject_row, &webview, &banner);
             });
             templates_list.append(&save_row);
-        }
+        })
     };
-    // Show templates when popover opens
-    templates_popover.connect_closed({
-        let _populate = populate_templates.clone();
-        move |_| {
-            // Re-populate next time it opens
-        }
+    // Re-populate every time the popover opens so a template saved during this
+    // session (or from elsewhere) appears without reopening the composer.
+    templates_popover.connect_show({
+        let populate = Rc::clone(&populate_templates);
+        move |_| populate()
     });
-    // Initial population on first open
     templates_popover.set_autohide(true);
-    // We'll populate when the button is clicked by connecting to the popover's show signal
-    // For simplicity, populate now
     populate_templates();
 
     // Contact autocomplete for recipient fields
@@ -781,7 +776,6 @@ pub fn present(
                 let popover_ref = Rc::clone(&popover_ref);
                 let list_box_ref = Rc::clone(&list_box_ref);
                 let app = Rc::clone(&app);
-                let account_id = account_id;
                 move |_| {
                     let query = entry.text().to_string();
                     if query.trim().is_empty() {
@@ -866,7 +860,7 @@ pub fn present(
 
             // Handle key events for navigation
             let key_controller = gtk::EventControllerKey::new();
-            let entry_for_keys = entry.clone();
+            let _entry_for_keys = entry.clone();
             let list_box_for_keys = Rc::clone(&list_box_ref);
             let popover_for_keys = Rc::clone(&popover_ref);
             key_controller.connect_key_pressed(move |_, key, _, _| {
@@ -944,10 +938,12 @@ pub fn present(
     let closed = Rc::new(Cell::new(false));
     let sent = Rc::new(Cell::new(false));
 
-    // HTML/Plain text mode toggle
-    let is_html_mode = Rc::new(Cell::new(draft.html_body.is_some()));
-
-    let snapshot: Rc<dyn Fn() -> OutgoingMessage> = {
+    // `snapshot` gathers the composer state asynchronously. The body extraction
+    // runs JavaScript in the WebView, whose result callback is delivered on the
+    // GTK main loop. Blocking that thread with `recv_timeout` would deadlock the
+    // result it waits for, so instead we query and invoke a callback once the
+    // results are in.
+    let snapshot: SnapshotFn = {
         let account = account.clone();
         let draft_key = Rc::clone(&draft_key);
         let to_row = to_row.clone();
@@ -958,62 +954,100 @@ pub fn present(
         let attachments = Rc::clone(&attachments);
         let in_reply_to = draft.in_reply_to.clone();
         let references = draft.references.clone();
-        Rc::new(move || {
-            let html_body = if is_html_mode.get() {
-                // Get HTML from WebView
-                let (tx, rx) = std::sync::mpsc::channel();
-                let webview_clone = webview.clone();
-                webview_clone.evaluate_javascript(
+        let is_html = Rc::clone(&is_html_mode);
+        Rc::new(move |callback: Box<dyn FnOnce(OutgoingMessage)>| {
+            let html_enabled = is_html.get();
+            // Fields that can be read synchronously.
+            let to = to_row.text().to_string();
+            let cc = cc_row.text().to_string();
+            let bcc = bcc_row.text().to_string();
+            let subject = subject_row.text().to_string();
+            let draft = draft_key.borrow().clone();
+            let attachment_list = attachments.borrow().clone();
+            let from_name = account.display_name.clone();
+            let from_addr = account.email.clone();
+            let in_reply_to = in_reply_to.clone();
+            let references = references.clone();
+
+            // Shared results from the two JS queries. Whichever of the two
+            // callbacks completes last invokes the user callback.
+            let html_result = Rc::new(RefCell::new(None::<String>));
+            let text_result = Rc::new(RefCell::new(None::<String>));
+            let remaining = Rc::new(Cell::new(if html_enabled { 2 } else { 1 }));
+            // `FnOnce` cannot be cloned, so share it behind a slot that is
+            // taken exactly once when both queries have completed.
+            let callback: SnapshotCallback = Rc::new(RefCell::new(Some(callback)));
+
+            let finish: Rc<dyn Fn()> = {
+                let html_result = Rc::clone(&html_result);
+                let text_result = Rc::clone(&text_result);
+                let remaining = Rc::clone(&remaining);
+                let callback = Rc::clone(&callback);
+                Rc::new(move || {
+                    remaining.set(remaining.get() - 1);
+                    if remaining.get() > 0 {
+                        return;
+                    }
+                    let Some(callback) = callback.borrow_mut().take() else {
+                        return;
+                    };
+                    let html_body = html_result.borrow().clone();
+                    let text_body = text_result.borrow().clone().unwrap_or_default();
+                    callback(OutgoingMessage {
+                        from_name: from_name.clone(),
+                        from_addr: from_addr.clone(),
+                        to: to.clone(),
+                        cc: cc.clone(),
+                        bcc: bcc.clone(),
+                        subject: subject.clone(),
+                        body: text_body,
+                        html_body: if html_enabled {
+                            Some(html_body.unwrap_or_default())
+                        } else {
+                            None
+                        },
+                        in_reply_to: in_reply_to.clone(),
+                        references: references.clone(),
+                        draft_key: Some(draft.clone()),
+                        attachments: attachment_list.clone(),
+                    });
+                })
+            };
+
+            // Plain-text mirror is always captured (used when HTML mode is off
+            // and as the text alternative when it is on).
+            {
+                let finish = Rc::clone(&finish);
+                let text_result = Rc::clone(&text_result);
+                webview.evaluate_javascript(
+                    "document.body.innerText",
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        if let Ok(value) = result {
+                            *text_result.borrow_mut() = Some(jsc_string(&value));
+                        }
+                        finish();
+                    },
+                );
+            }
+
+            if html_enabled {
+                let finish = Rc::clone(&finish);
+                let html_result = Rc::clone(&html_result);
+                webview.evaluate_javascript(
                     "document.body.innerHTML",
                     None,
                     None,
                     None::<&gio::Cancellable>,
                     move |result| {
                         if let Ok(value) = result {
-                            let html = value.to_string();
-                            let _ = tx.send(html);
+                            *html_result.borrow_mut() = Some(jsc_string(&value));
                         }
+                        finish();
                     },
                 );
-                rx.recv_timeout(std::time::Duration::from_millis(100))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            OutgoingMessage {
-                from_name: account.display_name.clone(),
-                from_addr: account.email.clone(),
-                to: to_row.text().to_string(),
-                cc: cc_row.text().to_string(),
-                bcc: bcc_row.text().to_string(),
-                subject: subject_row.text().to_string(),
-                body: {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    let webview_clone = webview.clone();
-                    webview_clone.evaluate_javascript(
-                        "document.body.innerText",
-                        None,
-                        None,
-                        None::<&gio::Cancellable>,
-                        move |result| {
-                            if let Ok(value) = result {
-                                let text = value.to_string();
-                                let _ = tx.send(text);
-                            }
-                        },
-                    );
-                    rx.recv_timeout(std::time::Duration::from_millis(100))
-                        .unwrap_or_default()
-                },
-                html_body: if is_html_mode.get() {
-                    Some(html_body)
-                } else {
-                    None
-                },
-                in_reply_to: in_reply_to.clone(),
-                references: references.clone(),
-                draft_key: Some(draft_key.borrow().clone()),
-                attachments: attachments.borrow().clone(),
             }
         })
     };
@@ -1028,8 +1062,10 @@ pub fn present(
             if !force && !dirty.replace(false) {
                 return;
             }
-            let outgoing = snapshot();
-            match outgoing.build_draft() {
+            let app = Rc::clone(&app);
+            let dirty = Rc::clone(&dirty);
+            let banner = banner.clone();
+            snapshot(Box::new(move |outgoing| match outgoing.build_draft() {
                 Ok(_) => {
                     app.engine.save_draft(account_id, outgoing);
                     banner.set_title("Draft saved");
@@ -1040,7 +1076,7 @@ pub fn present(
                     banner.set_title(&format!("Could not save the draft: {error}"));
                     banner.set_revealed(true);
                 }
-            }
+            }));
         })
     };
 
@@ -1049,7 +1085,7 @@ pub fn present(
         row.connect_changed(move |_| dirty.set(true));
     }
     {
-        let dirty = Rc::clone(&dirty);
+        let _dirty = Rc::clone(&dirty);
         let webview = webview.clone();
         // WebView doesn't have a simple "changed" signal; rely on auto-save timer
         // and manual save. We could add a timeout to check for changes if needed.
@@ -1138,33 +1174,43 @@ pub fn present(
     let send_encrypt = Rc::clone(&pgp_encrypt);
     let send_sign = Rc::clone(&pgp_sign);
     send.connect_clicked(move |_| {
-        let outgoing = send_snapshot();
-        let pgp = PgpOptions {
-            encrypt: send_encrypt.get(),
-            sign: send_sign.get(),
-        };
-        match app.mailin.build_outgoing(&account.id, &outgoing, pgp) {
-            Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
-                Ok(_) => {
-                    let key = send_key.borrow().clone();
-                    if !key.is_empty() {
-                        app.engine.discard_draft(account.id, key);
+        let app = Rc::clone(&app);
+        let banner = banner.clone();
+        let send_key = Rc::clone(&send_key);
+        let send_sent = Rc::clone(&send_sent);
+        let send_closed = Rc::clone(&send_closed);
+        let send_encrypt = Rc::clone(&send_encrypt);
+        let send_sign = Rc::clone(&send_sign);
+        let close_window = close_window.clone();
+        let on_sent = on_sent.clone();
+        send_snapshot(Box::new(move |outgoing| {
+            let pgp = PgpOptions {
+                encrypt: send_encrypt.get(),
+                sign: send_sign.get(),
+            };
+            match app.mailin.build_outgoing(&account.id, &outgoing, pgp) {
+                Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
+                    Ok(_) => {
+                        let key = send_key.borrow().clone();
+                        if !key.is_empty() {
+                            app.engine.discard_draft(account.id, key);
+                        }
+                        send_sent.set(true);
+                        send_closed.set(true);
+                        on_sent();
+                        close_window.close();
                     }
-                    send_sent.set(true);
-                    send_closed.set(true);
-                    on_sent();
-                    close_window.close();
-                }
+                    Err(error) => {
+                        banner.set_title(&format!("Could not queue the message: {error}"));
+                        banner.set_revealed(true);
+                    }
+                },
                 Err(error) => {
-                    banner.set_title(&format!("Could not queue the message: {error}"));
+                    banner.set_title(&format!("Could not send: {error}"));
                     banner.set_revealed(true);
                 }
-            },
-            Err(error) => {
-                banner.set_title(&format!("Could not send: {error}"));
-                banner.set_revealed(true);
             }
-        }
+        }));
     });
 
     // Ctrl+Enter sends from anywhere in the composer.
@@ -1435,13 +1481,11 @@ fn save_as_template_dialog(
     parent: &adw::Window,
     app: &Rc<AppState>,
     account_id: AccountId,
-    to_row: &adw::EntryRow,
-    cc_row: &adw::EntryRow,
-    bcc_row: &adw::EntryRow,
     subject_row: &adw::EntryRow,
     webview: &WebView,
     banner: &adw::Banner,
 ) {
+    let _ = parent;
     let dialog = adw::MessageDialog::builder()
         .heading("Save as template")
         .body("Enter a name for this template:")
@@ -1459,27 +1503,26 @@ fn save_as_template_dialog(
     dialog.set_extra_child(Some(&entry));
 
     let entry_clone = entry.clone();
-    let to_text = to_row.text().to_string();
-    let cc_text = cc_row.text().to_string();
-    let bcc_text = bcc_row.text().to_string();
     let subject_text = subject_row.text().to_string();
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    webview.evaluate_javascript(
-        "document.body.innerText",
-        None,
-        None,
-        None::<&gio::Cancellable>,
-        move |result| {
-            if let Ok(value) = result {
-                let text = value.to_string();
-                let _ = tx.send(text);
-            }
-        },
-    );
-    let body_text = rx
-        .recv_timeout(std::time::Duration::from_millis(100))
-        .unwrap_or_default();
+    // Query the body asynchronously: the result callback runs on the GTK main
+    // loop, so it is populated by the time the user answers the dialog. Blocking
+    // here with `recv_timeout` would deadlock the very callback we await.
+    let body_text = Rc::new(RefCell::new(String::new()));
+    {
+        let body_text = Rc::clone(&body_text);
+        webview.evaluate_javascript(
+            "document.body.innerText",
+            None,
+            None,
+            None::<&gio::Cancellable>,
+            move |result| {
+                if let Ok(value) = result {
+                    *body_text.borrow_mut() = jsc_string(&value);
+                }
+            },
+        );
+    }
 
     let app = Rc::clone(app);
     let banner = banner.clone();
@@ -1488,6 +1531,7 @@ fn save_as_template_dialog(
         if response == "save" {
             let name = entry_clone.text().to_string().trim().to_owned();
             if !name.is_empty() {
+                let body_text = body_text.borrow().clone();
                 match app.mailin.store().upsert_template(
                     &account_id,
                     &name,

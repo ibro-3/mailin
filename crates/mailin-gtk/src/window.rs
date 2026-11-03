@@ -14,7 +14,6 @@ use adw::prelude::*;
 use gdk::{Key, ModifierType};
 use gdk_pixbuf::prelude::*;
 use glib::variant::ToVariant;
-use gtk::gio::prelude::*;
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
@@ -69,8 +68,7 @@ struct Selection {
 /// Navigation target for mobile stack navigation.
 #[derive(Debug, Clone)]
 enum NavTarget {
-    MessageList,
-    MessageReader(MessageId),
+    MessageReader,
 }
 
 struct Widgets {
@@ -176,7 +174,7 @@ pub struct MainWindow {
     html_mode: Cell<bool>,
     /// Message for which the user explicitly allowed remote content.
     remote_allowed: Cell<Option<MessageId>>,
-    pending_attachment: Rc<RefCell<Option<PendingAttachment>>>,
+    pending_attachment: Rc<RefCell<Vec<PendingAttachment>>>,
     /// Draft edit window per message, so selecting the same draft row again
     /// focuses the open composer instead of spawning a second one.
     last_draft: RefCell<Option<(MessageId, glib::WeakRef<gtk::Window>)>>,
@@ -638,7 +636,7 @@ impl MainWindow {
             html_view: RefCell::new(None),
             html_mode: Cell::new(html_mode),
             remote_allowed: Cell::new(None),
-            pending_attachment: Rc::new(RefCell::new(None)),
+            pending_attachment: Rc::new(RefCell::new(Vec::new())),
             last_draft: RefCell::new(None),
             expanded_threads: RefCell::new(std::collections::HashSet::new()),
             widgets: Widgets {
@@ -761,7 +759,7 @@ impl MainWindow {
                     this.widgets.window.default_width() as f64
                 };
                 let is_mobile = width < BREAKPOINT_MOBILE;
-                let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
+                let is_tablet = (BREAKPOINT_MOBILE..BREAKPOINT_TABLET).contains(&width);
                 let is_desktop = width >= BREAKPOINT_TABLET;
 
                 let mut selection = this.selection.borrow_mut();
@@ -809,7 +807,7 @@ impl MainWindow {
                     last_width.set(width);
                     // Recompute using the same logic as the initial pass.
                     let is_mobile = width < BREAKPOINT_MOBILE;
-                    let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
+                    let is_tablet = (BREAKPOINT_MOBILE..BREAKPOINT_TABLET).contains(&width);
                     let is_desktop = width >= BREAKPOINT_TABLET;
                     {
                         let mut selection = this.selection.borrow_mut();
@@ -932,28 +930,27 @@ impl MainWindow {
 
         // Notification action: mark as read (accepts "account_id:message_id1,message_id2,..." parameter)
         let mark_read =
-            gio::SimpleAction::new("notification-mark-read", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("notification-mark-read", Some(glib::VariantTy::STRING));
         mark_read.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
                 let Some(param) = parameter.and_then(|v| v.str()) else {
                     return;
                 };
-                this.notification_mark_read(&param);
+                this.notification_mark_read(param);
             }
         });
         this.widgets.window.add_action(&mark_read);
 
         // Notification action: archive (accepts "account_id:message_id1,message_id2,..." parameter)
-        let archive =
-            gio::SimpleAction::new("notification-archive", Some(&glib::VariantTy::STRING));
+        let archive = gio::SimpleAction::new("notification-archive", Some(glib::VariantTy::STRING));
         archive.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
                 let Some(param) = parameter.and_then(|v| v.str()) else {
                     return;
                 };
-                this.notification_archive(&param);
+                this.notification_archive(param);
             }
         });
         this.widgets.window.add_action(&archive);
@@ -1029,7 +1026,7 @@ impl MainWindow {
             let this = Rc::clone(this);
             move |_| {
                 let mut selection = this.selection.borrow_mut();
-                if let Some(NavTarget::MessageReader(_)) = selection.nav_stack.pop() {
+                if let Some(NavTarget::MessageReader) = selection.nav_stack.pop() {
                     // Go back to message list
                     this.widgets.reader_stack.set_visible_child_name("list");
                     let back_button = &this.widgets.back_button;
@@ -1091,13 +1088,20 @@ impl MainWindow {
             }
         });
 
-        // Thread expand/collapse on chevron click (rightmost area of row)
+        // Thread expand/collapse on chevron click. Restrict to the primary
+        // button and to the left-hand chevron region so a normal row click still
+        // opens the message, and claim the gesture so activation is suppressed.
         let click_gesture = gtk::GestureClick::new();
-        click_gesture.set_button(0); // Handle all buttons
+        click_gesture.set_button(gtk::gdk::BUTTON_PRIMARY);
         click_gesture.connect_pressed({
             let this = Rc::clone(this);
             move |gesture, n_press, x, y| {
                 if this.programmatic.get() || n_press != 1 {
+                    return;
+                }
+                // The chevron sits at the very start of the row (after a small
+                // margin); only treat clicks there as expand/collapse.
+                if x > 32.0 {
                     return;
                 }
                 let list_box = &this.widgets.message_list;
@@ -1124,6 +1128,8 @@ impl MainWindow {
                             }
                             drop(expanded);
                             this.refresh_messages();
+                            // Consume the click so the row is not also activated.
+                            gesture.set_state(gtk::EventSequenceState::Claimed);
                         }
                     }
                 }
@@ -1358,7 +1364,7 @@ impl MainWindow {
                         for entry in history {
                             let row = adw::ActionRow::builder()
                                 .title(&entry.query)
-                                .subtitle(&format!(
+                                .subtitle(format!(
                                     "{} ago",
                                     format::list_time(now, entry.timestamp)
                                 ))
@@ -1413,7 +1419,7 @@ impl MainWindow {
         this.widgets.window.add_action(&new_folder_action);
 
         let rename_folder_action =
-            gio::SimpleAction::new("rename-folder", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("rename-folder", Some(glib::VariantTy::STRING));
         rename_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
@@ -1426,7 +1432,7 @@ impl MainWindow {
         this.widgets.window.add_action(&rename_folder_action);
 
         let delete_folder_action =
-            gio::SimpleAction::new("delete-folder", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("delete-folder", Some(glib::VariantTy::STRING));
         delete_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
@@ -1439,7 +1445,7 @@ impl MainWindow {
         this.widgets.window.add_action(&delete_folder_action);
 
         let subscribe_folder_action =
-            gio::SimpleAction::new("subscribe-folder", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("subscribe-folder", Some(glib::VariantTy::STRING));
         subscribe_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
@@ -1452,7 +1458,7 @@ impl MainWindow {
         this.widgets.window.add_action(&subscribe_folder_action);
 
         let unsubscribe_folder_action =
-            gio::SimpleAction::new("unsubscribe-folder", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("unsubscribe-folder", Some(glib::VariantTy::STRING));
         unsubscribe_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
@@ -1465,7 +1471,7 @@ impl MainWindow {
         this.widgets.window.add_action(&unsubscribe_folder_action);
 
         let folder_properties_action =
-            gio::SimpleAction::new("folder-properties", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("folder-properties", Some(glib::VariantTy::STRING));
         folder_properties_action.connect_activate({
             let this = Rc::clone(this);
             move |_, param| {
@@ -1548,7 +1554,7 @@ impl MainWindow {
         this.widgets.window.add_action(&sync_action);
 
         let move_to_folder_action =
-            gio::SimpleAction::new("move-messages-to-folder", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("move-messages-to-folder", Some(glib::VariantTy::STRING));
         move_to_folder_action.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
@@ -1571,7 +1577,7 @@ impl MainWindow {
         this.widgets.window.add_action(&move_to_folder_action);
 
         let undo_move_action =
-            gio::SimpleAction::new("undo-move-message", Some(&glib::VariantTy::STRING));
+            gio::SimpleAction::new("undo-move-message", Some(glib::VariantTy::STRING));
         undo_move_action.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
@@ -2388,7 +2394,7 @@ impl MainWindow {
             self.selection
                 .borrow_mut()
                 .nav_stack
-                .push(NavTarget::MessageReader(message.id));
+                .push(NavTarget::MessageReader);
             let back_button = &self.widgets.back_button;
             back_button.set_visible(true);
         }
@@ -2594,7 +2600,7 @@ impl MainWindow {
         } else {
             "This message is signed with OpenPGP."
         };
-        let mut actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         let action_label = gtk::Label::new(Some(title));
         action_label.set_xalign(0.0);
         action_label.set_hexpand(true);
@@ -2855,7 +2861,8 @@ impl MainWindow {
             if let Ok(Some(data)) = self.app.mailin.attachment(message_id, &attachment.part_id) {
                 if let Some(bytes) = data.data {
                     if let Ok(pixbuf) = Self::bytes_to_pixbuf(&bytes) {
-                        let image = gtk::Image::from_pixbuf(Some(&pixbuf));
+                        let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
+                        let image = gtk::Image::from_paintable(Some(&texture));
                         image.set_halign(gtk::Align::Center);
                         image.set_valign(gtk::Align::Center);
                         container.append(&image);
@@ -2889,27 +2896,28 @@ impl MainWindow {
         })
     }
 
-    /// Finish a save that was waiting for attachment bytes to be downloaded.
+    /// Finish saves that were waiting for attachment bytes to be downloaded.
+    /// Several attachments of the same message may be queued at once.
     fn resolve_pending_attachment(&self, message_id: MessageId) {
-        let pending = self
-            .pending_attachment
-            .borrow()
-            .as_ref()
-            .filter(|pending| pending.message_id == message_id)
-            .cloned();
-        let Some(pending) = pending else {
-            return;
+        let ready: Vec<PendingAttachment> = {
+            let mut pending = self.pending_attachment.borrow_mut();
+            let (for_message, rest): (Vec<_>, Vec<_>) = pending
+                .drain(..)
+                .partition(|pending| pending.message_id == message_id);
+            *pending = rest;
+            for_message
         };
-        self.pending_attachment.borrow_mut().take();
-        request_save_attachment(
-            Rc::clone(&self.app),
-            self.widgets.window.clone().upcast::<gtk::Window>(),
-            self.widgets.toast.clone(),
-            Rc::clone(&self.pending_attachment),
-            message_id,
-            pending.attachment,
-            true,
-        );
+        for pending in ready {
+            request_save_attachment(
+                Rc::clone(&self.app),
+                self.widgets.window.clone().upcast::<gtk::Window>(),
+                self.widgets.toast.clone(),
+                Rc::clone(&self.pending_attachment),
+                message_id,
+                pending.attachment,
+                true,
+            );
+        }
     }
 
     fn update_actions(&self, message: &MessageHeader) {
@@ -3895,7 +3903,7 @@ impl MainWindow {
         let rows = gtk::ListBox::new();
         rows.set_selection_mode(gtk::SelectionMode::None);
         rows.add_css_class("boxed-list");
-        let mut add_row = |title: &str, value: String| {
+        let add_row = |title: &str, value: String| {
             let row = adw::ActionRow::builder()
                 .title(title)
                 .subtitle(value)
@@ -3956,7 +3964,7 @@ fn request_save_attachment(
     app: Rc<AppState>,
     window: gtk::Window,
     toast: adw::ToastOverlay,
-    pending: Rc<RefCell<Option<PendingAttachment>>>,
+    pending: Rc<RefCell<Vec<PendingAttachment>>>,
     message_id: MessageId,
     attachment: AttachmentMeta,
     retry: bool,
@@ -3966,28 +3974,29 @@ fn request_save_attachment(
             "Could not load the attachment; it may no longer be available.",
         ));
     };
+    let queue = |app: &Rc<AppState>, toast: &adw::ToastOverlay, attachment: &AttachmentMeta| {
+        let mut pending = pending.borrow_mut();
+        // Avoid queueing the same attachment twice.
+        if !pending
+            .iter()
+            .any(|p| p.message_id == message_id && p.attachment.part_id == attachment.part_id)
+        {
+            pending.push(PendingAttachment {
+                message_id,
+                attachment: attachment.clone(),
+            });
+        }
+        app.engine.refresh_body(message_id);
+        toast.add_toast(adw::Toast::new("Downloading attachment…"));
+    };
     match app.mailin.attachment(message_id, &attachment.part_id) {
         Ok(Some(data)) => match data.data {
             Some(bytes) => save_attachment_dialog(&window, &toast, &attachment, bytes),
             None if retry => unavailable(&toast),
-            None => {
-                *pending.borrow_mut() = Some(PendingAttachment {
-                    message_id,
-                    attachment: attachment.clone(),
-                });
-                app.engine.refresh_body(message_id);
-                toast.add_toast(adw::Toast::new("Downloading attachment…"));
-            }
+            None => queue(&app, &toast, &attachment),
         },
         Ok(None) if retry => unavailable(&toast),
-        Ok(None) => {
-            *pending.borrow_mut() = Some(PendingAttachment {
-                message_id,
-                attachment,
-            });
-            app.engine.refresh_body(message_id);
-            toast.add_toast(adw::Toast::new("Downloading attachment…"));
-        }
+        Ok(None) => queue(&app, &toast, &attachment),
         Err(error) => {
             toast.add_toast(adw::Toast::new(&format!(
                 "Could not read the attachment: {error}"
