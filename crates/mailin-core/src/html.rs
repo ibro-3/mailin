@@ -476,12 +476,7 @@ fn sanitize_tag_attributes(tag: &str) -> String {
         }
 
         let lower = name.to_ascii_lowercase();
-        let script_url = value.as_deref().is_some_and(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            value.starts_with("javascript:")
-                || value.starts_with("vbscript:")
-                || value.starts_with("data:text/html")
-        });
+        let script_url = value.as_deref().is_some_and(is_dangerous_url);
         let dangerous = lower.starts_with("on")
             || (matches!(lower.as_str(), "href" | "src" | "action" | "formaction") && script_url);
         if dangerous {
@@ -490,6 +485,105 @@ fn sanitize_tag_attributes(tag: &str) -> String {
         out.extend(chars[name_start..i].iter());
     }
     out
+}
+
+/// Decode the HTML character references that browsers accept in attribute
+/// values: numeric (`&#115;`, `&#x73;`), a small set of named entities, and
+/// the no-op forms browsers tolerate (NUL bytes, `&nbsp;`-style whitespace,
+/// and HTML comments like `java<!-- -->script:`).
+fn decode_entity(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '&' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        // Expect `&[#]?name;` — a missing `;` is also tolerated by browsers.
+        let mut j = i + 1;
+        let numeric = j < chars.len() && chars[j] == '#';
+        if numeric {
+            j += 1;
+        }
+        let hex = numeric && j < chars.len() && matches!(chars[j], 'x' | 'X');
+        if hex {
+            j += 1;
+        }
+        let digits_start = j;
+        while j < chars.len() && j - digits_start < 8 && chars[j].is_ascii_alphanumeric() {
+            j += 1;
+        }
+        if j > digits_start {
+            let had_semicolon = j < chars.len() && chars[j] == ';';
+            let digits: String = chars[digits_start..j].iter().collect();
+            let decoded = if numeric {
+                let radix = if hex { 16 } else { 10 };
+                u32::from_str_radix(&digits, radix)
+                    .ok()
+                    .and_then(char::from_u32)
+            } else {
+                decode_named_entity(&digits)
+            };
+            if let Some(ch) = decoded {
+                out.push(ch);
+                i = if had_semicolon { j + 1 } else { j };
+                continue;
+            }
+        }
+        // Not a recognised entity; keep the '&' verbatim.
+        out.push('&');
+        i += 1;
+    }
+    out
+}
+
+/// The handful of named entities that show up in scheme-smuggling payloads.
+fn decode_named_entity(name: &str) -> Option<char> {
+    match name.to_ascii_lowercase().as_str() {
+        "tab" => Some('\t'),
+        "newline" => Some('\n'),
+        "sol" => Some('/'),
+        "colon" => Some(':'),
+        "amp" => Some('&'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        _ => None,
+    }
+}
+
+/// Strip characters browsers ignore when resolving a URL scheme (leading
+/// control characters, embedded tabs/newlines, and comment markers).
+fn normalize_url_scheme(value: &str) -> String {
+    let decoded = decode_entity(value);
+    // Remove anything that browsers strip before comparing the scheme:
+    // ASCII control chars, whitespace, and comment delimiters.
+    let mut cleaned = String::with_capacity(decoded.len());
+    for ch in decoded.chars() {
+        if ch.is_ascii_control() || ch == ' ' {
+            continue;
+        }
+        cleaned.push(ch);
+    }
+    // Strip HTML comment markers that can be embedded mid-scheme.
+    while let Some(start) = cleaned.find("<!--") {
+        if let Some(end) = cleaned[start..].find("-->") {
+            cleaned.replace_range(start..start + end + 3, "");
+        } else {
+            break;
+        }
+    }
+    cleaned.trim().to_ascii_lowercase()
+}
+
+/// Return true when the attribute value resolves to a dangerous URL scheme.
+fn is_dangerous_url(value: &str) -> bool {
+    let normalized = normalize_url_scheme(value);
+    normalized.starts_with("javascript:")
+        || normalized.starts_with("vbscript:")
+        || normalized.starts_with("data:")
 }
 #[cfg(test)]
 mod tests {
@@ -793,6 +887,74 @@ mod tests {
             &[],
         );
         assert!(doc.contains("font-src data:"));
+    }
+
+    #[test]
+    fn sanitizer_rejects_entity_encoded_javascript_urls() {
+        // `&#115;` decodes to `s`, so a naive `starts_with` check misses it.
+        let encoded = sanitize_html("<a href=\"java&#115;cript:alert(1)\">x</a>");
+        assert!(
+            !encoded.contains("javascript:") && !encoded.contains("java&#115;cript:"),
+            "entity-encoded javascript URL survived: {encoded}"
+        );
+
+        let hex = sanitize_html("<a href=\"java&#x73;cript:alert(1)\">x</a>");
+        assert!(
+            !hex.contains("javascript:") && !hex.contains("&#x73;cript:"),
+            "hex-encoded javascript URL survived: {hex}"
+        );
+
+        // A missing semicolon is tolerated by browsers and must be caught.
+        let no_semicolon = sanitize_html("<a href=\"javascript&#58;alert(1)\">x</a>");
+        assert!(
+            !no_semicolon.contains("javascript&#58;"),
+            "entity-encoded colon survived: {no_semicolon}"
+        );
+    }
+
+    #[test]
+    fn sanitizer_rejects_whitespace_and_comment_smuggling() {
+        let tabbed = sanitize_html("<a href=\"java\tscript:alert(1)\">x</a>");
+        assert!(
+            !tabbed.contains("java\tscript:") && !tabbed.contains("javascript:"),
+            "tab-smuggled URL survived: {tabbed}"
+        );
+
+        let commented = sanitize_html("<a href=\"java<!-- -->script:alert(1)\">x</a>");
+        assert!(
+            !commented.contains("java<!-- -->script:"),
+            "comment-smuggled URL survived: {commented}"
+        );
+
+        let newline_entity = sanitize_html("<a href=\"java&#10;script:alert(1)\">x</a>");
+        assert!(
+            !newline_entity.contains("javascript:") && !newline_entity.contains("&#10;script:"),
+            "newline-entity-smuggled URL survived: {newline_entity}"
+        );
+    }
+
+    #[test]
+    fn sanitizer_rejects_data_and_vbscript_schemes() {
+        for payload in [
+            "<a href=\"data:text/html,<script>alert(1)</script>\">x</a>",
+            "<a href=\"vbscript:msgbox(1)\">x</a>",
+            "<img src=\"vbscript:msgbox(1)\">",
+        ] {
+            let sanitized = sanitize_html(payload);
+            let lower = sanitized.to_ascii_lowercase();
+            assert!(
+                !lower.contains("vbscript:") && !lower.contains("data:text/html"),
+                "dangerous scheme survived for {payload}: {sanitized}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizer_keeps_safe_urls() {
+        let safe = sanitize_html("<a href=\"https://example.com/a?b=1\">x</a>");
+        assert!(safe.contains("href=\"https://example.com/a?b=1\""));
+        let relative = sanitize_html("<a href=\"/relative/path\">x</a>");
+        assert!(relative.contains("href=\"/relative/path\""));
     }
 
     #[test]

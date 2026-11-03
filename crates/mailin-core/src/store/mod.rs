@@ -19,8 +19,7 @@ use crate::error::{Error, Result};
 use crate::model::{
     AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole,
     FolderSyncState, MessageHeader, MessageId, NewMessage, OutboxEntry, OutboxState, PgpKey,
-    Plugin, Rule, RuleAction, RuleCondition, ScheduledAction, Template, UpsertedMessage,
-    VirtualFolder, VirtualFolderKind,
+    Plugin, Rule, ScheduledAction, Template, UpsertedMessage, VirtualFolder, VirtualFolderKind,
 };
 
 pub use migrations::SCHEMA_VERSION;
@@ -362,6 +361,28 @@ impl Store {
             "SELECT {MESSAGE_COLUMNS} FROM messages m WHERE m.folder_id = ?1 AND m.uid = ?2"
         );
         conn.query_row(&sql, params![folder.0, uid], map_message)
+            .optional()
+            .map_err(Error::from)
+    }
+
+    /// Find a message in `folder` by its RFC 5322 `Message-ID` header.
+    ///
+    /// Unlike the local row id or the IMAP UID, the `Message-ID` survives the
+    /// move to another folder, so it is the stable identity for messages that
+    /// are relocated (e.g. snoozed and later restored).
+    pub fn message_by_rfc_id(
+        &self,
+        folder: FolderId,
+        rfc_message_id: &str,
+    ) -> Result<Option<MessageHeader>> {
+        let conn = self.lock()?;
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages m
+             WHERE m.folder_id = ?1 AND m.message_id = ?2
+             ORDER BY m.received_at DESC, m.uid DESC
+             LIMIT 1"
+        );
+        conn.query_row(&sql, params![folder.0, rfc_message_id], map_message)
             .optional()
             .map_err(Error::from)
     }
@@ -763,13 +784,13 @@ impl Store {
 
     /// Compute thread depth for all messages in a thread.
     /// Returns map of message_id (database row id) -> depth (0 = root).
+    /// Takes the connection directly so callers that already hold the store
+    /// lock do not re-lock (which would deadlock on the non-reentrant mutex).
     fn compute_thread_depths(
-        &self,
+        conn: &rusqlite::Connection,
         folder: FolderId,
         thread_root_key: &str,
     ) -> Result<std::collections::HashMap<i64, u32>> {
-        let conn = self.lock()?;
-
         // Get all messages in thread ordered by date
         let mut stmt = conn.prepare(
             "SELECT id, message_id, refs FROM messages
@@ -814,7 +835,7 @@ impl Store {
                 break;
             }
             changed = false;
-            for (db_id, msg_id, refs) in &messages {
+            for (db_id, _msg_id, refs) in &messages {
                 if depths.contains_key(db_id) {
                     continue;
                 }
@@ -870,7 +891,7 @@ impl Store {
                 root.thread_reply_count = reply_count as u32;
 
                 // Count unread in thread
-                let unread_count: i64 = conn.query_row(
+                let _unread_count: i64 = conn.query_row(
                     "SELECT COUNT(*) FROM messages WHERE folder_id = ?1 AND thread_root_key = ?2 AND instr(' ' || flags || ' ', ' \\Seen ') = 0",
                     params![folder.0, key],
                     |row| row.get(0),
@@ -879,7 +900,7 @@ impl Store {
                 // but better to add a proper field. For now, let's just count.
 
                 // Compute thread depth for this root and its replies
-                if let Ok(depths) = self.compute_thread_depths(folder, key) {
+                if let Ok(depths) = Self::compute_thread_depths(&conn, folder, key) {
                     root.thread_depth = depths.get(&root.id.0).copied().unwrap_or(0);
                 }
             }
@@ -1293,6 +1314,7 @@ impl Store {
     // --------------------------------------------------------------- rules
 
     /// Insert or update a rule for an account.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_rule(
         &self,
         account: &AccountId,
@@ -1369,15 +1391,6 @@ impl Store {
             "DELETE FROM rules WHERE account_id = ?1 AND name = ?2",
             params![account.to_string(), name],
         )? > 0)
-    }
-
-    /// Apply rules to messages - delegates to the engine via the Mailin facade.
-    /// This is a placeholder that the Mailin facade uses to call the engine.
-    pub fn apply_rules(&self, _folder_id: FolderId, _message_ids: &[MessageId]) {
-        // The actual rule application happens in the engine.
-        // This method exists to allow the Mailin facade to call it.
-        // The engine's apply_rules is called via Mailin::apply_rules which
-        // routes to the engine. This is a no-op at the store level.
     }
 
     // --------------------------------------------------------------- virtual folders
@@ -1460,18 +1473,13 @@ impl Store {
             return self.list_flagged_messages(account_filter, limit, offset);
         }
 
-        let conn = self.lock()?;
-
-        let account_placeholders = account_filter
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(limit as i64), Box::new(offset as i64)];
-        for acc in account_filter {
-            params.push(Box::new(acc.to_string()));
+        // An empty account filter would generate `IN ()`, which is a syntax
+        // error. There is nothing to show in that case.
+        if account_filter.is_empty() {
+            return Ok(Vec::new());
         }
+
+        let conn = self.lock()?;
 
         let folder_roles = match kind {
             VirtualFolderKind::UnifiedInbox => "'inbox'",
@@ -1479,14 +1487,29 @@ impl Store {
             _ => "'inbox'", // Should not happen, Starred handled above
         };
 
+        // Numbered placeholders: ?1..?n are the accounts, then LIMIT/OFFSET.
+        // SQLite numbers a bare `?` as 1, which would collide with `?1`.
+        let account_placeholders = (1..=account_filter.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let limit_idx = account_filter.len() + 1;
+        let offset_idx = account_filter.len() + 2;
+
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(offset_idx);
+        for acc in account_filter {
+            params.push(Box::new(acc.to_string()));
+        }
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
+
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS}, f.id as folder_id, f.account_id
              FROM messages m
              JOIN folders f ON f.id = m.folder_id
-             WHERE f.role IN ({}) AND f.account_id IN ({})
+             WHERE f.role IN ({folder_roles}) AND f.account_id IN ({account_placeholders})
              ORDER BY m.received_at DESC, m.uid DESC
-             LIMIT ?1 OFFSET ?2",
-            folder_roles, account_placeholders
+             LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -1494,8 +1517,10 @@ impl Store {
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
             |row| {
                 let flags: String = row.get(17)?;
-                let account_id_str: String = row.get(20)?;
-                let folder_id: i64 = row.get(19)?;
+                // MESSAGE_COLUMNS is 20 columns (0..=19); the two appended
+                // columns are f.id at 20 and f.account_id at 21.
+                let folder_id: i64 = row.get(20)?;
+                let account_id_str: String = row.get(21)?;
                 Ok((
                     MessageHeader {
                         id: MessageId(row.get(0)?),
@@ -1541,28 +1566,35 @@ impl Store {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<(MessageHeader, FolderId, AccountId)>> {
+        // An empty account filter would generate `IN ()`, a syntax error.
+        if account_filter.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let conn = self.lock()?;
 
-        let account_placeholders = account_filter
-            .iter()
-            .map(|_| "?")
+        let account_placeholders = (1..=account_filter.len())
+            .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
             .join(",");
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(limit as i64), Box::new(offset as i64)];
+        let limit_idx = account_filter.len() + 1;
+        let offset_idx = account_filter.len() + 2;
+
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(offset_idx);
         for acc in account_filter {
             params.push(Box::new(acc.to_string()));
         }
+        params.push(Box::new(limit as i64));
+        params.push(Box::new(offset as i64));
 
         let sql = format!(
             "SELECT {MESSAGE_COLUMNS}, f.id as folder_id, f.account_id
              FROM messages m
              JOIN folders f ON f.id = m.folder_id
              WHERE instr(' ' || m.flags || ' ', ' \\Flagged ') > 0
-               AND f.account_id IN ({})
+               AND f.account_id IN ({account_placeholders})
              ORDER BY m.received_at DESC, m.uid DESC
-             LIMIT ?1 OFFSET ?2",
-            account_placeholders
+             LIMIT ?{limit_idx} OFFSET ?{offset_idx}"
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -1570,8 +1602,10 @@ impl Store {
             rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
             |row| {
                 let flags: String = row.get(17)?;
-                let account_id_str: String = row.get(20)?;
-                let folder_id: i64 = row.get(19)?;
+                // MESSAGE_COLUMNS is 20 columns (0..=19); appended columns are
+                // f.id at 20 and f.account_id at 21.
+                let folder_id: i64 = row.get(20)?;
+                let account_id_str: String = row.get(21)?;
                 Ok((
                     MessageHeader {
                         id: MessageId(row.get(0)?),
@@ -1616,6 +1650,11 @@ impl Store {
         kind: VirtualFolderKind,
         account_filter: &[AccountId],
     ) -> Result<u32> {
+        // An empty account filter would generate `IN ()`, a syntax error.
+        if account_filter.is_empty() {
+            return Ok(0);
+        }
+
         let conn = self.lock()?;
 
         let account_placeholders = account_filter
@@ -1778,6 +1817,7 @@ impl Store {
     // --------------------------------------------------------------- events
 
     /// Insert or update an event.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_event(
         &self,
         calendar_id: i64,
@@ -2189,7 +2229,7 @@ fn upsert_message_in(tx: &Transaction<'_>, message: &NewMessage) -> Result<Upser
         Some(id) => {
             tx.execute(
                 "UPDATE messages SET
-                     message_id = ?2, thread_key = ?3, thread_root_key = ?4, references = ?5,
+                     message_id = ?2, thread_key = ?3, thread_root_key = ?4, refs = ?5,
                      subject = ?6, from_name = ?7, from_addr = ?8, to_addrs = ?9, cc_addrs = ?10,
                      sent_at = ?11, received_at = ?12, size = ?13, flags = ?14, has_attachments = ?15,
                      snippet = COALESCE(?16, snippet)

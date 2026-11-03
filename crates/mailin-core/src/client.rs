@@ -109,7 +109,12 @@ impl Mailin {
         let config_cache = Arc::new(RwLock::new(Some(config)));
         let config_paths = Arc::new(paths.clone());
 
-        Ok(Self::with_parts(store, credentials, config_cache, config_paths))
+        Ok(Self::with_parts(
+            store,
+            credentials,
+            config_cache,
+            config_paths,
+        ))
     }
 
     pub fn with_parts(
@@ -183,10 +188,6 @@ impl Mailin {
         }
         self.publish(Event::AccountsChanged);
         Ok(())
-    }
-
-    pub fn apply_rules(&self, folder_id: FolderId, message_ids: &[MessageId]) {
-        self.store().apply_rules(folder_id, message_ids)
     }
 
     pub fn list_accounts(&self) -> Result<Vec<Account>> {
@@ -342,10 +343,7 @@ impl Mailin {
         query: String,
         folder_id: Option<FolderId>,
     ) -> Result<()> {
-        let mut cache = self
-            .config_cache
-            .write()
-            .map_err(|_| Error::LockPoisoned)?;
+        let mut cache = self.config_cache.write().map_err(|_| Error::LockPoisoned)?;
         if let Some(config) = cache.as_mut() {
             config.search.add(*account, query, folder_id);
             config.save(&self.config_paths)?;
@@ -369,14 +367,14 @@ impl Mailin {
     // ----------------------------------------------------------------- sync status
 
     /// Get the current sync status for an account.
-    pub fn sync_status(&self, account: &AccountId) -> crate::model::SyncStatus {
+    pub fn sync_status(&self, _account: &AccountId) -> crate::model::SyncStatus {
         // This is a synchronous read; the engine updates the store asynchronously.
         // For now, return Idle; the Engine's sync_status method provides the real value.
         crate::model::SyncStatus::Idle
     }
 
     /// Get the last successful sync timestamp for an account.
-    pub fn last_sync_at(&self, account: &AccountId) -> Option<i64> {
+    pub fn last_sync_at(&self, _account: &AccountId) -> Option<i64> {
         None
     }
 
@@ -922,7 +920,6 @@ mod tests {
             expires_at: 42,
             provider: OAuthProvider::Google,
             client_id: "test-client-id".into(),
-            ..OAuth2Tokens::default()
         };
         acc.imap.auth_method = AuthMethod::OAuth2;
         acc.imap.oauth2 = tokens.clone();

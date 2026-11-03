@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::account::AccountId;
 use crate::compose::OutgoingMessage;
-use std::collections::HashMap;
 
 /// Local row identifier of a folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -136,8 +135,10 @@ impl FromStr for FolderRole {
 /// Sync status for an account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SyncStatus {
     /// No sync operation in progress.
+    #[default]
     Idle,
     /// Actively synchronizing folders/messages.
     Syncing,
@@ -147,12 +148,6 @@ pub enum SyncStatus {
     Offline,
     /// Sync failed with an error message.
     Error,
-}
-
-impl Default for SyncStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 impl SyncStatus {
@@ -566,10 +561,20 @@ pub struct ScheduledAction {
 }
 
 /// Payload for the 'snooze_message' scheduled action.
+///
+/// `message_id` is the local row id captured at snooze time. That row is
+/// deleted when the message is moved out, and re-inserted under a new row id
+/// (and often a new IMAP UID) when the Snoozed folder is synced, so it must not
+/// be used to find the message at unsnooze time. The authoritative identity is
+/// the RFC 5322 `Message-ID` within `snoozed_folder_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnoozePayload {
     pub message_id: i64,
     pub return_to_folder_id: i64,
+    pub snoozed_folder_id: i64,
+    /// RFC 5322 Message-ID header of the snoozed message, when known.
+    #[serde(default)]
+    pub rfc_message_id: Option<String>,
 }
 
 /// Virtual folder kinds for unified views across accounts.

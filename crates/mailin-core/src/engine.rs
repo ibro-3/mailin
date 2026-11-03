@@ -35,6 +35,10 @@ use secrecy::{ExposeSecret, SecretString};
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// A snoozed-message batch grouped by source folder.
+/// (message id, uid, source folder id, cached Message-ID header)
+type SnoozeGroups = HashMap<FolderId, Vec<(MessageId, u32, FolderId, Option<String>)>>;
 /// Re-run a full sync of the inbox occasionally to notice deletions and flag
 /// changes made by other clients.
 const FULL_SYNC_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -100,7 +104,7 @@ impl Engine {
         }
 
         // Store plugin system in state
-        let mut state_mut = Arc::get_mut(&mut state).unwrap();
+        let state_mut = Arc::get_mut(&mut state).unwrap();
         state_mut.plugin_system = plugin_system;
 
         // Take the receiver for supervise
@@ -1236,7 +1240,25 @@ async fn handle_command(
             subscribe_folder_imap(session, state, folder_id, subscribe).await?;
         }
         WorkerCommand::ExecuteScheduledAction { action } => {
-            execute_scheduled_action_with_session(session, state, account, &action).await?;
+            // The worker path must record the terminal state itself; otherwise
+            // `due_actions()` keeps returning the action and it is re-dispatched
+            // every 60 seconds forever.
+            match execute_scheduled_action_with_session(session, state, account, &action).await {
+                Ok(()) => {
+                    let _ = state
+                        .mailbox
+                        .store()
+                        .set_action_state(action.id, "done", None);
+                }
+                Err(e) => {
+                    tracing::warn!(action_id = action.id, %e, "scheduled action failed");
+                    let _ = state.mailbox.store().set_action_state(
+                        action.id,
+                        "failed",
+                        Some(&e.to_string()),
+                    );
+                }
+            }
         }
     }
     Ok(false)
@@ -1278,8 +1300,12 @@ async fn fetch_body(
         state.mailbox.publish(Event::MessagesChanged {
             folder_id: folder.id,
         });
-        // Apply rules that depend on body content
-        state.mailbox.apply_rules(folder.id, &[message_id]);
+        // Apply rules that depend on body content. Route through the engine's
+        // rule path: `Mailin::apply_rules`/`Store::apply_rules` is a no-op, so
+        // calling it here silently drops every body-dependent rule.
+        if let Some(account) = state.mailbox.account(&folder.account_id)? {
+            apply_rules(session, state, &account, folder.id, &[message_id]).await?;
+        }
     }
     // Seed contacts from full message headers
     let account_id = folder.account_id;
@@ -1412,15 +1438,18 @@ async fn move_messages(
             continue;
         };
 
-        let destination = match target {
-            MoveTarget::Folder(folder_id) => folders.iter().find(|folder| folder.id == folder_id),
-            // Deleting a message that already sits in Trash is permanent.
-            MoveTarget::Trash if source.role == FolderRole::Trash => None,
-            MoveTarget::Trash => find_role(&folders, FolderRole::Trash),
-            MoveTarget::Archive => find_role(&folders, FolderRole::Archive),
-            MoveTarget::Junk => find_role(&folders, FolderRole::Junk),
-            MoveTarget::Inbox => find_role(&folders, FolderRole::Inbox),
-            MoveTarget::Permanent => None,
+        let (destination, permanent_in_trash) = match target {
+            MoveTarget::Folder(folder_id) => {
+                (folders.iter().find(|folder| folder.id == folder_id), false)
+            }
+            // Deleting a message that already sits in Trash is permanent. This
+            // is an intentional `None` destination, not a missing Trash folder.
+            MoveTarget::Trash if source.role == FolderRole::Trash => (None, true),
+            MoveTarget::Trash => (find_role(&folders, FolderRole::Trash), false),
+            MoveTarget::Archive => (find_role(&folders, FolderRole::Archive), false),
+            MoveTarget::Junk => (find_role(&folders, FolderRole::Junk), false),
+            MoveTarget::Inbox => (find_role(&folders, FolderRole::Inbox), false),
+            MoveTarget::Permanent => (None, true),
         };
 
         if matches!(target, MoveTarget::Folder(_)) && destination.is_none() {
@@ -1433,6 +1462,7 @@ async fn move_messages(
             target,
             MoveTarget::Trash | MoveTarget::Archive | MoveTarget::Junk | MoveTarget::Inbox
         ) && destination.is_none()
+            && !permanent_in_trash
         {
             return Err(Error::Config(format!(
                 "the account has no {} folder",
@@ -1506,7 +1536,7 @@ async fn snooze_messages(
     };
 
     // Group by source folder
-    let mut groups: HashMap<FolderId, Vec<(MessageId, u32, FolderId)>> = HashMap::new();
+    let mut groups: SnoozeGroups = HashMap::new();
     for message_id in message_ids {
         let Some(message) = state.mailbox.message(*message_id)? else {
             continue;
@@ -1515,6 +1545,7 @@ async fn snooze_messages(
             *message_id,
             message.uid,
             message.folder_id,
+            message.message_id.clone(),
         ));
     }
 
@@ -1522,17 +1553,19 @@ async fn snooze_messages(
         let Some(source) = folders.iter().find(|f| f.id == source_id) else {
             continue;
         };
-        let uids: Vec<u32> = items.iter().map(|(_, uid, _)| *uid).collect();
+        let uids: Vec<u32> = items.iter().map(|(_, uid, _, _)| *uid).collect();
         session.select(&source.name).await?;
         session.move_messages(&uids, &snoozed.name).await?;
 
-        for (message_id, _, return_to_folder_id) in items {
+        for (message_id, _, return_to_folder_id, rfc_message_id) in items {
             // Remove from source cache
             let _ = state.mailbox.store().delete_message_by_id(message_id)?;
             // Schedule unsnooze
             let payload = crate::model::SnoozePayload {
                 message_id: message_id.0,
                 return_to_folder_id: return_to_folder_id.0,
+                snoozed_folder_id: snoozed.id.0,
+                rfc_message_id,
             };
             let payload_json = serde_json::to_string(&payload)?;
             state.mailbox.store().schedule_action(
@@ -1615,7 +1648,7 @@ async fn apply_rules(
     session: &mut ImapSession,
     state: &Arc<EngineState>,
     account: &Account,
-    folder_id: FolderId,
+    _folder_id: FolderId,
     message_ids: &[MessageId],
 ) -> Result<()> {
     use crate::rules::{RegexCache, eval_rule, parse_actions};
@@ -1852,6 +1885,9 @@ async fn execute_rule_action(
         "snooze" => {
             // Value is due_at timestamp
             if let Ok(due_at) = action.value.parse::<i64>() {
+                let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
+                    return Err(Error::Config("no Snoozed folder".into()));
+                };
                 state.mailbox.store().schedule_action(
                     &account.id,
                     due_at,
@@ -1859,11 +1895,10 @@ async fn execute_rule_action(
                     &serde_json::to_string(&crate::model::SnoozePayload {
                         message_id: message_id.0,
                         return_to_folder_id: message.folder_id.0,
+                        snoozed_folder_id: snoozed.id.0,
+                        rfc_message_id: message.message_id.clone(),
                     })?,
                 )?;
-                let Some(snoozed) = find_role(&folders, FolderRole::Snoozed) else {
-                    return Err(Error::Config("no Snoozed folder".into()));
-                };
                 let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
                     return Ok(());
                 };
@@ -1991,8 +2026,8 @@ async fn create_folder_imap(
     state: &Arc<EngineState>,
     account_id: AccountId,
     name: &str,
-    delimiter: &str,
-    role: FolderRole,
+    _delimiter: &str,
+    _role: FolderRole,
 ) -> Result<()> {
     session.create_folder(name).await?;
     let remote = session.list_folders().await?;
@@ -2113,7 +2148,7 @@ fn initial_mode(folder: &Folder) -> SyncMode {
 /// Update the sync status for an account and emit the change event.
 fn set_sync_status(state: &Arc<EngineState>, account_id: AccountId, status: SyncStatus) {
     let mut guard = state.sync_status.write().unwrap();
-    let changed = guard.get(&account_id).map_or(true, |old| *old != status);
+    let changed = guard.get(&account_id).is_none_or(|old| *old != status);
     if changed {
         guard.insert(account_id, status);
         state
@@ -2133,7 +2168,7 @@ fn set_last_sync_at(state: &Arc<EngineState>, account_id: AccountId, timestamp: 
 
 /// Sync calendars for an account using CalDAV.
 async fn sync_calendars(
-    session: &mut ImapSession,
+    _session: &mut ImapSession,
     state: &Arc<EngineState>,
     account: &Account,
 ) -> Result<()> {
@@ -2325,13 +2360,12 @@ async fn scheduled_worker(state: Arc<EngineState>) {
 async fn execute_scheduled_action_with_session(
     session: &mut ImapSession,
     state: &Arc<EngineState>,
-    account: &Account,
+    _account: &Account,
     action: &ScheduledAction,
 ) -> Result<()> {
     match action.kind.as_str() {
         "snooze_message" => {
             let payload: SnoozePayload = serde_json::from_str(&action.payload_json)?;
-            let message_id = MessageId(payload.message_id);
             let return_folder_id = FolderId(payload.return_to_folder_id);
 
             // Move message back to original folder
@@ -2343,7 +2377,27 @@ async fn execute_scheduled_action_with_session(
                 return Err(Error::Config("return folder not found".into()));
             };
 
-            let Some(message) = state.mailbox.message(message_id)? else {
+            // The local row id in the payload points at the row that was
+            // deleted when the message was moved into Snoozed. Syncing the
+            // Snoozed folder re-inserts it under a *new* row id (and possibly a
+            // new UID), so resolve it by its stable RFC 5322 Message-ID first,
+            // falling back to the recorded row id only if the header is absent.
+            let message = match payload.rfc_message_id.as_deref() {
+                Some(rfc_id) => state
+                    .mailbox
+                    .store()
+                    .message_by_rfc_id(snoozed.id, rfc_id)?,
+                None => None,
+            };
+            let message = match message {
+                Some(message) => Some(message),
+                None if payload.rfc_message_id.is_none() => {
+                    state.mailbox.message(MessageId(payload.message_id))?
+                }
+                None => None,
+            };
+
+            let Some(message) = message else {
                 return Ok(()); // Already gone
             };
 
@@ -2355,7 +2409,7 @@ async fn execute_scheduled_action_with_session(
             session.select(&snoozed.name).await?;
             session.move_messages(&uids, &return_folder.name).await?;
 
-            let _ = state.mailbox.store().delete_message_by_id(message_id)?;
+            let _ = state.mailbox.store().delete_message_by_id(message.id)?;
             state.mailbox.publish(Event::MessagesChanged {
                 folder_id: snoozed.id,
             });
