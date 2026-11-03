@@ -26,4 +26,12 @@
 #[rustfmt::skip]
 mod bindings;
 
+/// Extension traits and helpers for ergonomic WinUI usage.
+/// These bridge the gap between the minimal projection and the full
+/// Windows crate API, and survive projection regeneration.
+#[cfg(windows)]
+mod winui_ext;
+
 pub use bindings::*;
+#[cfg(windows)]
+pub use winui_ext::*;

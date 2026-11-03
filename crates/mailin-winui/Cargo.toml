@@ -24,6 +24,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 windows-collections = "0.100"
 windows-core = "0.100"
+windows = "0.61"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",

@@ -17,7 +17,7 @@ use mailin_core::{
     html,
 };
 use mailin_winui_sys::{
-    Application, Button, CheckBox, ComboBox, ContentDialog, ContentDialogButton, DispatcherQueue,
+    Application, AutomationProperties, Button, CheckBox, ComboBox, ContentDialog, ContentDialogButton, DispatcherQueue,
     FrameworkElement, Grid, GridUnitType, IToggleButton, IXmlNodeSerializer, KeyboardAccelerator,
     MenuFlyout, MenuFlyoutItem, Orientation, ResourceDictionary, RightTappedRoutedEventArgs,
     ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification, ToastNotificationManager,

@@ -18,6 +18,7 @@ windows-future = "0.100"
 windows-numerics = "0.100"
 windows-reference = "0.100"
 windows-time = "0.100"
+base64 = "0.22"
 
 # Generated code is not ours to lint. `unsafe` is inherent to the COM ABI and
 # every warning in this crate is either an ABI spelling rule or dead code.

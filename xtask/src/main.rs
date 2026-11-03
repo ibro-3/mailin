@@ -195,6 +195,73 @@ fn winui_bindgen() -> Result<()> {
         "--minimal",
         "--flat",
     ]);
+
+    // Patch the generated bindings.rs directly
+    let bindings_path = root.join("crates/mailin-winui-sys/src/bindings.rs");
+    
+    // 1. Add public new() method to TypedEventHandler
+    let typed_handler_def = r#"pub struct TypedEventHandler<TSender, TResult>(
+    windows_core::IUnknown,
+    core::marker::PhantomData<TSender>,
+    core::marker::PhantomData<TResult>,
+)
+where
+    TSender: windows_core::RuntimeType + 'static,
+    TResult: windows_core::RuntimeType + 'static;
+"#;
+    let new_method = r#"
+impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::RuntimeType + 'static>
+    TypedEventHandler<TSender, TResult>
+{
+    /// Create a new `TypedEventHandler` from a closure.
+    pub fn new<F>(handler: F) -> Self
+    where
+        F: Fn(windows_core::Ref<TSender>, windows_core::Ref<TResult>) + 'static,
+    {
+        let delegate = windows_core::imp::DelegateBox::<Self, F>::new(
+            &TypedEventHandlerBox::<TSender, TResult, F>::VTABLE,
+            handler,
+        );
+        unsafe { core::mem::transmute(windows_core::imp::box_new(delegate)) }
+    }
+}
+"#;
+    let content = fs::read_to_string(&bindings_path)?;
+    let content = content.replace(typed_handler_def, &format!("{typed_handler_def}\n{new_method}"));
+    fs::write(&bindings_path, content)?;
+
+    // 2. Fix PropertyPath::CreateInstance to use HSTRING::from
+    let content = fs::read_to_string(&bindings_path)?;
+    let content = content.replace(
+        "core::mem::transmute_copy(&path.into())",
+        "core::mem::transmute_copy(&windows_core::HSTRING::from(path))"
+    );
+    fs::write(&bindings_path, content)?;
+
+    // Also fix the transmute_copy with type annotation
+    let content = fs::read_to_string(&bindings_path)?;
+    let content = content.replace(
+        "core::mem::transmute_copy::<Src, *mut c_void>(&path.into())",
+        "core::mem::transmute_copy::<Src, *mut c_void>(&windows_core::HSTRING::from(path))"
+    );
+    fs::write(&bindings_path, content)?;
+
+    // 3. Make TypedEventHandlerBox::VTABLE public
+    let content = fs::read_to_string(&bindings_path)?;
+    let content = content.replace(
+        "const VTABLE : TypedEventHandler_Vtbl",
+        "pub const VTABLE : TypedEventHandler_Vtbl"
+    );
+    fs::write(&bindings_path, content)?;
+
+    // 4. Make TypedEventHandlerBox public
+    let content = fs::read_to_string(&bindings_path)?;
+    let content = content.replace(
+        "struct TypedEventHandlerBox<",
+        "pub struct TypedEventHandlerBox<"
+    );
+    fs::write(&bindings_path, content)?;
+
     Ok(())
 }
 
@@ -220,10 +287,6 @@ fn winui_runtime() -> Result<()> {
     })?;
 
     println!("bootstrapper: {}", destination.display());
-    println!(
-        "set MAILIN_WINDOWSAPPSDK_BOOTSTRAP={} before building mailin-winui",
-        destination.display()
-    );
     println!(
         "the matching runtime can be installed from \
          https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe"

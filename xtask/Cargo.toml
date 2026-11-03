@@ -8,6 +8,14 @@ rust-version = "1.95"
 license.workspace = true
 publish = false
 
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[[bin]]
+name = "patch-bindings"
+path = "src/patch_bindings.rs"
+
 [dependencies]
 anyhow.workspace = true
 base64 = { version = "0.22", features = ["std"] }

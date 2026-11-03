@@ -407,12 +407,12 @@ pub fn present(
                 Some(&format!("Remove {domain} from trusted senders")),
             )?;
             let tokens = design_tokens::tokens();
-            remove.SetPadding(mailin_winui_sys::Thickness::new(
-                tokens.spacing.xs,
-                2.0,
-                tokens.spacing.xs,
-                2.0,
-            ))?;
+            remove.SetPadding(mailin_winui_sys::Thickness {
+                left: tokens.spacing.xs,
+                top: 2.0,
+                right: tokens.spacing.xs,
+                bottom: 2.0,
+            })?;
             ui::append(&row, &remove)?;
             children.Append(&row)?;
 
@@ -460,12 +460,12 @@ pub fn present(
                     Some("Edit this contact"),
                 )?;
                 let tokens = design_tokens::tokens();
-                edit.SetPadding(mailin_winui_sys::Thickness::new(
-                    tokens.spacing.xs,
-                    2.0,
-                    tokens.spacing.xs,
-                    2.0,
-                ))?;
+                edit.SetPadding(mailin_winui_sys::Thickness {
+                    left: tokens.spacing.xs,
+                    top: 2.0,
+                    right: tokens.spacing.xs,
+                    bottom: 2.0,
+                })?;
                 ui::append(&row, &edit)?;
 
                 let remove = ui::button(
@@ -473,12 +473,12 @@ pub fn present(
                     Some(&format!("Remove contact {}", contact.email)),
                     Some("Delete this contact"),
                 )?;
-                remove.SetPadding(mailin_winui_sys::Thickness::new(
-                    tokens.spacing.xs,
-                    2.0,
-                    tokens.spacing.xs,
-                    2.0,
-                ))?;
+                remove.SetPadding(mailin_winui_sys::Thickness {
+                    left: tokens.spacing.xs,
+                    top: 2.0,
+                    right: tokens.spacing.xs,
+                    bottom: 2.0,
+                })?;
                 ui::append(&row, &remove)?;
 
                 children.Append(&row)?;

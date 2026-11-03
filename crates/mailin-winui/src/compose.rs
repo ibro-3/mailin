@@ -1253,16 +1253,17 @@ fn setup_contact_autocomplete(
                     button
                         .SetHorizontalAlignment(mailin_winui_sys::HorizontalAlignment::Stretch)?;
                     button.SetVerticalAlignment(VerticalAlignment::Stretch)?;
-                    button.SetPadding(mailin_winui_sys::Thickness::new(8.0, 4.0, 8.0, 4.0))?;
-                    let style = mailin_winui_sys::Style::new()?;
-                    style.TargetType(mailin_winui_sys::TypeName::new("Button"))?;
-                    let setter = mailin_winui_sys::Setter::new()?;
-                    setter.Property(mailin_winui_sys::DependencyProperty::new("Background")?);
-                    // Transparent background
-                    setter.Value(mailin_winui_sys::Brush::new()?);
-                    // We'll just use the default style but make it look like a list item
-                    ui::append(&row, &button)?;
+                    button.SetPadding(mailin_winui_sys::Thickness {
+                    left: 8.0,
+                    top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                })?;
 
+                    // Use a transparent background directly instead of a Style
+                    button.SetBackground(mailin_winui_sys::SolidColorBrush::CreateInstance(
+                        &mailin_winui_sys::color_from_argb(0, 0, 0, 0)
+                    )?)?;
                     ui::on_click(&button, move || {
                         let current = ui::text_value(&text_box);
                         let new_text = if current.trim().is_empty() {
