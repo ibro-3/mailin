@@ -11,7 +11,7 @@ use std::collections::HashMap;
 pub const MAX_RULES_PER_ACCOUNT: usize = 200;
 
 /// Compiled regex cache for rule conditions.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct RegexCache {
     cache: HashMap<String, Regex>,
 }

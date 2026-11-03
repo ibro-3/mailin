@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::account::{Account, AccountId};
+use crate::account::AccountId;
 use crate::error::{Error, Result};
 use crate::model::FolderId;
 

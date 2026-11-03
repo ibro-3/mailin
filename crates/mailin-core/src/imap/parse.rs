@@ -124,9 +124,7 @@ fn header_parameter(headers: &str, name: &str) -> Option<String> {
         let end = stripped.find('"')?;
         Some(stripped[..end].to_owned())
     } else {
-        let end = rest
-            .find(|c: char| c == ';' || c == '\r' || c == '\n')
-            .unwrap_or(rest.len());
+        let end = rest.find([';', '\r', '\n']).unwrap_or(rest.len());
         Some(rest[..end].trim().to_owned())
     }
 }

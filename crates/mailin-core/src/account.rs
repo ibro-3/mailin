@@ -363,8 +363,7 @@ impl Account {
                             .oauth2
                             .client_id
                             .to_uppercase()
-                            .replace('-', "_")
-                            .replace('.', "_")
+                            .replace(['-', '.'], "_")
                     );
                     if std::env::var(&token_env).is_err() {
                         return Err(Error::InvalidAccount(format!(
@@ -378,8 +377,7 @@ impl Account {
                             .oauth2
                             .client_id
                             .to_uppercase()
-                            .replace('-', "_")
-                            .replace('.', "_")
+                            .replace(['-', '.'], "_")
                     );
                     if std::env::var(&auth_env).is_err() {
                         return Err(Error::InvalidAccount(format!(

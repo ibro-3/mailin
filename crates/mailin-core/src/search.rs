@@ -7,10 +7,8 @@
 //! - Quoted phrases: `"exact phrase"`
 //! - Plain terms fall through to FTS
 
-use crate::account::AccountId;
 use crate::model::FolderId;
-use chrono::{NaiveDate, TimeZone, Utc};
-use std::collections::HashMap;
+use chrono::NaiveDate;
 
 /// Parsed search query with structured fields and free-text terms.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,9 +79,9 @@ fn tokenize(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = query.chars().peekable();
+    let chars = query.chars().peekable();
 
-    while let Some(c) = chars.next() {
+    for c in chars {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
@@ -194,7 +192,7 @@ pub fn build_fts_query(terms: &[String]) -> Option<String> {
     // Escape special FTS5 characters
     let escaped: Vec<String> = terms
         .iter()
-        .map(|t| t.replace('"', "\"\"").replace('*', "").replace('?', ""))
+        .map(|t| t.replace('"', "\"\"").replace(['*', '?'], ""))
         .collect();
 
     Some(escaped.join(" "))

@@ -74,8 +74,8 @@ impl CalDavClient {
         // Follow redirect if present (simple handling)
         if body.contains("Location:") {
             for line in body.lines() {
-                if line.starts_with("Location:") {
-                    let loc = line["Location:".len()..].trim();
+                if let Some(loc) = line.strip_prefix("Location:") {
+                    let loc = loc.trim();
                     if loc.starts_with("http") {
                         return Ok(loc.to_string());
                     }
@@ -113,16 +113,15 @@ impl CalDavClient {
 
     /// Sync a calendar (get events with ETag support).
     pub fn sync_calendar(&self, calendar_url: &str, ctag: Option<&str>) -> Result<Vec<EventInfo>> {
-        let body = if let Some(ctag_val) = ctag {
-            format!(
-                r#"<?xml version="1.0" encoding="utf-8"?>
+        let body = if let Some(_ctag_val) = ctag {
+            r#"<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:prop>
     <D:getetag/>
     <C:calendar-data/>
   </D:prop>
 </D:propfind>"#
-            )
+                .to_string()
         } else {
             // Full sync: request all events
             r#"<?xml version="1.0" encoding="utf-8"?>
@@ -164,7 +163,6 @@ pub struct CalendarInfo {
 /// Parsed event info from CalDAV.
 #[derive(Debug, Clone)]
 pub struct EventInfo {
-    pub href: String,
     pub etag: String,
     pub ical: String,
 }
@@ -294,7 +292,7 @@ fn parse_event_multistatus(xml: &str) -> Result<Vec<EventInfo>> {
             }
         }
         if !href.is_empty() && !ical.is_empty() {
-            events.push(EventInfo { href, etag, ical });
+            events.push(EventInfo { etag, ical });
         }
     }
     Ok(events)
@@ -311,11 +309,8 @@ pub fn parse_ical_event(ical_data: &str, calendar_id: i64) -> Result<CalendarEve
     let mut location = String::new();
     let mut start = 0i64;
     let mut end = 0i64;
-    let mut all_day = false;
-    let mut rrule = None;
-    let mut recurrence_id = None;
     let mut dtstart_params: HashMap<String, Vec<String>> = HashMap::new();
-    let mut params: HashMap<String, Vec<String>> = HashMap::new();
+    let mut params: HashMap<String, Vec<String>>;
 
     while i < lines.len() {
         let line = lines[i];
@@ -332,7 +327,6 @@ pub fn parse_ical_event(ical_data: &str, calendar_id: i64) -> Result<CalendarEve
             continue;
         }
         if full_line == "END:VEVENT" {
-            in_vevent = false;
             break;
         }
         if !in_vevent {
@@ -353,8 +347,6 @@ pub fn parse_ical_event(ical_data: &str, calendar_id: i64) -> Result<CalendarEve
                 dtstart_params = params.clone();
             }
             "DTEND" => end = parse_datetime(&value, &params).unwrap_or(0),
-            "RRULE" => rrule = Some(value),
-            "RECURRENCE-ID" => recurrence_id = Some(value),
             _ => {}
         }
     }
@@ -367,7 +359,7 @@ pub fn parse_ical_event(ical_data: &str, calendar_id: i64) -> Result<CalendarEve
     }
 
     // Determine if all-day
-    all_day = dtstart_params
+    let all_day = dtstart_params
         .get("VALUE")
         .is_some_and(|v| v.iter().any(|val| val == "DATE"));
 
@@ -417,8 +409,8 @@ fn parse_datetime(value: &str, params: &HashMap<String, Vec<String>>) -> Option<
         .get("VALUE")
         .is_some_and(|v| v.iter().any(|val| val == "DATE"));
 
-    if value.ends_with('Z') {
-        NaiveDateTime::parse_from_str(&value[..value.len() - 1], "%Y%m%dT%H%M%S")
+    if let Some(stripped) = value.strip_suffix('Z') {
+        NaiveDateTime::parse_from_str(stripped, "%Y%m%dT%H%M%S")
             .ok()
             .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
     } else if is_date || value.len() == 8 {

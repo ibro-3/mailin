@@ -13,13 +13,12 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mailin_core::config::Paths;
 use mailin_core::{
     Account, AccountId, AuthMethod, Config, Engine, Mailin, MemoryCredentials, MessageHeader,
     OAuth2Tokens, OutgoingEnvelope, Security, ServerSettings, Store,
 };
-use mailin_core::config::Paths;
 use secrecy::SecretString;
-use tempfile;
 
 const ADDRESS: &str = "ada@example.com";
 const LOGIN: &str = "ada";

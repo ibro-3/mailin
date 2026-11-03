@@ -25,7 +25,7 @@ const ZBASE32_ALPHABET: &[u8; 32] = b"ybndrfg8ejkmcpqxot1uwisza345h769";
 
 /// Encode bytes as z-base-32 (no padding, lowercase).
 fn zbase32_encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity((data.len() * 8 + 4) / 5);
+    let mut result = String::with_capacity((data.len() * 8).div_ceil(5));
     let mut buffer = 0u32;
     let mut bits = 0;
 
@@ -619,7 +619,7 @@ mod tests {
         let plaintext = "Signed and sealed.";
         let encrypted = encrypt_message(
             plaintext,
-            &[cert.clone()],
+            std::slice::from_ref(&cert),
             Some(&secret_cert),
             Some(&secret),
         )

@@ -11,7 +11,6 @@ use crate::error::Result;
 use crate::imap::{ImapSession, RemoteFolder, RemoteHeader};
 use crate::model::{Folder, FolderRole, FolderSyncState, NewMessage};
 use crate::store::FolderUpsert;
-use mailparse::addrparse;
 
 /// Header fetches are batched to keep single IMAP responses modest.
 const HEADER_CHUNK: usize = 50;
@@ -27,7 +26,8 @@ pub(crate) fn parse_address_list(input: &str) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
     let mut result = Vec::new();
-    for addr in &*addrs {  // Deref to Vec<MailAddr>
+    for addr in &*addrs {
+        // Deref to Vec<MailAddr>
         match addr {
             mailparse::MailAddr::Single(info) => {
                 result.push(info.addr.to_lowercase());

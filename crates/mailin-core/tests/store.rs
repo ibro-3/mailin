@@ -1,8 +1,8 @@
 //! Store, search and outbox behaviour against a real SQLite database.
 
 use mailin_core::{
-    Account, AttachmentData, AttachmentMeta, Contact, FolderRole, FolderSyncState, FolderUpsert,
-    NewMessage, OutboxState, Paths, Security, ServerSettings, Store, Template,
+    Account, AttachmentData, AttachmentMeta, FolderRole, FolderSyncState, FolderUpsert, NewMessage,
+    OutboxState, Paths, Security, ServerSettings, Store,
 };
 
 fn account() -> Account {
@@ -755,7 +755,7 @@ fn contact_crud() {
     assert_eq!(contacts[0].display_name, "Grace Hopper"); // original name preserved
 
     // Manual contact should set manual flag
-    let id3 = store
+    let _id3 = store
         .upsert_contact(&account.id, "manual@example.com", "Manual Entry", true)
         .expect("manual upsert");
     let contacts = store.list_contacts(&account.id).expect("list manual");
@@ -903,7 +903,7 @@ fn rule_crud() {
         .expect("update");
     assert_eq!(id, id2);
     let rules = store.list_rules(&account.id).expect("list again");
-    assert_eq!(rules[0].enabled, false);
+    assert!(!rules[0].enabled);
     assert_eq!(rules[0].priority, 20);
     assert!(rules[0].stop);
 

@@ -14,8 +14,16 @@ pub struct PluginSystem {
     lua: Arc<Mutex<Lua>>,
     store: Arc<Store>,
     plugins: Arc<RwLock<HashMap<String, Plugin>>>,
-    data_dir: Arc<PathBuf>,
     plugin_dir: Arc<PathBuf>,
+}
+
+impl std::fmt::Debug for PluginSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `Lua` does not implement `Debug`, so only surface the loadable fields.
+        f.debug_struct("PluginSystem")
+            .field("plugin_dir", &self.plugin_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PluginSystem {
@@ -29,7 +37,6 @@ impl PluginSystem {
             lua,
             store,
             plugins: Arc::new(RwLock::new(HashMap::new())),
-            data_dir,
             plugin_dir,
         })
     }
@@ -63,19 +70,19 @@ impl PluginSystem {
         // mailin.config.get(key)
         api.set(
             "config_get",
-            lua.create_function(|_, key: String| Ok(Value::Nil))?,
+            lua.create_function(|_, _key: String| Ok(Value::Nil))?,
         )?;
 
         // mailin.accounts.list()
         api.set(
             "accounts_list",
-            lua.create_function(|lua, ()| Ok(lua.create_table()?))?,
+            lua.create_function(|lua, ()| lua.create_table())?,
         )?;
 
         // mailin.messages.query(filter)
         api.set(
             "messages_query",
-            lua.create_function(|lua, _filter: Table| Ok(lua.create_table()?))?,
+            lua.create_function(|lua, _filter: Table| lua.create_table())?,
         )?;
 
         // mailin.rules.add(action)
@@ -132,7 +139,7 @@ impl PluginSystem {
                 let text = resp
                     .text()
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-                Ok(lua.create_string(&text)?)
+                lua.create_string(&text)
             })?,
         )?;
         http.set(
@@ -147,7 +154,7 @@ impl PluginSystem {
                 let text = resp
                     .text()
                     .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-                Ok(lua.create_string(&text)?)
+                lua.create_string(&text)
             })?,
         )?;
         api.set("http", http)?;
