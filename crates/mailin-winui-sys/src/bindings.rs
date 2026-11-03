@@ -3294,6 +3294,80 @@ impl windows_core::RuntimeName for CoreWebView2 {
 unsafe impl Send for CoreWebView2 {}
 unsafe impl Sync for CoreWebView2 {}
 #[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CoreWebView2CapturePreviewImageFormat(pub i32);
+impl CoreWebView2CapturePreviewImageFormat {
+    pub const Png: Self = Self(0);
+    pub const Jpeg: Self = Self(1);
+}
+impl windows_core::imp::TypeKind for CoreWebView2CapturePreviewImageFormat {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for CoreWebView2CapturePreviewImageFormat {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Microsoft.Web.WebView2.Core.CoreWebView2CapturePreviewImageFormat;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2ContentLoadingEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2ContentLoadingEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2ContentLoadingEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, ICoreWebView2ContentLoadingEventArgs>();
+}
+unsafe impl windows_core::Interface for CoreWebView2ContentLoadingEventArgs {
+    type Vtable = <ICoreWebView2ContentLoadingEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2ContentLoadingEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2ContentLoadingEventArgs {
+    type Target = ICoreWebView2ContentLoadingEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2ContentLoadingEventArgs {
+    const NAME: &'static str = "Microsoft.Web.WebView2.Core.CoreWebView2ContentLoadingEventArgs";
+}
+unsafe impl Send for CoreWebView2ContentLoadingEventArgs {}
+unsafe impl Sync for CoreWebView2ContentLoadingEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2DevToolsProtocolEventReceiver(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2DevToolsProtocolEventReceiver,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2DevToolsProtocolEventReceiver {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<
+        Self,
+        ICoreWebView2DevToolsProtocolEventReceiver,
+    >();
+}
+unsafe impl windows_core::Interface for CoreWebView2DevToolsProtocolEventReceiver {
+    type Vtable = <ICoreWebView2DevToolsProtocolEventReceiver as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2DevToolsProtocolEventReceiver as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2DevToolsProtocolEventReceiver {
+    type Target = ICoreWebView2DevToolsProtocolEventReceiver;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2DevToolsProtocolEventReceiver {
+    const NAME: &'static str =
+        "Microsoft.Web.WebView2.Core.CoreWebView2DevToolsProtocolEventReceiver";
+}
+unsafe impl Send for CoreWebView2DevToolsProtocolEventReceiver {}
+unsafe impl Sync for CoreWebView2DevToolsProtocolEventReceiver {}
+#[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreWebView2HttpRequestHeaders(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
@@ -3413,6 +3487,68 @@ unsafe impl Send for CoreWebView2NavigationStartingEventArgs {}
 unsafe impl Sync for CoreWebView2NavigationStartingEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2NewWindowRequestedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2NewWindowRequestedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2NewWindowRequestedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<
+        Self,
+        ICoreWebView2NewWindowRequestedEventArgs,
+    >();
+}
+unsafe impl windows_core::Interface for CoreWebView2NewWindowRequestedEventArgs {
+    type Vtable = <ICoreWebView2NewWindowRequestedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2NewWindowRequestedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2NewWindowRequestedEventArgs {
+    type Target = ICoreWebView2NewWindowRequestedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2NewWindowRequestedEventArgs {
+    const NAME: &'static str =
+        "Microsoft.Web.WebView2.Core.CoreWebView2NewWindowRequestedEventArgs";
+}
+unsafe impl Send for CoreWebView2NewWindowRequestedEventArgs {}
+unsafe impl Sync for CoreWebView2NewWindowRequestedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2PermissionRequestedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2PermissionRequestedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2PermissionRequestedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<
+        Self,
+        ICoreWebView2PermissionRequestedEventArgs,
+    >();
+}
+unsafe impl windows_core::Interface for CoreWebView2PermissionRequestedEventArgs {
+    type Vtable = <ICoreWebView2PermissionRequestedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2PermissionRequestedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2PermissionRequestedEventArgs {
+    type Target = ICoreWebView2PermissionRequestedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2PermissionRequestedEventArgs {
+    const NAME: &'static str =
+        "Microsoft.Web.WebView2.Core.CoreWebView2PermissionRequestedEventArgs";
+}
+unsafe impl Send for CoreWebView2PermissionRequestedEventArgs {}
+unsafe impl Sync for CoreWebView2PermissionRequestedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreWebView2ProcessFailedEventArgs(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
     CoreWebView2ProcessFailedEventArgs,
@@ -3439,6 +3575,92 @@ impl windows_core::RuntimeName for CoreWebView2ProcessFailedEventArgs {
 }
 unsafe impl Send for CoreWebView2ProcessFailedEventArgs {}
 unsafe impl Sync for CoreWebView2ProcessFailedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2ScriptDialogOpeningEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2ScriptDialogOpeningEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2ScriptDialogOpeningEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<
+        Self,
+        ICoreWebView2ScriptDialogOpeningEventArgs,
+    >();
+}
+unsafe impl windows_core::Interface for CoreWebView2ScriptDialogOpeningEventArgs {
+    type Vtable = <ICoreWebView2ScriptDialogOpeningEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2ScriptDialogOpeningEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2ScriptDialogOpeningEventArgs {
+    type Target = ICoreWebView2ScriptDialogOpeningEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2ScriptDialogOpeningEventArgs {
+    const NAME: &'static str =
+        "Microsoft.Web.WebView2.Core.CoreWebView2ScriptDialogOpeningEventArgs";
+}
+unsafe impl Send for CoreWebView2ScriptDialogOpeningEventArgs {}
+unsafe impl Sync for CoreWebView2ScriptDialogOpeningEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2Settings(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2Settings,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2Settings {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, ICoreWebView2Settings>();
+}
+unsafe impl windows_core::Interface for CoreWebView2Settings {
+    type Vtable = <ICoreWebView2Settings as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <ICoreWebView2Settings as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2Settings {
+    type Target = ICoreWebView2Settings;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2Settings {
+    const NAME: &'static str = "Microsoft.Web.WebView2.Core.CoreWebView2Settings";
+}
+unsafe impl Send for CoreWebView2Settings {}
+unsafe impl Sync for CoreWebView2Settings {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2SourceChangedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2SourceChangedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2SourceChangedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, ICoreWebView2SourceChangedEventArgs>();
+}
+unsafe impl windows_core::Interface for CoreWebView2SourceChangedEventArgs {
+    type Vtable = <ICoreWebView2SourceChangedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2SourceChangedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2SourceChangedEventArgs {
+    type Target = ICoreWebView2SourceChangedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2SourceChangedEventArgs {
+    const NAME: &'static str = "Microsoft.Web.WebView2.Core.CoreWebView2SourceChangedEventArgs";
+}
+unsafe impl Send for CoreWebView2SourceChangedEventArgs {}
+unsafe impl Sync for CoreWebView2SourceChangedEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreWebView2WebMessageReceivedEventArgs(windows_core::IUnknown);
@@ -3470,6 +3692,67 @@ impl windows_core::RuntimeName for CoreWebView2WebMessageReceivedEventArgs {
 }
 unsafe impl Send for CoreWebView2WebMessageReceivedEventArgs {}
 unsafe impl Sync for CoreWebView2WebMessageReceivedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CoreWebView2WebResourceContext(pub i32);
+impl CoreWebView2WebResourceContext {
+    pub const All: Self = Self(0);
+    pub const Document: Self = Self(1);
+    pub const Stylesheet: Self = Self(2);
+    pub const Image: Self = Self(3);
+    pub const Media: Self = Self(4);
+    pub const Font: Self = Self(5);
+    pub const Script: Self = Self(6);
+    pub const XmlHttpRequest: Self = Self(7);
+    pub const Fetch: Self = Self(8);
+    pub const TextTrack: Self = Self(9);
+    pub const EventSource: Self = Self(10);
+    pub const Websocket: Self = Self(11);
+    pub const Manifest: Self = Self(12);
+    pub const SignedExchange: Self = Self(13);
+    pub const Ping: Self = Self(14);
+    pub const CspViolationReport: Self = Self(15);
+    pub const Other: Self = Self(16);
+}
+impl windows_core::imp::TypeKind for CoreWebView2WebResourceContext {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for CoreWebView2WebResourceContext {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Microsoft.Web.WebView2.Core.CoreWebView2WebResourceContext;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreWebView2WebResourceRequestedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    CoreWebView2WebResourceRequestedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for CoreWebView2WebResourceRequestedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::for_class::<
+        Self,
+        ICoreWebView2WebResourceRequestedEventArgs,
+    >();
+}
+unsafe impl windows_core::Interface for CoreWebView2WebResourceRequestedEventArgs {
+    type Vtable = <ICoreWebView2WebResourceRequestedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID =
+        <ICoreWebView2WebResourceRequestedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for CoreWebView2WebResourceRequestedEventArgs {
+    type Target = ICoreWebView2WebResourceRequestedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for CoreWebView2WebResourceRequestedEventArgs {
+    const NAME: &'static str =
+        "Microsoft.Web.WebView2.Core.CoreWebView2WebResourceRequestedEventArgs";
+}
+unsafe impl Send for CoreWebView2WebResourceRequestedEventArgs {}
+unsafe impl Sync for CoreWebView2WebResourceRequestedEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CoreWindow(windows_core::IUnknown);
@@ -3540,6 +3823,33 @@ impl windows_core::RuntimeName for DataContextChangedEventArgs {
 unsafe impl Send for DataContextChangedEventArgs {}
 unsafe impl Sync for DataContextChangedEventArgs {}
 #[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataPackage(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    DataPackage,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for DataPackage {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IDataPackage>();
+}
+unsafe impl windows_core::Interface for DataPackage {
+    type Vtable = <IDataPackage as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IDataPackage as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for DataPackage {
+    type Target = IDataPackage;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for DataPackage {
+    const NAME: &'static str = "Windows.ApplicationModel.DataTransfer.DataPackage";
+}
+unsafe impl Send for DataPackage {}
+unsafe impl Sync for DataPackage {}
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DataPackageOperation(pub u32);
 impl DataPackageOperation {
@@ -3589,6 +3899,33 @@ impl core::ops::Not for DataPackageOperation {
         Self(self.0.not())
     }
 }
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataPackageView(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    DataPackageView,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for DataPackageView {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IDataPackageView>();
+}
+unsafe impl windows_core::Interface for DataPackageView {
+    type Vtable = <IDataPackageView as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IDataPackageView as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for DataPackageView {
+    type Target = IDataPackageView;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for DataPackageView {
+    const NAME: &'static str = "Windows.ApplicationModel.DataTransfer.DataPackageView";
+}
+unsafe impl Send for DataPackageView {}
+unsafe impl Sync for DataPackageView {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DataTemplate(windows_core::IUnknown);
@@ -4255,6 +4592,33 @@ impl windows_core::RuntimeName for DragStartingEventArgs {
 }
 unsafe impl Send for DragStartingEventArgs {}
 unsafe impl Sync for DragStartingEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DragUIOverride(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    DragUIOverride,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for DragUIOverride {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IDragUIOverride>();
+}
+unsafe impl windows_core::Interface for DragUIOverride {
+    type Vtable = <IDragUIOverride as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IDragUIOverride as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for DragUIOverride {
+    type Target = IDragUIOverride;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for DragUIOverride {
+    const NAME: &'static str = "Microsoft.UI.Xaml.DragUIOverride";
+}
+unsafe impl Send for DragUIOverride {}
+unsafe impl Sync for DragUIOverride {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DropCompletedEventArgs(windows_core::IUnknown);
@@ -9998,8 +10362,1044 @@ impl windows_core::RuntimeType for ICoreWebView2 {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
+impl ICoreWebView2 {
+    pub fn Settings(&self) -> windows_core::Result<CoreWebView2Settings> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Settings)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Source(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Source)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn BrowserProcessId(&self) -> windows_core::Result<u32> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).BrowserProcessId)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn CanGoBack(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CanGoBack)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn CanGoForward(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CanGoForward)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn DocumentTitle(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).DocumentTitle)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn ContainsFullScreenElement(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ContainsFullScreenElement)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn NavigationStarting<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2NavigationStartingEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2NavigationStartingEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2NavigationStartingEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2NavigationStartingEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).NavigationStarting)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveNavigationStarting,
+            ))
+        }
+    }
+    pub fn ContentLoading<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2ContentLoadingEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2ContentLoadingEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2ContentLoadingEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2ContentLoadingEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).ContentLoading)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveContentLoading,
+            ))
+        }
+    }
+    pub fn SourceChanged<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2SourceChangedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2SourceChangedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2SourceChangedEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2SourceChangedEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).SourceChanged)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveSourceChanged,
+            ))
+        }
+    }
+    pub fn HistoryChanged<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<CoreWebView2>, windows_core::Ref<windows_core::IInspectable>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, windows_core::IInspectable> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<CoreWebView2, windows_core::IInspectable>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<CoreWebView2, windows_core::IInspectable, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).HistoryChanged)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveHistoryChanged,
+            ))
+        }
+    }
+    pub fn NavigationCompleted<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2NavigationCompletedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2NavigationCompletedEventArgs> = {
+            let com =
+                windows_core::imp::DelegateBox::<
+                    TypedEventHandler<CoreWebView2, CoreWebView2NavigationCompletedEventArgs>,
+                    F,
+                >::new(
+                    &TypedEventHandlerBox::<
+                        CoreWebView2,
+                        CoreWebView2NavigationCompletedEventArgs,
+                        F,
+                    >::VTABLE,
+                    handler,
+                );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).NavigationCompleted)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveNavigationCompleted,
+            ))
+        }
+    }
+    pub fn FrameNavigationStarting<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2NavigationStartingEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2NavigationStartingEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2NavigationStartingEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2NavigationStartingEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).FrameNavigationStarting)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveFrameNavigationStarting,
+            ))
+        }
+    }
+    pub fn FrameNavigationCompleted<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2NavigationCompletedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2NavigationCompletedEventArgs> = {
+            let com =
+                windows_core::imp::DelegateBox::<
+                    TypedEventHandler<CoreWebView2, CoreWebView2NavigationCompletedEventArgs>,
+                    F,
+                >::new(
+                    &TypedEventHandlerBox::<
+                        CoreWebView2,
+                        CoreWebView2NavigationCompletedEventArgs,
+                        F,
+                    >::VTABLE,
+                    handler,
+                );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).FrameNavigationCompleted)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveFrameNavigationCompleted,
+            ))
+        }
+    }
+    pub fn ScriptDialogOpening<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2ScriptDialogOpeningEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2ScriptDialogOpeningEventArgs> = {
+            let com =
+                windows_core::imp::DelegateBox::<
+                    TypedEventHandler<CoreWebView2, CoreWebView2ScriptDialogOpeningEventArgs>,
+                    F,
+                >::new(
+                    &TypedEventHandlerBox::<
+                        CoreWebView2,
+                        CoreWebView2ScriptDialogOpeningEventArgs,
+                        F,
+                    >::VTABLE,
+                    handler,
+                );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).ScriptDialogOpening)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveScriptDialogOpening,
+            ))
+        }
+    }
+    pub fn PermissionRequested<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2PermissionRequestedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2PermissionRequestedEventArgs> = {
+            let com =
+                windows_core::imp::DelegateBox::<
+                    TypedEventHandler<CoreWebView2, CoreWebView2PermissionRequestedEventArgs>,
+                    F,
+                >::new(
+                    &TypedEventHandlerBox::<
+                        CoreWebView2,
+                        CoreWebView2PermissionRequestedEventArgs,
+                        F,
+                    >::VTABLE,
+                    handler,
+                );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).PermissionRequested)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemovePermissionRequested,
+            ))
+        }
+    }
+    pub fn ProcessFailed<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2ProcessFailedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2ProcessFailedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2ProcessFailedEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2ProcessFailedEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).ProcessFailed)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveProcessFailed,
+            ))
+        }
+    }
+    pub fn WebMessageReceived<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2WebMessageReceivedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2WebMessageReceivedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2WebMessageReceivedEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2WebMessageReceivedEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).WebMessageReceived)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveWebMessageReceived,
+            ))
+        }
+    }
+    pub fn NewWindowRequested<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2NewWindowRequestedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2NewWindowRequestedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::< TypedEventHandler < CoreWebView2 , CoreWebView2NewWindowRequestedEventArgs > , F >::new (& TypedEventHandlerBox::< CoreWebView2 , CoreWebView2NewWindowRequestedEventArgs , F >::VTABLE , handler) ;
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).NewWindowRequested)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveNewWindowRequested,
+            ))
+        }
+    }
+    pub fn DocumentTitleChanged<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<CoreWebView2>, windows_core::Ref<windows_core::IInspectable>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, windows_core::IInspectable> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<CoreWebView2, windows_core::IInspectable>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<CoreWebView2, windows_core::IInspectable, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).DocumentTitleChanged)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveDocumentTitleChanged,
+            ))
+        }
+    }
+    pub fn ContainsFullScreenElementChanged<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<CoreWebView2>, windows_core::Ref<windows_core::IInspectable>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, windows_core::IInspectable> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<CoreWebView2, windows_core::IInspectable>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<CoreWebView2, windows_core::IInspectable, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).ContainsFullScreenElementChanged)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveContainsFullScreenElementChanged,
+            ))
+        }
+    }
+    pub fn WebResourceRequested<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(
+                windows_core::Ref<CoreWebView2>,
+                windows_core::Ref<CoreWebView2WebResourceRequestedEventArgs>,
+            ) + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs> = {
+            let com =
+                windows_core::imp::DelegateBox::<
+                    TypedEventHandler<CoreWebView2, CoreWebView2WebResourceRequestedEventArgs>,
+                    F,
+                >::new(
+                    &TypedEventHandlerBox::<
+                        CoreWebView2,
+                        CoreWebView2WebResourceRequestedEventArgs,
+                        F,
+                    >::VTABLE,
+                    handler,
+                );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).WebResourceRequested)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveWebResourceRequested,
+            ))
+        }
+    }
+    pub fn WindowCloseRequested<F>(
+        &self,
+        handler: F,
+    ) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<CoreWebView2>, windows_core::Ref<windows_core::IInspectable>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<CoreWebView2, windows_core::IInspectable> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<CoreWebView2, windows_core::IInspectable>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<CoreWebView2, windows_core::IInspectable, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).WindowCloseRequested)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveWindowCloseRequested,
+            ))
+        }
+    }
+    pub fn Navigate(&self, uri: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Navigate)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(uri)),
+            )
+            .ok()
+        }
+    }
+    pub fn NavigateToString(&self, htmlcontent: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).NavigateToString)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(htmlcontent)),
+            )
+            .ok()
+        }
+    }
+    pub fn AddScriptToExecuteOnDocumentCreatedAsync(
+        &self,
+        javascript: &str,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<windows_core::HSTRING>> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).AddScriptToExecuteOnDocumentCreatedAsync)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(javascript)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn RemoveScriptToExecuteOnDocumentCreated(&self, id: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveScriptToExecuteOnDocumentCreated)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(id)),
+            )
+            .ok()
+        }
+    }
+    pub fn ExecuteScriptAsync(
+        &self,
+        javascript: &str,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<windows_core::HSTRING>> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).ExecuteScriptAsync)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(javascript)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn CapturePreviewAsync<P1>(
+        &self,
+        imageformat: CoreWebView2CapturePreviewImageFormat,
+        imagestream: P1,
+    ) -> windows_core::Result<windows_future::IAsyncAction>
+    where
+        P1: windows_core::Param<IRandomAccessStream>,
+    {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CapturePreviewAsync)(
+                windows_core::Interface::as_raw(self),
+                imageformat,
+                imagestream.param().abi(),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Reload(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Reload)(windows_core::Interface::as_raw(self))
+                .ok()
+        }
+    }
+    pub fn PostWebMessageAsJson(&self, webmessageasjson: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).PostWebMessageAsJson)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(webmessageasjson)),
+            )
+            .ok()
+        }
+    }
+    pub fn PostWebMessageAsString(&self, webmessageasstring: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).PostWebMessageAsString)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(webmessageasstring)),
+            )
+            .ok()
+        }
+    }
+    pub fn CallDevToolsProtocolMethodAsync(
+        &self,
+        methodname: &str,
+        parametersasjson: &str,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<windows_core::HSTRING>> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).CallDevToolsProtocolMethodAsync)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(methodname)),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(parametersasjson)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn GoBack(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).GoBack)(windows_core::Interface::as_raw(self))
+                .ok()
+        }
+    }
+    pub fn GoForward(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).GoForward)(windows_core::Interface::as_raw(self))
+                .ok()
+        }
+    }
+    pub fn GetDevToolsProtocolEventReceiver(
+        &self,
+        eventname: &str,
+    ) -> windows_core::Result<CoreWebView2DevToolsProtocolEventReceiver> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).GetDevToolsProtocolEventReceiver)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(eventname)),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Stop(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Stop)(windows_core::Interface::as_raw(self)).ok()
+        }
+    }
+    pub fn AddHostObjectToScript<P1>(&self, name: &str, rawobject: P1) -> windows_core::Result<()>
+    where
+        P1: windows_core::Param<windows_core::IInspectable>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).AddHostObjectToScript)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(name)),
+                rawobject.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn RemoveHostObjectFromScript(&self, name: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveHostObjectFromScript)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(name)),
+            )
+            .ok()
+        }
+    }
+    pub fn OpenDevToolsWindow(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).OpenDevToolsWindow)(
+                windows_core::Interface::as_raw(self),
+            )
+            .ok()
+        }
+    }
+    pub fn AddWebResourceRequestedFilter(
+        &self,
+        uri: &str,
+        resourcecontext: CoreWebView2WebResourceContext,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).AddWebResourceRequestedFilter)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(uri)),
+                resourcecontext,
+            )
+            .ok()
+        }
+    }
+    pub fn RemoveWebResourceRequestedFilter(
+        &self,
+        uri: &str,
+        resourcecontext: CoreWebView2WebResourceContext,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).RemoveWebResourceRequestedFilter)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(uri)),
+                resourcecontext,
+            )
+            .ok()
+        }
+    }
+}
 #[repr(C)]
 pub struct ICoreWebView2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Settings: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Source: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub BrowserProcessId:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut u32) -> windows_core::HRESULT,
+    pub CanGoBack:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub CanGoForward:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub DocumentTitle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub ContainsFullScreenElement:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub NavigationStarting: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveNavigationStarting:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub ContentLoading: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveContentLoading:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub SourceChanged: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveSourceChanged:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub HistoryChanged: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveHistoryChanged:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub NavigationCompleted: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveNavigationCompleted:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub FrameNavigationStarting: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveFrameNavigationStarting:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub FrameNavigationCompleted: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveFrameNavigationCompleted:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub ScriptDialogOpening: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveScriptDialogOpening:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub PermissionRequested: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemovePermissionRequested:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub ProcessFailed: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveProcessFailed:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub WebMessageReceived: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveWebMessageReceived:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub NewWindowRequested: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveNewWindowRequested:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub DocumentTitleChanged: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveDocumentTitleChanged:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub ContainsFullScreenElementChanged: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveContainsFullScreenElementChanged:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub WebResourceRequested: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveWebResourceRequested:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub WindowCloseRequested: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveWindowCloseRequested:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Navigate: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub NavigateToString: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub AddScriptToExecuteOnDocumentCreatedAsync:
+        unsafe extern "system" fn(
+            *mut core::ffi::c_void,
+            *mut core::ffi::c_void,
+            *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT,
+    pub RemoveScriptToExecuteOnDocumentCreated: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    )
+        -> windows_core::HRESULT,
+    pub ExecuteScriptAsync: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CapturePreviewAsync: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        CoreWebView2CapturePreviewImageFormat,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Reload: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub PostWebMessageAsJson: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub PostWebMessageAsString: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub CallDevToolsProtocolMethodAsync: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub GoBack: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub GoForward: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub GetDevToolsProtocolEventReceiver: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Stop: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub AddHostObjectToScript: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub RemoveHostObjectFromScript: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub OpenDevToolsWindow:
+        unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub AddWebResourceRequestedFilter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        CoreWebView2WebResourceContext,
+    ) -> windows_core::HRESULT,
+    pub RemoveWebResourceRequestedFilter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        CoreWebView2WebResourceContext,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    ICoreWebView2ContentLoadingEventArgs,
+    ICoreWebView2ContentLoadingEventArgs_Vtbl,
+    0x6cf95373_946c_5dae_9b3e_0fe23d5aa29f
+);
+impl windows_core::RuntimeType for ICoreWebView2ContentLoadingEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2ContentLoadingEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    ICoreWebView2DevToolsProtocolEventReceiver,
+    ICoreWebView2DevToolsProtocolEventReceiver_Vtbl,
+    0xb2a2be79_65fc_5537_8715_3d92bf31090b
+);
+impl windows_core::RuntimeType for ICoreWebView2DevToolsProtocolEventReceiver {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2DevToolsProtocolEventReceiver_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -10146,6 +11546,32 @@ pub struct ICoreWebView2NavigationStartingEventArgs_Vtbl {
         unsafe extern "system" fn(*mut core::ffi::c_void, *mut u64) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    ICoreWebView2NewWindowRequestedEventArgs,
+    ICoreWebView2NewWindowRequestedEventArgs_Vtbl,
+    0xe6e013ba_aec8_532e_9ac9_1590af7b25ec
+);
+impl windows_core::RuntimeType for ICoreWebView2NewWindowRequestedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2NewWindowRequestedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    ICoreWebView2PermissionRequestedEventArgs,
+    ICoreWebView2PermissionRequestedEventArgs_Vtbl,
+    0x118bdd9b_cef1_5910_929e_c1a321328239
+);
+impl windows_core::RuntimeType for ICoreWebView2PermissionRequestedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2PermissionRequestedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
     ICoreWebView2ProcessFailedEventArgs,
     ICoreWebView2ProcessFailedEventArgs_Vtbl,
     0x25a8f8c9_d944_539d_afa3_24172b48ef47
@@ -10159,6 +11585,45 @@ pub struct ICoreWebView2ProcessFailedEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    ICoreWebView2ScriptDialogOpeningEventArgs,
+    ICoreWebView2ScriptDialogOpeningEventArgs_Vtbl,
+    0xa4315212_c7eb_568a_86e4_c61e31ba6cda
+);
+impl windows_core::RuntimeType for ICoreWebView2ScriptDialogOpeningEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2ScriptDialogOpeningEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    ICoreWebView2Settings,
+    ICoreWebView2Settings_Vtbl,
+    0x003b325e_74cd_52dd_8024_ebb8be38e48e
+);
+impl windows_core::RuntimeType for ICoreWebView2Settings {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2Settings_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    ICoreWebView2SourceChangedEventArgs,
+    ICoreWebView2SourceChangedEventArgs_Vtbl,
+    0xca437b2c_6a18_5552_b749_b198f8cc34d9
+);
+impl windows_core::RuntimeType for ICoreWebView2SourceChangedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2SourceChangedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
     ICoreWebView2WebMessageReceivedEventArgs,
     ICoreWebView2WebMessageReceivedEventArgs_Vtbl,
     0xeb066159_b725_5d5b_adc8_f5d7b9290304
@@ -10167,8 +11632,74 @@ impl windows_core::RuntimeType for ICoreWebView2WebMessageReceivedEventArgs {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::for_interface::<Self>();
 }
+impl ICoreWebView2WebMessageReceivedEventArgs {
+    pub fn Source(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Source)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn WebMessageAsJson(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).WebMessageAsJson)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn TryGetWebMessageAsString(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).TryGetWebMessageAsString)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+}
 #[repr(C)]
 pub struct ICoreWebView2WebMessageReceivedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Source: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub WebMessageAsJson: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub TryGetWebMessageAsString: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    ICoreWebView2WebResourceRequestedEventArgs,
+    ICoreWebView2WebResourceRequestedEventArgs_Vtbl,
+    0x577f1fc4_c943_54a9_9700_bd469b48bd41
+);
+impl windows_core::RuntimeType for ICoreWebView2WebResourceRequestedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ICoreWebView2WebResourceRequestedEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -10200,6 +11731,32 @@ impl windows_core::RuntimeType for IDataContextChangedEventArgs {
 }
 #[repr(C)]
 pub struct IDataContextChangedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IDataPackage,
+    IDataPackage_Vtbl,
+    0x61ebf5c7_efea_4346_9554_981d7e198ffe
+);
+impl windows_core::RuntimeType for IDataPackage {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IDataPackage_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IDataPackageView,
+    IDataPackageView_Vtbl,
+    0x7b840471_5900_4d85_a90b_10cb85fe3552
+);
+impl windows_core::RuntimeType for IDataPackageView {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IDataPackageView_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -10802,6 +12359,19 @@ impl windows_core::RuntimeType for IDragStartingEventArgs {
 }
 #[repr(C)]
 pub struct IDragStartingEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IDragUIOverride,
+    IDragUIOverride_Vtbl,
+    0x3260b18b_70df_5df2_b98a_56beb0601f79
+);
+impl windows_core::RuntimeType for IDragUIOverride {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IDragUIOverride_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -13338,6 +14908,45 @@ pub struct IManipulationStartingRoutedEventArgs_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    IMenuFlyout,
+    IMenuFlyout_Vtbl,
+    0xf4c77c6c_1fa5_5d85_8559_5d02b7d4e5e7
+);
+impl windows_core::RuntimeType for IMenuFlyout {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IMenuFlyout_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IMenuFlyoutItem,
+    IMenuFlyoutItem_Vtbl,
+    0x4252df5a_44f9_5ee8_b1cc_53de9aaa4095
+);
+impl windows_core::RuntimeType for IMenuFlyoutItem {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IMenuFlyoutItem_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IMenuFlyoutItemBase,
+    IMenuFlyoutItemBase_Vtbl,
+    0x4bee2715_44a1_5f94_86e8_02ddbe3dc6b9
+);
+impl windows_core::RuntimeType for IMenuFlyoutItemBase {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IMenuFlyoutItemBase_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
     INoFocusCandidateFoundEventArgs,
     INoFocusCandidateFoundEventArgs_Vtbl,
     0xa2d7153a_cd2a_59cb_a574_ac82e30b9201
@@ -14267,6 +15876,24 @@ pub struct IProtocolActivatedEventArgs_Vtbl {
         *mut core::ffi::c_void,
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IRandomAccessStream,
+    IRandomAccessStream_Vtbl,
+    0x905a0fe1_bc53_11df_8c49_001e4fc686da
+);
+impl windows_core::RuntimeType for IRandomAccessStream {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+windows_core::imp::interface_hierarchy!(
+    IRandomAccessStream,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+#[repr(C)]
+pub struct IRandomAccessStream_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
     IRectangleGeometry,
@@ -26977,6 +28604,103 @@ impl windows_core::RuntimeName for ManipulationStartingRoutedEventArgs {
 }
 unsafe impl Send for ManipulationStartingRoutedEventArgs {}
 unsafe impl Sync for ManipulationStartingRoutedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MenuFlyout(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    MenuFlyout,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(MenuFlyout, FlyoutBase, DependencyObject);
+impl windows_core::RuntimeType for MenuFlyout {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IMenuFlyout>();
+}
+unsafe impl windows_core::Interface for MenuFlyout {
+    type Vtable = <IMenuFlyout as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IMenuFlyout as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for MenuFlyout {
+    type Target = IMenuFlyout;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for MenuFlyout {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.MenuFlyout";
+}
+unsafe impl Send for MenuFlyout {}
+unsafe impl Sync for MenuFlyout {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MenuFlyoutItem(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    MenuFlyoutItem,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(
+    MenuFlyoutItem,
+    MenuFlyoutItemBase,
+    Control,
+    FrameworkElement,
+    UIElement,
+    DependencyObject
+);
+impl windows_core::RuntimeType for MenuFlyoutItem {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IMenuFlyoutItem>();
+}
+unsafe impl windows_core::Interface for MenuFlyoutItem {
+    type Vtable = <IMenuFlyoutItem as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IMenuFlyoutItem as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for MenuFlyoutItem {
+    type Target = IMenuFlyoutItem;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for MenuFlyoutItem {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.MenuFlyoutItem";
+}
+unsafe impl Send for MenuFlyoutItem {}
+unsafe impl Sync for MenuFlyoutItem {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MenuFlyoutItemBase(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    MenuFlyoutItemBase,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(
+    MenuFlyoutItemBase,
+    Control,
+    FrameworkElement,
+    UIElement,
+    DependencyObject
+);
+impl windows_core::RuntimeType for MenuFlyoutItemBase {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IMenuFlyoutItemBase>();
+}
+unsafe impl windows_core::Interface for MenuFlyoutItemBase {
+    type Vtable = <IMenuFlyoutItemBase as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IMenuFlyoutItemBase as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for MenuFlyoutItemBase {
+    type Target = IMenuFlyoutItemBase;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for MenuFlyoutItemBase {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase";
+}
+unsafe impl Send for MenuFlyoutItemBase {}
+unsafe impl Sync for MenuFlyoutItemBase {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoFocusCandidateFoundEventArgs(windows_core::IUnknown);
