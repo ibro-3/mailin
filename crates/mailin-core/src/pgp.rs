@@ -7,7 +7,7 @@ use openpgp::cert::prelude::*;
 use openpgp::parse::{Parse, stream::*};
 use openpgp::policy::StandardPolicy;
 use openpgp::serialize::SerializeInto;
-use openpgp::serialize::stream::{Encryptor2, LiteralWriter, Message, Recipient, Signer};
+use openpgp::serialize::stream::{Encryptor, LiteralWriter, Message, Recipient, Signer};
 use openpgp::types::KeyFlags;
 use openpgp::types::SymmetricAlgorithm;
 use sequoia_openpgp as openpgp;
@@ -200,13 +200,14 @@ pub fn encrypt_message(
     let message = Message::new(&mut sink);
     let message = match signer {
         Some(keypair) => Signer::new(message, keypair)
+            .map_err(|e| Error::Protocol(e.to_string()))?
             .creation_time(SystemTime::now())
             .build()
             .map_err(|e| Error::Protocol(e.to_string()))?,
         None => message,
     };
 
-    let encrypted = Encryptor2::for_recipients(message, recipients)
+    let encrypted = Encryptor::for_recipients(message, recipients)
         .build()
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
@@ -260,16 +261,13 @@ struct DecryptHelper {
 }
 
 impl DecryptionHelper for DecryptHelper {
-    fn decrypt<D>(
+    fn decrypt(
         &mut self,
         pkesks: &[openpgp::packet::PKESK],
         _skesks: &[openpgp::packet::SKESK],
         _sym_algo: Option<SymmetricAlgorithm>,
-        mut decrypt: D,
-    ) -> openpgp::Result<Option<openpgp::Fingerprint>>
-    where
-        D: FnMut(SymmetricAlgorithm, &openpgp::crypto::SessionKey) -> bool,
-    {
+        decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &openpgp::crypto::SessionKey) -> bool,
+    ) -> openpgp::Result<Option<Cert>> {
         for cert in &self.keys {
             for pkesk in pkesks {
                 for ka in cert
@@ -286,10 +284,10 @@ impl DecryptionHelper for DecryptHelper {
                     let Ok(mut keypair) = key.into_keypair() else {
                         continue;
                     };
-                    if let Some((algo, session_key)) = pkesk.decrypt(&mut keypair, None) {
-                        if decrypt(algo, &session_key) {
-                            return Ok(Some(ka.fingerprint()));
-                        }
+                    if let Some((algo, session_key)) = pkesk.decrypt(&mut keypair, None)
+                        && decrypt(algo, &session_key)
+                    {
+                        return Ok(Some((*cert).clone()));
                     }
                 }
             }
@@ -364,6 +362,7 @@ pub fn sign_detached(data: &[u8], signer_cert: &Cert, signer_secret: &str) -> Re
     let mut sink = Vec::new();
     let message = Message::new(&mut sink);
     let mut signer = Signer::new(message, keypair)
+        .map_err(|e| Error::Protocol(e.to_string()))?
         .detached()
         .hash_algo(openpgp::types::HashAlgorithm::SHA256)
         .map_err(|e| Error::Protocol(e.to_string()))?
@@ -429,6 +428,7 @@ pub fn sign_message(plaintext: &str, signer_cert: &Cert, signer_secret: &str) ->
     let message = Message::new(&mut sink);
     // Cleartext mode implies ASCII armor: no LiteralWriter/Armorer on the stack.
     let mut signer = Signer::new(message, keypair)
+        .map_err(|e| Error::Protocol(e.to_string()))?
         .cleartext()
         .creation_time(SystemTime::now())
         .build()

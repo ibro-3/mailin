@@ -11,18 +11,19 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # no migration until keyring adopts zbus 6; nothing actionable for us.
 unmaintained = "workspace"
 
+# Two advisories in sequoia-openpgp's pure-Rust crypto backend remain after the
+# 2.x upgrade. Both are in RustCrypto crates that have NO patched release, so a
+# fix is not available to us yet:
+#   * RUSTSEC-2023-0071 (rsa "Marvin" timing): rsa 0.9.10 is latest stable and
+#     rsa 0.10.0-rc is *still* affected; upstream marks it unpatched.
+#   * RUSTSEC-2026-0387 (crypto-bigint timing), via rsa/elliptic-curve.
+# Exposure is limited: decryption uses the user's own keyring key on their own
+# device, not a network-threat model with attacker-chosen ciphertexts. Revisit
+# when RustCrypto ships a fix or we can drop crypto-rust for crypto-nettle/
+# crypto-openssl.
 ignore = [
-  # Timing sidechannel in RSA decryption ("Marvin Attack"). Reachable only via
-  # sequoia-openpgp's pure-Rust RSA on local keys with many timing samples;
-  # our usage is local (own keyring, own device). Fix requires sequoia-openpgp
-  # 2.x, a breaking upgrade tracked as tech debt.
-  { id = "RUSTSEC-2023-0071", reason = "local-keyring usage; fix requires sequoia-openpgp 2.x upgrade" },
-  # sequoia-openpgp aes_key_unwrap underflow. Same upstream chain; patched
-  # only in 2.x.
-  { id = "RUSTSEC-2025-0136", reason = "patched only in sequoia-openpgp 2.x; upgrade tracked as tech debt" },
-  # crypto-bigint timing variability, via elliptic-curve -> sequoia-openpgp.
-  # Patched only in the newer crypto stack pulled in by sequoia-openpgp 2.x.
-  { id = "RUSTSEC-2026-0387", reason = "patched only in the sequoia-openpgp 2.x crypto stack" },
+  { id = "RUSTSEC-2023-0071", reason = "rsa has no patched release (even 0.10.0-rc); local-keyring decryption only" },
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint no patched release for this line; via rsa/elliptic-curve" },
 ]
 
 [licenses]

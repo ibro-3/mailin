@@ -398,7 +398,8 @@ All artifacts are attached to GitHub Releases with SHA-256 checksums. Binary siz
 
 ### Hardening
 
-- **cargo-deny** (`deny.toml`): RustSec advisory scanning, license allowlist (MIT/Apache/BSD/ISC/MPL-2.0), duplicate detection.
+- **cargo-deny** (`deny.toml`): RustSec advisory scanning, license allowlist (MIT/Apache/BSD/ISC/MPL-2.0 plus the permissive public-domain-style licenses below), duplicate detection. Allows **zero** advisories except two RustCrypto limitations: `rsa` (RUSTSEC-2023-0071) and `crypto-bigint` (RUSTSEC-2026-0387), both reachable only through sequoia-openpgp's pure-Rust backend and with **no patched release upstream**. Decryption uses the user's own keyring key on their own device; revisit if RustCrypto ships a fix or the backend can move to `crypto-nettle`/`crypto-openssl`.
+- **License note**: `sequoia-openpgp` and `buffered-reader` are `LGPL-2.0-or-later` and are explicitly excepted in `deny.toml`. This is the only copyleft dependency; it constrains distribution (statically linking LGPL code), so reassess before shipping a closed-source build.
 - **Secrets audit**: Passwords are `SecretString` end-to-end (`secrecy` crate). The `CredentialsStore` trait uses `SecretString`; `KeyringCredentials` converts to/from plain text only at the OS keyring boundary. Raw `String` handling eliminated in credential paths.
 - **HTML policy edge-case tests**: `data:`/`cid:` rewriting with angle brackets, whitespace, case insensitivity; remote-content detector covers `srcset`, `<link>`, `<video>/<audio>`, `<iframe>`, `<form>`, CSS `url()` with quotes, protocol-relative URLs; CSP document invariants (nonce uniqueness, `form-action 'none'`, `frame-src 'none'`, `base-uri 'none'`, `style-src 'unsafe-inline'`, `font-src data:`).
 
