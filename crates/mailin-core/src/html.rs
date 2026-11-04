@@ -70,88 +70,396 @@ pub fn document(
 /// Whether the HTML refers to a network resource that the policy would block.
 pub fn has_remote_content(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
-    let mut rest = lower.as_str();
-    while let Some(start) = rest.find('<') {
-        let Some(end) = rest[start..].find('>') else {
+    let bytes = lower.as_bytes();
+
+    // CSS `url(...)` (with optional whitespace and quotes) and `@import` may
+    // appear inside a <style> block or an inline style attribute.
+    if lower.contains("@import") || has_remote_css_url(&lower) {
+        return true;
+    }
+
+    // Tag-level attributes: `attr = "value"` with arbitrary whitespace and an
+    // optional quote, and absolute http(s) or protocol-relative values.
+    let mut i = 0;
+    while let Some(open) = find_bytes(bytes, i, b"<") {
+        let end = scan_tag_end(bytes, open);
+        if end == bytes.len() {
             break;
-        };
-        let tag = &rest[start..start + end];
-        // Check for http/https URLs in various attributes
-        if tag.contains("http://")
-            || tag.contains("https://")
-            || tag.contains("src=\"//")
-            || tag.contains("src='//")
-            || tag.contains("srcset=\"//")
-            || tag.contains("srcset='//")
-            || tag.contains("href=\"//")
-            || tag.contains("href='//")
-            || tag.contains("action=\"//")
-            || tag.contains("action='//")
-            || tag.contains("url(//")
+        }
+        let tag = &lower[open..end];
+        if is_remote_tag(tag) {
+            return true;
+        }
+        i = end + 1;
+    }
+    false
+}
+
+fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    let mut i = from;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Index of the `>` closing the tag starting at `open`, aware of quoted
+/// attribute values. Returns `bytes.len()` when the tag is unterminated.
+fn scan_tag_end(bytes: &[u8], open: usize) -> usize {
+    let mut i = open + 1;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if quote != 0 {
+            if c == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => {
+                quote = c;
+                i += 1;
+            }
+            b'>' => return i,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// Detect `url( ... )` with an absolute http(s) or protocol-relative target,
+/// allowing whitespace and optional quotes around the URL.
+fn has_remote_css_url(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while let Some(start) = find_bytes(bytes, i, b"url(") {
+        let mut j = start + 4;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if j < bytes.len() && (bytes[j] == b'"' || bytes[j] == b'\'') {
+            j += 1;
+        }
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if lower[j..].starts_with("http://")
+            || lower[j..].starts_with("https://")
+            || lower[j..].starts_with("//")
         {
-            let resource = tag.contains("src=")
-                || tag.contains("srcset=")
-                || tag.contains("action=")
-                || tag.contains("background=")
-                || tag.contains("url(")
-                || tag.contains("@import")
-                || tag.contains("<link")
-                || tag.contains("<iframe")
-                || tag.contains("<frame")
-                || tag.contains("<video")
-                || tag.contains("<audio")
-                || tag.contains("<source")
-                || tag.contains("<form");
-            // Anchor hrefs are user-navigable, not auto-loaded resources
-            if resource && !tag.contains("<a ") && !tag.contains("<a>") {
+            return true;
+        }
+        i = start + 4;
+    }
+    false
+}
+
+/// Check whether one of the given attribute names on this tag holds an
+/// absolute http(s) or protocol-relative URL.
+fn attr_holds_remote_url(tag: &str, attr: &str) -> bool {
+    let bytes = tag.as_bytes();
+    let attr_bytes = attr.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = find_bytes(bytes, i, attr_bytes) {
+        // Left boundary: must not be part of a longer attribute name, e.g.
+        // "data-x" must not match "data", or "srcset" match "src".
+        let left_ok = rel == 0
+            || !(bytes[rel - 1].is_ascii_alphanumeric()
+                || bytes[rel - 1] == b'-'
+                || bytes[rel - 1] == b'_');
+        let after = rel + attr_bytes.len();
+        if left_ok {
+            let remote = if attr == "srcset" {
+                attr_srcset_is_remote(bytes, after)
+            } else {
+                attr_tail_is_remote(bytes, after)
+            };
+            if remote {
                 return true;
             }
         }
-        rest = &rest[start + end + 1..];
+        i = rel + attr_bytes.len();
     }
-    // CSS `url(...)` may appear inside a <style> block rather than a tag.
-    lower.contains("@import")
-        || lower.contains("url(http://")
-        || lower.contains("url(https://")
-        || lower.contains("url(//")
-        || lower.contains("url('http://")
-        || lower.contains("url('https://")
-        || lower.contains("url('//")
-        || lower.contains("url(\"http://")
-        || lower.contains("url(\"https://")
-        || lower.contains("url(\"//")
-        // srcset attributes in style blocks (rare but possible)
-        || lower.contains("srcset=\"http://")
-        || lower.contains("srcset=\"https://")
-        || lower.contains("srcset='http://")
-        || lower.contains("srcset='https://")
+    false
+}
+
+/// After the attribute name, expect optional whitespace, `=`, optional
+/// whitespace, then the attribute value (quoted or unquoted).
+fn attr_value_span(bytes: &[u8], mut i: usize) -> Option<(usize, usize)> {
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'=') {
+        return None;
+    }
+    i += 1;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    match bytes.get(i) {
+        Some(quote @ (b'"' | b'\'')) => {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end] != *quote {
+                end += 1;
+            }
+            Some((start, end))
+        }
+        _ => {
+            let start = i;
+            let mut end = i;
+            while end < bytes.len() && !bytes[end].is_ascii_whitespace() && bytes[end] != b'>' {
+                end += 1;
+            }
+            Some((start, end))
+        }
+    }
+}
+
+fn is_remote_url(value: &[u8]) -> bool {
+    value.starts_with(b"http://") || value.starts_with(b"https://") || value.starts_with(b"//")
+}
+
+/// After the attribute name, expect the value to consist of a single
+/// http(s)/protocol-relative URL.
+fn attr_tail_is_remote(bytes: &[u8], after: usize) -> bool {
+    let Some((start, end)) = attr_value_span(bytes, after) else {
+        return false;
+    };
+    is_remote_url(&bytes[start..end])
+}
+
+/// `srcset` values are comma-separated `<url> <descriptor>` candidates; a
+/// remote candidate anywhere in the list will be fetched by the browser.
+fn attr_srcset_is_remote(bytes: &[u8], after: usize) -> bool {
+    let Some((start, end)) = attr_value_span(bytes, after) else {
+        return false;
+    };
+    bytes[start..end].split(|b| *b == b',').any(|part| {
+        let trimmed = trim_ascii(part);
+        let token_end = trimmed
+            .iter()
+            .position(|b| b.is_ascii_whitespace())
+            .unwrap_or(trimmed.len());
+        is_remote_url(&trimmed[..token_end])
+    })
+}
+
+fn trim_ascii(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(start, |end| end + 1);
+    &value[start..end]
+}
+
+/// A tag that will fetch a remote resource when rendered. `<a>`/`<area>` hrefs
+/// are user-navigable links, not auto-loaded resources, so `href` on those
+/// tags does not count.
+fn is_remote_tag(tag: &str) -> bool {
+    let navigable = tag.starts_with("<a") || tag.starts_with("<a>") || tag.starts_with("<area");
+
+    for attr in [
+        "src",
+        "srcset",
+        "action",
+        "formaction",
+        "background",
+        "poster",
+        "data",
+    ] {
+        if attr_holds_remote_url(tag, attr) {
+            return true;
+        }
+    }
+    if !navigable && attr_holds_remote_url(tag, "href") {
+        return true;
+    }
+    has_remote_css_url(tag)
 }
 
 fn inject_head(html: &str, head: &str) -> String {
+    // `to_ascii_lowercase` only changes ASCII bytes, so the lowercased
+    // string has the same length and byte offsets as the original.
     let lower = html.to_ascii_lowercase();
-    if let Some(start) = lower.find("<head") {
-        if let Some(offset) = html[start..].find('>') {
-            let insert = start + offset + 1;
-            let mut output = String::with_capacity(html.len() + head.len());
-            output.push_str(&html[..insert]);
-            output.push_str(head);
-            output.push_str(&html[insert..]);
-            return output;
-        }
+    debug_assert_eq!(lower.len(), html.len());
+    let mask = structural_mask(lower.as_bytes());
+
+    if let Some(start) = find_tag(&mask, b"<head")
+        && let Some(end) = find_byte_from(&mask, start, b'>')
+    {
+        let insert = end + 1;
+        let mut output = String::with_capacity(html.len() + head.len());
+        output.push_str(&html[..insert]);
+        output.push_str(head);
+        output.push_str(&html[insert..]);
+        return output;
     }
-    if let Some(start) = lower.find("<html") {
-        if let Some(offset) = html[start..].find('>') {
-            let insert = start + offset + 1;
-            let mut output = String::with_capacity(html.len() + head.len() + 13);
-            output.push_str(&html[..insert]);
-            output.push_str("<head>");
-            output.push_str(head);
-            output.push_str("</head>");
-            output.push_str(&html[insert..]);
-            return output;
-        }
+    if let Some(start) = find_tag(&mask, b"<html")
+        && let Some(end) = find_byte_from(&mask, start, b'>')
+    {
+        let insert = end + 1;
+        let mut output = String::with_capacity(html.len() + head.len() + 13);
+        output.push_str(&html[..insert]);
+        output.push_str("<head>");
+        output.push_str(head);
+        output.push_str("</head>");
+        output.push_str(&html[insert..]);
+        return output;
     }
     format!("<!DOCTYPE html><html><head>{head}</head><body>{html}</body></html>")
+}
+
+/// Mask out the parts of the document where `<head` / `<html` matches would
+/// be meaningless: HTML comments, raw-text elements (`<script>`, `<style>`,
+/// `<textarea>`, `<title>`) and quoted attribute values. The returned vector
+/// has the same length as `bytes`; masked bytes become ASCII spaces so byte
+/// offsets line up with the original string.
+fn structural_mask(bytes: &[u8]) -> Vec<u8> {
+    let mut mask = bytes.to_vec();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        // Comment: <!-- ... --> (an unterminated comment masks to EOF).
+        if bytes[i..].starts_with(b"<!--") {
+            let end = find_bytes(bytes, i + 4, b"-->")
+                .map(|end| end + 3)
+                .unwrap_or(bytes.len());
+            for b in &mut mask[i..end] {
+                *b = b' ';
+            }
+            i = end;
+            continue;
+        }
+        // Raw-text element: <script>...</script>, <style>...</style>,
+        // <textarea>...</textarea>, <title>...</title>.
+        if let Some(raw) = raw_text_open(bytes, i) {
+            let tag_end = scan_tag_end(bytes, i);
+            // A self-closing raw-text element has no content to mask.
+            let end = if tag_end < bytes.len() && tag_end > i && bytes[tag_end - 1] == b'/' {
+                tag_end + 1
+            } else {
+                find_raw_text_close(bytes, tag_end, raw)
+                    .map_or(bytes.len(), |close| scan_tag_end(bytes, close) + 1)
+            };
+            for b in &mut mask[i..end] {
+                *b = b' ';
+            }
+            i = end;
+            continue;
+        }
+        // Ordinary tag: blank quoted attribute values so e.g.
+        // <div data-x="<head>"> cannot be mistaken for an element.
+        if i + 1 < bytes.len() && bytes[i + 1].is_ascii_alphabetic() {
+            let end = scan_tag_end(bytes, i);
+            mask_quoted_values(bytes, &mut mask, i, end);
+            i = end + 1;
+            continue;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// If `bytes[i..]` opens a raw-text element, return the lowercased tag name
+/// (without the leading `<`).
+fn raw_text_open(bytes: &[u8], i: usize) -> Option<&'static [u8]> {
+    for name in [b"script".as_slice(), b"style", b"textarea", b"title"] {
+        let rest = &bytes[i + 1..];
+        if rest.len() >= name.len()
+            && rest[..name.len()].eq_ignore_ascii_case(name)
+            && rest
+                .get(name.len())
+                .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Index of `</name` (case-insensitive) starting the raw-text close tag.
+fn find_raw_text_close(bytes: &[u8], from: usize, name: &[u8]) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'<'
+            && bytes.get(i + 1) == Some(&b'/')
+            && bytes.len() >= i + 2 + name.len()
+            && bytes[i + 2..i + 2 + name.len()].eq_ignore_ascii_case(name)
+            && bytes
+                .get(i + 2 + name.len())
+                .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/')
+        {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Blank the quoted attribute values inside the tag starting at `open`
+/// (indices up to `end`, i.e. the position of `>`).
+fn mask_quoted_values(bytes: &[u8], mask: &mut [u8], open: usize, end: usize) {
+    let mut i = open + 1;
+    while i < end {
+        let quote = bytes[i];
+        if quote == b'"' || quote == b'\'' {
+            let start = i;
+            i += 1;
+            while i < end && bytes[i] != quote {
+                i += 1;
+            }
+            let stop = i.min(end);
+            for b in &mut mask[start..stop] {
+                *b = b' ';
+            }
+            if i < end {
+                i += 1; // Skip the closing quote.
+            }
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// Find a real tag `<name` in the mask: the match must end on a tag boundary
+/// (whitespace, `/`, `>` or end of input) so `<head` does not match `<header>`.
+fn find_tag(mask: &[u8], needle: &[u8]) -> Option<usize> {
+    let mut i = 0;
+    while let Some(start) = find_bytes(mask, i, needle) {
+        let after = start + needle.len();
+        let boundary = mask
+            .get(after)
+            .is_none_or(|b| b.is_ascii_whitespace() || *b == b'>' || *b == b'/');
+        if boundary {
+            return Some(start);
+        }
+        i = after;
+    }
+    None
+}
+
+fn find_byte_from(bytes: &[u8], from: usize, needle: u8) -> Option<usize> {
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Replace `cid:` image references with the matching `data:` URLs.
@@ -512,7 +820,18 @@ fn decode_entity(input: &str) -> String {
             j += 1;
         }
         let digits_start = j;
-        while j < chars.len() && j - digits_start < 8 && chars[j].is_ascii_alphanumeric() {
+        // Consume only actual digits: decimal NCRs stop at a non-digit and
+        // hex NCRs stop at a non-hex-digit — exactly how browsers tokenize.
+        // Anything else (e.g. `&#58alert(1)`) is decoded as `:` + `alert(1)`,
+        // which is what the receiving browser will render.
+        while j < chars.len()
+            && j - digits_start < 8
+            && if hex {
+                chars[j].is_ascii_hexdigit()
+            } else {
+                chars[j].is_ascii_digit()
+            }
+        {
             j += 1;
         }
         if j > digits_start {
@@ -1002,5 +1321,172 @@ mod tests {
             doc.find("script-src 'nonce-").expect("nonce not found") + "script-src 'nonce-".len();
         let end = doc[start..].find("'").expect("nonce end not found");
         doc[start..start + end].to_owned()
+    }
+
+    // ------------------------- inject_head hardening -------------------------
+
+    fn csp_position(doc: &str) -> usize {
+        doc.find("Content-Security-Policy").expect("CSP present")
+    }
+
+    #[test]
+    fn inject_head_ignores_head_inside_a_comment() {
+        let doc = document(
+            "<body><!-- <head> decoy --><p>hello</p></body>",
+            false,
+            false,
+            &[],
+        );
+        let csp = csp_position(&doc);
+        let body = doc.find("<p>hello</p>").expect("body text");
+        assert!(csp < body, "CSP must be injected before body content");
+    }
+
+    #[test]
+    fn inject_head_ignores_head_inside_a_script() {
+        let doc = document(
+            "<html><body><script>var s = \"<head>\";</script><img src=\"https://tracker.example/x\"></body></html>",
+            false,
+            false,
+            &[],
+        );
+        let csp = csp_position(&doc);
+        let script = doc.find("<script>").expect("script tag");
+        assert!(csp < script, "CSP must be injected before the script");
+    }
+
+    #[test]
+    fn inject_head_does_not_treat_header_as_head() {
+        let doc = document(
+            "<html><body><img src=\"https://tracker.example/p.png\"><header>Hi</header></body></html>",
+            false,
+            false,
+            &[],
+        );
+        let csp = csp_position(&doc);
+        let img = doc.find("<img").expect("img");
+        assert!(
+            csp < img,
+            "CSP must be present before content with remote resources"
+        );
+    }
+
+    #[test]
+    fn inject_head_ignores_head_inside_attribute_values() {
+        let doc = document(
+            "<div data-x=\"<head>\"><img src=\"https://tracker.example/x\"></div>",
+            false,
+            false,
+            &[],
+        );
+        let csp = csp_position(&doc);
+        let img = doc.find("<img").expect("img");
+        assert!(csp < img, "CSP must be injected before body content");
+    }
+
+    #[test]
+    fn inject_head_ignores_head_inside_textarea_and_title() {
+        let doc = document(
+            "<html><body><textarea><head></textarea><title><head></title></body></html>",
+            false,
+            false,
+            &[],
+        );
+        let csp = csp_position(&doc);
+        let textarea = doc.find("<textarea>").expect("textarea");
+        assert!(csp < textarea);
+    }
+
+    #[test]
+    fn inject_head_still_injects_after_real_head_with_attributes() {
+        let doc = document(
+            "<html><head profile=\"https://x.test\"><title>t</title></head><body>hi</body></html>",
+            false,
+            false,
+            &[],
+        );
+        let head_open = doc.find("<head profile=").expect("head open tag");
+        let head_close = doc[head_open..].find('>').expect("head close") + head_open + 1;
+        let csp = csp_position(&doc);
+        assert!(csp >= head_close && csp < head_close + 100);
+    }
+
+    #[test]
+    fn inject_head_wraps_bare_fragments_in_a_document() {
+        let doc = inject_head("<p>hi</p>", "<meta charset=\"utf-8\">");
+        assert!(doc.starts_with("<!DOCTYPE html><html><head>"));
+        assert!(doc.contains("<meta charset=\"utf-8\">"));
+    }
+
+    // ------------------------- has_remote_content widening -------------------------
+
+    #[test]
+    fn remote_content_detection_allows_whitespace_around_equals() {
+        assert!(has_remote_content(
+            "<img src = \"https://tracker.example/p.png\">"
+        ));
+        assert!(has_remote_content("<img src=\"//tracker.example/p.png\">"));
+        assert!(has_remote_content(
+            "<link href = \"https://x.test/app.css\">"
+        ));
+        assert!(has_remote_content(
+            "<object data=\"https://x.test/a.svg\"></object>"
+        ));
+        assert!(has_remote_content(
+            "<video poster = \"https://x.test/p.jpg\"></video>"
+        ));
+        assert!(has_remote_content(
+            "<form action = \"https://x.test/collect\"></form>"
+        ));
+        assert!(has_remote_content(
+            "<formaction formaction=\"https://x.test/x\"></formaction>"
+        ));
+        assert!(has_remote_content(
+            "<style>body { background: url( https://x.test/x.png ) }</style>"
+        ));
+        assert!(has_remote_content(
+            "<img srcset = \"local.png 1x, https://x.test/r.png 2x\">"
+        ));
+        assert!(!has_remote_content("<a href = \"//example.com\">link</a>"));
+        assert!(!has_remote_content("<img src = \"cid:logo@example.com\">"));
+        assert!(!has_remote_content("<p>See https://example.com</p>"));
+    }
+
+    #[test]
+    fn remote_content_detection_handles_quoted_and_unquoted_values() {
+        assert!(has_remote_content(
+            "<img src=https://tracker.example/p.png>"
+        ));
+        assert!(has_remote_content(
+            "<img src='https://tracker.example/p.png'>"
+        ));
+        assert!(has_remote_content(
+            "<object data='//x.test/a.svg'></object>"
+        ));
+    }
+
+    // ------------------------- dangerous-URL NCR handling -------------------------
+
+    #[test]
+    fn sanitizer_strips_unterminated_numeric_ncr_javascript_url() {
+        let sanitized = sanitize_html("<a href=\"javascript&#58alert(1)\">x</a>");
+        assert!(
+            !sanitized.contains("javascript"),
+            "unterminated NCR must not hide a javascript: URL: {sanitized}"
+        );
+        let sanitized = sanitize_html("<a href=\"javascript&#x3a;alert(1)\">x</a>");
+        assert!(
+            !sanitized.contains("javascript"),
+            "unterminated hex NCR must not hide a javascript: URL: {sanitized}"
+        );
+    }
+
+    #[test]
+    fn dangerous_url_detection_matches_browser_ncr_tokenization() {
+        assert!(is_dangerous_url("javascript&#58alert(1)"));
+        assert!(is_dangerous_url("javascript&#58;alert(1)"));
+        assert!(is_dangerous_url("javascript&#x3a;alert(1)"));
+        assert!(is_dangerous_url("java&#115;cript:alert(1)"));
+        assert!(is_dangerous_url("&#106;avascript:alert(1)"));
     }
 }

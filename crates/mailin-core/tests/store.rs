@@ -310,6 +310,76 @@ fn search_covers_headers_bodies_and_is_scoped_to_the_account() {
 }
 
 #[test]
+fn structured_search_with_filters_and_text_does_not_error() {
+    let (store, account) = store_with_account();
+    let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);
+    let archive = folder(&store, &account, "Archive", FolderRole::Archive);
+
+    // Unread, in INBOX, with a URL in the body.
+    let mut one = message(inbox, 1, "Compiler notes");
+    one.flags = vec![];
+    let one_id = store.upsert_message(&one).expect("one").id;
+    store
+        .set_body(
+            one_id,
+            Some("See https://mailin.dev for details"),
+            None,
+            None,
+        )
+        .expect("body one");
+
+    // Read, in the Archive folder.
+    let mut two = message(archive, 2, "Compiler notes");
+    two.flags = vec!["\\Seen".into()];
+    store.upsert_message(&two).expect("two");
+
+    // Structured filter only — previously errored with
+    // "Incorrect number of bindings supplied".
+    let by_sender = store
+        .search_messages(&account.id, None, "from:grace", 10)
+        .expect("from filter");
+    assert_eq!(by_sender.len(), 2);
+
+    // Filter combined with a folder scope and no FTS terms — the LIMIT
+    // placeholder bookkeeping used to break here too.
+    let scoped = store
+        .search_messages(&account.id, Some(inbox), "from:grace", 10)
+        .expect("scoped");
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].uid, 1);
+
+    let unread = store
+        .search_messages(&account.id, None, "is:unread", 10)
+        .expect("unread filter");
+    assert_eq!(unread.len(), 1);
+    assert_eq!(unread[0].uid, 1);
+
+    // Filter + free-text term (FTS MATCH and structured filters both applied).
+    let combined = store
+        .search_messages(&account.id, None, "from:grace compiler", 10)
+        .expect("combined");
+    assert_eq!(combined.len(), 2);
+
+    // A free-text term containing a colon must not reach FTS5 unquoted
+    // ("no such column: https").
+    let url = store
+        .search_messages(&account.id, None, "https://mailin.dev", 10)
+        .expect("url as term");
+    assert_eq!(url.len(), 1);
+    assert_eq!(url[0].uid, 1);
+
+    let after = store
+        .search_messages(&account.id, None, "from:grace after:2020-01-01", 10)
+        .expect("after filter");
+    assert_eq!(after.len(), 2);
+
+    let reserved = store
+        .search_messages(&account.id, None, "AND NEAR NOT", 10)
+        .expect("reserved words");
+    assert!(reserved.is_empty());
+}
+
+#[test]
 fn flags_can_be_updated_and_are_parsed() {
     let (store, account) = store_with_account();
     let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);

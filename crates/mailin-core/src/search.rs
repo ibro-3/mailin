@@ -187,17 +187,26 @@ fn parse_date(date_str: &str) -> Result<i64, chrono::ParseError> {
 }
 
 /// Build FTS query string from free-text terms.
-/// Uses FTS5 syntax: terms are AND'd by default, OR with |, phrase with ".
+/// Uses FTS5 syntax: terms are space-separated (implicit AND). Each term is
+/// wrapped in double quotes so embedded `:` (column filters), reserved words
+/// (`AND`/`OR`/`NOT`/`NEAR`) and other FTS5 punctuation are treated as plain
+/// text instead of being parsed as query syntax. Terms that are empty after
+/// quote doubling are dropped; a query with no usable terms returns `None`.
 pub fn build_fts_query(terms: &[String]) -> Option<String> {
     if terms.is_empty() {
         return None;
     }
 
-    // Escape special FTS5 characters
     let escaped: Vec<String> = terms
         .iter()
-        .map(|t| t.replace('"', "\"\"").replace(['*', '?'], ""))
+        .map(|t| t.replace('"', "\"\""))
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!("\"{t}\""))
         .collect();
+
+    if escaped.is_empty() {
+        return None;
+    }
 
     Some(escaped.join(" "))
 }
@@ -360,12 +369,47 @@ mod tests {
     #[test]
     fn test_build_fts_query() {
         let terms = vec!["hello".into(), "world".into()];
-        assert_eq!(build_fts_query(&terms), Some("hello world".into()));
+        assert_eq!(build_fts_query(&terms), Some("\"hello\" \"world\"".into()));
     }
 
     #[test]
     fn test_build_fts_query_empty() {
         assert_eq!(build_fts_query(&[]), None);
+    }
+
+    #[test]
+    fn test_build_fts_query_drops_empty_terms() {
+        let terms = vec!["  ".into(), "".into()];
+        assert_eq!(build_fts_query(&terms), None);
+    }
+
+    #[test]
+    fn test_build_fts_query_quotes_colons_and_urls() {
+        // These used to reach MATCH raw and fail with `no such column: ...`.
+        let terms = vec![
+            "https://mailin.dev".into(),
+            "12:30".into(),
+            "foo:bar".into(),
+        ];
+        assert_eq!(
+            build_fts_query(&terms),
+            Some("\"https://mailin.dev\" \"12:30\" \"foo:bar\"".into())
+        );
+    }
+
+    #[test]
+    fn test_build_fts_query_quotes_reserved_words() {
+        let terms = vec!["AND".into(), "NEAR".into(), "NOT".into()];
+        assert_eq!(
+            build_fts_query(&terms),
+            Some("\"AND\" \"NEAR\" \"NOT\"".into())
+        );
+    }
+
+    #[test]
+    fn test_build_fts_query_doubles_embedded_quotes() {
+        let terms = vec!["say \"hi\"".into()];
+        assert_eq!(build_fts_query(&terms), Some("\"say \"\"hi\"\"\"".into()));
     }
 
     #[test]

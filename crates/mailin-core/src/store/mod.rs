@@ -724,18 +724,19 @@ impl Store {
             "SELECT {MESSAGE_COLUMNS}
              FROM messages m
              JOIN folders f ON f.id = m.folder_id
-             WHERE f.account_id = ?1"
+             WHERE f.account_id = ?"
         );
 
+        // Bare `?` placeholders are numbered sequentially by SQLite in the
+        // order they appear, so the structured filter clause produced by
+        // `build_filter_where` (also bare `?`) lines up with the params
+        // pushed here without any manual index bookkeeping.
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(account.to_string())];
-        let mut param_index = 2;
 
         // Add folder filter if specified
         if let Some(folder) = folder_id {
             sql.push_str(" AND m.folder_id = ?");
-            sql.push_str(&param_index.to_string());
             params.push(Box::new(folder.0));
-            param_index += 1;
         }
 
         // Add FTS query if present
@@ -743,9 +744,7 @@ impl Store {
             sql.push_str(
                 " AND m.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)",
             );
-            sql.push_str(&param_index.to_string());
             params.push(Box::new(fts));
-            param_index += 1;
         }
 
         // Add structured filters
@@ -756,7 +755,6 @@ impl Store {
         }
 
         sql.push_str(" ORDER BY m.received_at DESC, m.uid DESC LIMIT ?");
-        sql.push_str(&param_index.to_string());
         params.push(Box::new(i64::from(limit.clamp(1, 500))));
 
         let mut stmt = conn.prepare(&sql)?;
