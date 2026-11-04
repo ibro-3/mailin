@@ -24,7 +24,13 @@ pub fn show_preferences(
     on_saved: impl Fn() + 'static,
 ) {
     let config = Rc::new(RefCell::new(app.config.borrow().clone()));
-    let paths = Paths::discover().expect("paths");
+    let paths = match Paths::discover() {
+        Ok(paths) => paths,
+        Err(error) => {
+            tracing::error!(%error, "could not discover configuration paths");
+            return;
+        }
+    };
 
     let dialog = adw::PreferencesDialog::new();
     dialog.set_title("Preferences");

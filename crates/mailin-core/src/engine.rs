@@ -104,11 +104,16 @@ impl Engine {
         }
 
         // Store plugin system in state
-        let state_mut = Arc::get_mut(&mut state).unwrap();
+        let state_mut = Arc::get_mut(&mut state).ok_or_else(|| {
+            Error::Config("engine state is unexpectedly shared during startup".to_string())
+        })?;
         state_mut.plugin_system = plugin_system;
 
         // Take the receiver for supervise
-        let scheduled_actions_receiver = state_mut.scheduled_actions_receiver.take().unwrap();
+        let scheduled_actions_receiver = state_mut
+            .scheduled_actions_receiver
+            .take()
+            .expect("scheduled-actions receiver exists until taken");
         runtime.spawn(supervise(
             state.clone(),
             receiver,
@@ -282,7 +287,7 @@ impl Engine {
         self.state
             .sync_status
             .read()
-            .unwrap()
+            .unwrap_or_else(|err| err.into_inner())
             .get(account_id)
             .copied()
             .unwrap_or(SyncStatus::Idle)
@@ -293,7 +298,7 @@ impl Engine {
         self.state
             .last_sync_at
             .read()
-            .unwrap()
+            .unwrap_or_else(|err| err.into_inner())
             .get(account_id)
             .copied()
     }
@@ -2147,7 +2152,10 @@ fn initial_mode(folder: &Folder) -> SyncMode {
 
 /// Update the sync status for an account and emit the change event.
 fn set_sync_status(state: &Arc<EngineState>, account_id: AccountId, status: SyncStatus) {
-    let mut guard = state.sync_status.write().unwrap();
+    let mut guard = state
+        .sync_status
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
     let changed = guard.get(&account_id).is_none_or(|old| *old != status);
     if changed {
         guard.insert(account_id, status);
@@ -2162,7 +2170,7 @@ fn set_last_sync_at(state: &Arc<EngineState>, account_id: AccountId, timestamp: 
     state
         .last_sync_at
         .write()
-        .unwrap()
+        .unwrap_or_else(|err| err.into_inner())
         .insert(account_id, timestamp);
 }
 

@@ -3,68 +3,64 @@
 # See: https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-# Only check for RustSec advisories
-db = "https://github.com/RustSec/advisory-db.git"
-# Ignore specific advisories if needed (with justification)
+# Advisory database URL (RustSec advisory DB).
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Only fail for unmaintained crates that are part of THIS workspace. The
+# zbus 5.x tree (via keyring -> secret-service) is unmaintained upstream with
+# no migration until keyring adopts zbus 6; nothing actionable for us.
+unmaintained = "workspace"
+
 ignore = [
-  # Example:
-  # "RUSTSEC-2023-0001", # False positive for our use case
+  # Timing sidechannel in RSA decryption ("Marvin Attack"). Reachable only via
+  # sequoia-openpgp's pure-Rust RSA on local keys with many timing samples;
+  # our usage is local (own keyring, own device). Fix requires sequoia-openpgp
+  # 2.x, a breaking upgrade tracked as tech debt.
+  { id = "RUSTSEC-2023-0071", reason = "local-keyring usage; fix requires sequoia-openpgp 2.x upgrade" },
+  # sequoia-openpgp aes_key_unwrap underflow. Same upstream chain; patched
+  # only in 2.x.
+  { id = "RUSTSEC-2025-0136", reason = "patched only in sequoia-openpgp 2.x; upgrade tracked as tech debt" },
+  # crypto-bigint timing variability, via elliptic-curve -> sequoia-openpgp.
+  # Patched only in the newer crypto stack pulled in by sequoia-openpgp 2.x.
+  { id = "RUSTSEC-2026-0387", reason = "patched only in the sequoia-openpgp 2.x crypto stack" },
 ]
 
 [licenses]
-# Allowlist of acceptable licenses
+# Allowlist of acceptable licenses (everything not listed here is rejected).
+# Everything below is permissive or public-domain-style (OSI/OASIS approved or
+# equivalent). Copyleft licenses are intentionally NOT allowed except the one
+# scoped exception documented below.
 allow = [
   "MIT",
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
   "BSD-2-Clause",
   "BSD-3-Clause",
+  "0BSD",
+  "BSL-1.0",
+  "CC0-1.0",
   "ISC",
-  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
   "Zlib",
   "MPL-2.0",
 ]
-# Deny these licenses (copyleft, etc.)
-deny = [
-  "GPL-2.0",
-  "GPL-3.0",
-  "LGPL-2.0",
-  "LGPL-2.1",
-  "LGPL-3.0",
-  "AGPL-3.0",
-  "SSPL-1.0",
+exceptions = [
+  # LGPL-2.0-or-later: sequoia-openpgp itself and buffered-reader (its
+  # dependency). Sequoia requires it; this is the only copyleft exception and
+  # it is scoped to these two crates. Revisit if the app's distribution model
+  # changes (e.g. closed-source).
+  { allow = ["LGPL-2.0-or-later"], crate = "sequoia-openpgp" },
+  { allow = ["LGPL-2.0-or-later"], crate = "buffered-reader" },
 ]
-# Allow licenses per-crate if needed (with justification)
-allow-licenses = {}
-
-[duplicates]
-# Warn about duplicate dependencies (saves space)
-# Multiple versions of the same crate can bloat the binary
-allow = [
-  # Allow some duplicates that are known to be necessary
-  # "smallvec", # Example
-]
-# Deny multiple semver-incompatible versions
-multiple-versions = "warn"
 
 [bans]
-# Ban specific crates (security, maintenance, or policy)
-deny = {
-  # Example:
-  # "openssl" = "Use rustls instead",
-  # "native-tls" = "Use rustls instead",
-}
-# Allow specific versions of banned crates if needed
-allow = {}
-# Deny crates with specific versions (wildcards supported)
-# deny = { "some-crate" = "< 1.0.0" }
+# Warn about duplicate dependencies (multiple versions of the same crate).
+multiple-versions = "warn"
 
 [sources]
-# Only allow crates.io and known-good registries
-allow-unknown-registry = false
-# Deny git sources in production (use crates.io instead)
-deny-git = false
-# Known good registries
-registries = [
-  "crates-io",
-]
+# Only allow crates.io; fail on unknown registries.
+unknown-registry = "deny"
+# Git sources are allowed (matches the previous deny-git = false).
+unknown-git = "allow"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

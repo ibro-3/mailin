@@ -145,6 +145,21 @@ cargo xtask it-down
 
 These tests are ignored by default so a normal `cargo test` needs no Docker.
 
+The TLS tests run against GreenMail served with a locally generated CA
+(`rustls-native-certs` honours `SSL_CERT_FILE`, so no system-store changes
+needed):
+
+```sh
+cargo xtask it-up-tls                                        # generates target/it-certs/ and starts the server
+SSL_CERT_FILE=target/it-certs/ca.crt cargo test -p mailin-core --test imap_it_tls -- --ignored
+cargo xtask it-down-tls
+```
+
+GreenMail does not support STARTTLS at all
+([greenmail#135](https://github.com/greenmail-mail-test/greenmail/issues/135)),
+so the STARTTLS integration tests cannot pass against it; they are kept for a
+future STARTTLS-capable test server and their CI job is non-blocking.
+
 ## Where things live
 
 | What | Linux | Windows |

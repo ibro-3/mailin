@@ -41,7 +41,7 @@ pub fn show(
     ui::margin_lg(&panel)?;
     ui::margin_vertical(&panel, 8.0)?;
 
-    let search = ui::text_box("Search folders")?;
+    let search = ui::text_box("Search folders", Some("Search folders"))?;
     ui::append(&panel, &search)?;
 
     // Each folder is a button; the search hides rows rather than removing
@@ -55,7 +55,9 @@ pub fn show(
                 (label, folder.id, haystack)
             })
             .filter_map(|(label, id, haystack)| {
-                ui::button(&label).ok().map(|button| (button, id, haystack))
+                ui::button(&label, Some(label.as_str()), Some(label.as_str()))
+                    .ok()
+                    .map(|button| (button, id, haystack))
             })
             .collect(),
     );

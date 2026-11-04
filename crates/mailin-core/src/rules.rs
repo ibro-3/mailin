@@ -18,12 +18,11 @@ pub struct RegexCache {
 
 impl RegexCache {
     pub fn get(&mut self, pattern: &str) -> Result<&Regex, regex::Error> {
-        if self.cache.contains_key(pattern) {
-            return Ok(self.cache.get(pattern).unwrap());
+        if !self.cache.contains_key(pattern) {
+            let re = Regex::new(pattern)?;
+            self.cache.insert(pattern.to_owned(), re);
         }
-        let re = Regex::new(pattern)?;
-        self.cache.insert(pattern.to_owned(), re);
-        Ok(self.cache.get(pattern).unwrap())
+        Ok(self.cache.get(pattern).expect("regex inserted by caller"))
     }
 }
 

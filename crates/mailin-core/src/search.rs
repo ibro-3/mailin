@@ -123,7 +123,7 @@ fn parse_field(
         if let Some(next) = tokens.peek() {
             // Don't consume if it looks like another field (contains :)
             if !next.contains(':') {
-                let value = tokens.next().unwrap();
+                let value = tokens.next()?;
                 return Some((field, value));
             }
         }
@@ -179,7 +179,11 @@ fn apply_field(query: &mut SearchQuery, field: String, value: String) {
 /// Parse YYYY-MM-DD date to Unix timestamp (start of day UTC).
 fn parse_date(date_str: &str) -> Result<i64, chrono::ParseError> {
     let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")?;
-    Ok(date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+    Ok(date
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight is a valid time")
+        .and_utc()
+        .timestamp())
 }
 
 /// Build FTS query string from free-text terms.

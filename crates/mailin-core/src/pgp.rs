@@ -309,7 +309,7 @@ impl VerificationHelper for DecryptHelper {
     }
 
     fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
-        let mut counts = self.verdict.lock().unwrap();
+        let mut counts = self.verdict.lock().unwrap_or_else(|err| err.into_inner());
         for layer in structure.iter() {
             if let MessageLayer::SignatureGroup { results } = layer {
                 for result in results {
@@ -348,7 +348,7 @@ pub fn decrypt_message(
         .read_to_string(&mut plaintext)
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
-    let (good, bad, unknown) = *counts.lock().unwrap();
+    let (good, bad, unknown) = *counts.lock().unwrap_or_else(|err| err.into_inner());
     Ok((plaintext, verdict(good, bad, unknown)))
 }
 
@@ -409,7 +409,7 @@ pub fn verify_detached(
         .verify_bytes(data)
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
-    let (good, bad, unknown) = *counts.lock().unwrap();
+    let (good, bad, unknown) = *counts.lock().unwrap_or_else(|err| err.into_inner());
     Ok(verdict(good, bad, unknown))
 }
 
@@ -456,7 +456,7 @@ impl VerificationHelper for VerifyHelper {
     }
 
     fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
-        let mut counts = self.verdict.lock().unwrap();
+        let mut counts = self.verdict.lock().unwrap_or_else(|err| err.into_inner());
         for layer in structure.iter() {
             if let MessageLayer::SignatureGroup { results } = layer {
                 for result in results {
@@ -491,7 +491,7 @@ pub fn verify_signature(signed_text: &str, signer_cert: &Cert) -> Result<Signatu
         .read_to_end(&mut output)
         .map_err(|e| Error::Protocol(e.to_string()))?;
 
-    let (good, bad, unknown) = *counts.lock().unwrap();
+    let (good, bad, unknown) = *counts.lock().unwrap_or_else(|err| err.into_inner());
     Ok(verdict(good, bad, unknown))
 }
 

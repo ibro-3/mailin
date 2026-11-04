@@ -36,7 +36,9 @@ impl CalDavClient {
         body: Option<&str>,
         content_type: Option<&str>,
     ) -> Result<String> {
-        let method = method.parse::<Method>().unwrap();
+        let method = method
+            .parse::<Method>()
+            .map_err(|e| Error::Config(format!("invalid CalDAV HTTP method {method:?}: {e}")))?;
         let mut req = http::Request::builder()
             .method(method)
             .uri(url)
@@ -45,9 +47,11 @@ impl CalDavClient {
             req = req.header("Content-Type", ct);
         }
         let req = if let Some(b) = body {
-            req.body(b.to_string()).unwrap()
+            req.body(b.to_string())
+                .map_err(|e| Error::Protocol(format!("could not build CalDAV request: {e}")))?
         } else {
-            req.body(String::new()).unwrap()
+            req.body(String::new())
+                .map_err(|e| Error::Protocol(format!("could not build CalDAV request: {e}")))?
         };
         let resp = self
             .agent
@@ -387,7 +391,8 @@ fn parse_ical_property(line: &str) -> (String, String, HashMap<String, Vec<Strin
     let mut params: HashMap<String, Vec<String>> = HashMap::new();
     let colon = line.find(':').unwrap_or(line.len());
     let (name_part, value) = line.split_at(colon);
-    let value = &value[1..]; // skip ':'
+    // Skip the leading ':' if the line was split at one.
+    let value = value.strip_prefix(':').unwrap_or(value);
 
     let parts: Vec<&str> = name_part.split(';').collect();
     let name = parts[0].to_uppercase();
@@ -414,9 +419,12 @@ fn parse_datetime(value: &str, params: &HashMap<String, Vec<String>>) -> Option<
             .ok()
             .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
     } else if is_date || value.len() == 8 {
-        NaiveDate::parse_from_str(value, "%Y%m%d")
-            .ok()
-            .map(|d| d.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+        NaiveDate::parse_from_str(value, "%Y%m%d").ok().map(|d| {
+            d.and_hms_opt(0, 0, 0)
+                .expect("midnight is a valid time")
+                .and_utc()
+                .timestamp()
+        })
     } else {
         NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
             .ok()
@@ -456,5 +464,30 @@ mod tests {
         let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:test2@example.com\nDTSTART;VALUE=DATE:20240115\nDTEND;VALUE=DATE:20240116\nSUMMARY:All Day\nEND:VEVENT\nEND:VCALENDAR";
         let event = parse_ical_event(ical, 1).unwrap();
         assert!(event.all_day);
+    }
+
+    #[test]
+    fn test_parse_ical_line_without_colon_does_not_panic() {
+        // A content line with no ':' separator must not panic the parser.
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:malformed@example.com\nDTSTART:20240115T100000Z\nA LINE WITHOUT ANY COLON AT ALL\nEND:VEVENT\nEND:VCALENDAR";
+        let event = parse_ical_event(ical, 1).expect("malformed line is tolerated");
+        assert_eq!(event.uid, "malformed@example.com");
+    }
+
+    #[test]
+    fn test_parse_ical_trailing_colon_line_does_not_panic() {
+        // "SUMMARY:" carries an empty value and must not panic the parser.
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:empty@example.com\nDTSTART:20240115T100000Z\nSUMMARY:\nEND:VEVENT\nEND:VCALENDAR";
+        let event = parse_ical_event(ical, 1).expect("trailing colon is tolerated");
+        assert_eq!(event.uid, "empty@example.com");
+        assert_eq!(event.summary, "");
+    }
+
+    #[test]
+    fn test_parse_ical_folded_lines_unfold() {
+        // RFC 5545 §3.1: a line break followed by a space/tab is a fold.
+        let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:folded@example.com\nDTSTART:20240115T100000Z\nSUMMARY:Weekly sync\n  meeting\nEND:VEVENT\nEND:VCALENDAR";
+        let event = parse_ical_event(ical, 1).expect("folded lines are unfolded");
+        assert_eq!(event.summary, "Weekly sync meeting");
     }
 }

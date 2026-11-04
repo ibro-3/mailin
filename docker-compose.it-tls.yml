@@ -1,0 +1,35 @@
+# Mail IMAP/SMTP server with a locally signed CA for the TLS integration tests.
+#
+#   cargo xtask it-up-tls
+#   SSL_CERT_FILE=target/it-certs/ca.crt cargo test -p mailin-core --test imap_it_tls -- --ignored
+#   cargo xtask it-down-tls
+#
+# The certificate chain is generated with openssl by `cargo xtask it-certs`.
+# It is trusted through SSL_CERT_FILE rather than the system store, so the
+# file is all the test needs (rustls-native-certs honours it).
+
+services:
+  greenmail:
+    image: greenmail/standalone:latest
+    container_name: mailin-greenmail-tls
+    ports:
+      - "3025:3025"   # SMTP
+      - "3143:3143"   # IMAP
+      - "3465:3465"   # IMAPS
+      - "3993:3993"   # SMTPS
+    volumes:
+      - ./target/it-certs/greenmail.p12:/certs/greenmail.p12:ro
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.all
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=ada:correct-horse@example.com
+        -Dgreenmail.tls.keystore.file=/certs/greenmail.p12
+        -Dgreenmail.tls.keystore.password=changeit
+        -Dgreenmail.verbose
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/3993' || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s

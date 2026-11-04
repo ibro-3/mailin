@@ -161,13 +161,21 @@ pub fn present(
                                     payload.get("requestId").and_then(|v| v.as_u64()),
                                     payload.get("content").and_then(|v| v.as_str()),
                                 ) {
-                                    let current_id = *content_request_id_clone.lock().unwrap_or(&mut 0);
+                                    let current_id = *content_request_id_clone
+                                        .lock()
+                                        .unwrap_or_else(|err| err.into_inner());
                                     if request_id == current_id {
                                         if let Some(want_html) = payload.get("wantHtml").and_then(|v| v.as_bool()) {
                                             if want_html {
-                                                *pending_html_clone.lock().unwrap_or(&mut None) = Some(content.to_owned());
+                                                *pending_html_clone
+                                                    .lock()
+                                                    .unwrap_or_else(|err| err.into_inner()) =
+                                                    Some(content.to_owned());
                                             } else {
-                                                *pending_text_clone.lock().unwrap_or(&mut None) = Some(content.to_owned());
+                                                *pending_text_clone
+                                                    .lock()
+                                                    .unwrap_or_else(|err| err.into_inner()) =
+                                                    Some(content.to_owned());
                                             }
                                         }
                                     }
@@ -397,8 +405,7 @@ pub fn present(
         });
         // Position popover below the format button
         if !is_visible {
-            let _ =
-                format_popover_for_toggle.SetMargin(ui::margin_for_popover(&format_btn_for_toggle));
+            let _ = format_popover_for_toggle.SetMargin(margin_for_popover(&format_btn_for_toggle));
         }
     })?);
 
@@ -591,13 +598,15 @@ pub fn present(
         let content_request_id = content_request_id.clone();
         move |want_html: bool| -> Option<String> {
             let request_id = {
-                let mut id = content_request_id.lock().unwrap();
+                let mut id = content_request_id
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner());
                 *id += 1;
                 *id
             };
             // Clear previous pending content
-            *pending_html.lock().unwrap() = None;
-            *pending_text.lock().unwrap() = None;
+            *pending_html.lock().unwrap_or_else(|err| err.into_inner()) = None;
+            *pending_text.lock().unwrap_or_else(|err| err.into_inner()) = None;
 
             let script = format!(
                 "__mailinGetContent({}, {});",
@@ -611,11 +620,19 @@ pub fn present(
             let timeout = Duration::from_millis(500);
             while start.elapsed() < timeout {
                 if want_html {
-                    if let Some(content) = pending_html.lock().unwrap().take() {
+                    if let Some(content) = pending_html
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .take()
+                    {
                         return Some(content);
                     }
                 } else {
-                    if let Some(content) = pending_text.lock().unwrap().take() {
+                    if let Some(content) = pending_text
+                        .lock()
+                        .unwrap_or_else(|err| err.into_inner())
+                        .take()
+                    {
                         return Some(content);
                     }
                 }
@@ -1217,7 +1234,13 @@ fn setup_contact_autocomplete(
             let query = query.trim();
 
             // Clear existing suggestions
-            let children = suggestions_panel.Children().expect("Children");
+            let children = match suggestions_panel.Children() {
+                Ok(children) => children,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read the suggestion list");
+                    return Ok(());
+                }
+            };
             let _ = children.Clear();
 
             if query.is_empty() {
@@ -1254,15 +1277,15 @@ fn setup_contact_autocomplete(
                         .SetHorizontalAlignment(mailin_winui_sys::HorizontalAlignment::Stretch)?;
                     button.SetVerticalAlignment(VerticalAlignment::Stretch)?;
                     button.SetPadding(mailin_winui_sys::Thickness {
-                    left: 8.0,
-                    top: 4.0,
-                    right: 8.0,
-                    bottom: 4.0,
-                })?;
+                        left: 8.0,
+                        top: 4.0,
+                        right: 8.0,
+                        bottom: 4.0,
+                    })?;
 
                     // Use a transparent background directly instead of a Style
                     button.SetBackground(mailin_winui_sys::SolidColorBrush::CreateInstance(
-                        &mailin_winui_sys::color_from_argb(0, 0, 0, 0)
+                        &mailin_winui_sys::color_from_argb(0, 0, 0, 0),
                     )?)?;
                     ui::on_click(&button, move || {
                         let current = ui::text_value(&text_box);

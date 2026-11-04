@@ -2,12 +2,11 @@
 
 use std::fs;
 use std::path::Path;
-use regex::Regex;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bindings_path = Path::new("crates/mailin-winui-sys/src/bindings.rs");
     let mut content = fs::read_to_string(bindings_path)?;
-    
+
     // 1. Add public new() method to TypedEventHandler
     let typed_handler_def = r#"pub struct TypedEventHandler<TSender, TResult>(
     windows_core::IUnknown,
@@ -18,7 +17,7 @@ where
     TSender: windows_core::RuntimeType + 'static,
     TResult: windows_core::RuntimeType + 'static;
 "#;
-    
+
     let new_method = r#"
 impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::RuntimeType + 'static>
     TypedEventHandler<TSender, TResult>
@@ -36,23 +35,36 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
     }
 }
 "#;
-    
-    let mut content = content.replace(typed_handler_def, &format!("{typed_handler_def}\n{new_method}"));
-    
+
+    content = content.replace(
+        typed_handler_def,
+        &format!("{typed_handler_def}\n{new_method}"),
+    );
+
     // Fix PropertyPath::CreateInstance to use HSTRING::from
-    let re = Regex::new(r"core::mem::transmute_copy\(&path\.into\(\)\)")?;
-    content = content.replace(&content[content.find("core::mem::transmute_copy(&path.into())").unwrap()..content.find("core::mem::transmute_copy(&path.into())").unwrap() + 37], "core::mem::transmute_copy(&windows_core::HSTRING::from(path))");
-    
+    content = content.replace(
+        "core::mem::transmute_copy(&path.into())",
+        "core::mem::transmute_copy(&windows_core::HSTRING::from(path))",
+    );
+
     // Also fix the transmute_copy with type annotation
-    let transmute_re = Regex::new(r"core::mem::transmute_copy::<Src, \*mut c_void>\(&path\.into\(\)\)")?;
-    let mut content = content.replace("core::mem::transmute_copy::<Src, *mut c_void>(&path.into())", "core::mem::transmute_copy::<Src, *mut c_void>(&windows_core::HSTRING::from(path))");
-    
+    content = content.replace(
+        "core::mem::transmute_copy::<Src, *mut c_void>(&path.into())",
+        "core::mem::transmute_copy::<Src, *mut c_void>(&windows_core::HSTRING::from(path))",
+    );
+
     // Make TypedEventHandlerBox::VTABLE public
-    content = content.replace("const VTABLE : TypedEventHandler_Vtbl", "pub const VTABLE : TypedEventHandler_Vtbl");
-    
+    content = content.replace(
+        "const VTABLE : TypedEventHandler_Vtbl",
+        "pub const VTABLE : TypedEventHandler_Vtbl",
+    );
+
     // Make TypedEventHandlerBox public
-    content = content.replace("struct TypedEventHandlerBox<", "pub struct TypedEventHandlerBox<");
-    
+    content = content.replace(
+        "struct TypedEventHandlerBox<",
+        "pub struct TypedEventHandlerBox<",
+    );
+
     fs::write("crates/mailin-winui-sys/src/bindings.rs", content)?;
     Ok(())
 }

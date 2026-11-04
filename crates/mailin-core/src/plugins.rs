@@ -191,7 +191,10 @@ impl PluginSystem {
                 if path.is_dir() {
                     let manifest_path = path.join("manifest.json");
                     if manifest_path.exists() {
-                        let name = path.file_name().unwrap().to_string_lossy().to_string();
+                        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string())
+                        else {
+                            continue;
+                        };
                         if !loaded.contains_key(&name) {
                             if let Err(e) = self.load_plugin_from_dir(&path).await {
                                 tracing::warn!(plugin_dir = %path.display(), error = %e, "Failed to load plugin from directory");
@@ -232,7 +235,7 @@ impl PluginSystem {
 
         // Execute the plugin in the sandboxed Lua state
         {
-            let lua = self.lua.lock().unwrap();
+            let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
             lua.load(&script)
                 .set_mode(ChunkMode::Text)
                 .exec()
@@ -246,9 +249,8 @@ impl PluginSystem {
             .unwrap_or_else(|| {
                 plugin_dir
                     .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "plugin".to_string())
             });
 
         let version = manifest
@@ -331,7 +333,7 @@ impl PluginSystem {
 
     /// Execute a plugin hook (e.g., "on_message_received", "on_compose").
     pub async fn run_hook(&self, hook: &str, args: Value) -> Result<Value> {
-        let lua = self.lua.lock().unwrap();
+        let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
         let globals = lua.globals();
         let hook_fn: mlua::Function = globals
             .get(hook)
@@ -350,7 +352,7 @@ impl PluginSystem {
         }
         drop(plugins);
 
-        let lua = self.lua.lock().unwrap();
+        let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
         let globals = lua.globals();
         let plugin_table: Table = globals
             .get(plugin_name)

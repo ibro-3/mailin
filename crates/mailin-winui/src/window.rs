@@ -17,12 +17,12 @@ use mailin_core::{
     html,
 };
 use mailin_winui_sys::{
-    Application, AutomationProperties, Button, CheckBox, ComboBox, ContentDialog, ContentDialogButton, DispatcherQueue,
-    FrameworkElement, Grid, GridUnitType, IToggleButton, IXmlNodeSerializer, KeyboardAccelerator,
-    MenuFlyout, MenuFlyoutItem, Orientation, ResourceDictionary, RightTappedRoutedEventArgs,
-    ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification, ToastNotificationManager,
-    ToastTemplateType, TypedEventHandler, VerticalAlignment, VirtualKey, VirtualKeyModifiers,
-    Visibility, WebView2, Window, XamlRoot,
+    Application, AutomationProperties, Button, CheckBox, ComboBox, ContentDialog,
+    ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType, IToggleButton,
+    IXmlNodeSerializer, KeyboardAccelerator, MenuFlyout, MenuFlyoutItem, Orientation,
+    ResourceDictionary, RightTappedRoutedEventArgs, ScrollViewer, StackPanel, TextBlock, TextBox,
+    ToastNotification, ToastNotificationManager, ToastTemplateType, TypedEventHandler,
+    VerticalAlignment, VirtualKey, VirtualKeyModifiers, Visibility, WebView2, Window, XamlRoot,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -190,7 +190,12 @@ impl MainWindow {
         let this = Rc::new(self.clone());
         let undo_button = self.widgets.undo_button.clone();
         let revoker = undo_button.Click(&TypedEventHandler::new(move |_, _| {
-            if let Some((source_folder, message_ids)) = this.last_move.lock().unwrap().take() {
+            if let Some((source_folder, message_ids)) = this
+                .last_move
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .take()
+            {
                 for msg_id in message_ids {
                     this.move_message_to_folder_silent(msg_id, source_folder);
                 }
@@ -203,12 +208,24 @@ impl MainWindow {
 
         // Auto-hide after 5 seconds
         let undo_banner = self.widgets.undo_banner.clone();
-        let queue = DispatcherQueue::GetForCurrentThread().unwrap();
-        let timer = queue.CreateTimer().unwrap();
-        timer.SetInterval(windows_time::TimeSpan {
+        let queue = DispatcherQueue::GetForCurrentThread().unwrap_or_else(|error| {
+            tracing::warn!(%error, "undo auto-hide skipped: no dispatcher on this thread");
+            return;
+        });
+        let timer = queue.CreateTimer().unwrap_or_else(|error| {
+            tracing::warn!(%error, "undo auto-hide skipped: could not create timer");
+            return;
+        });
+        if let Err(error) = timer.SetInterval(windows_time::TimeSpan {
             duration: 5 * 10_000_000,
-        })?;
-        timer.SetIsRepeating(false)?;
+        }) {
+            tracing::warn!(%error, "undo auto-hide skipped: SetInterval failed");
+            return;
+        }
+        if let Err(error) = timer.SetIsRepeating(false) {
+            tracing::warn!(%error, "undo auto-hide skipped: SetIsRepeating failed");
+            return;
+        }
         let undo_banner_clone = undo_banner.clone();
         let this_clone = self.clone();
         let _ = timer.Tick(move |_, _| {
@@ -216,7 +233,9 @@ impl MainWindow {
             let _ = ui::set_visible(&this_clone.widgets.undo_banner, false);
             Ok(())
         });
-        timer.Start().unwrap();
+        if let Err(error) = timer.Start() {
+            tracing::warn!(%error, "undo auto-hide skipped: could not start timer");
+        }
     }
 
     fn show_error(&self, message: &str) {
@@ -276,7 +295,14 @@ impl MainWindow {
         if let Ok(actions_doc) = mailin_winui_sys::XmlDocument::new() {
             let _ = actions_doc.LoadXml(&actions_xml);
             if let Ok(actions_element) = actions_doc.DocumentElement() {
-                let _ = xml.DocumentElement()?.AppendChild(&actions_element);
+                match xml.DocumentElement() {
+                    Ok(doc_element) => {
+                        let _ = doc_element.AppendChild(&actions_element);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to read the toast document root")
+                    }
+                }
             }
         }
 
@@ -713,7 +739,11 @@ impl MainWindow {
                 if quick_actions_enabled {
                     if let Some(actions_bar) = &actions_bar {
                         for action in &quick_action_items {
-                            if let Ok(btn) = ui::button(action.label()) {
+                            if let Ok(btn) = ui::button(
+                                action.label(),
+                                Some(action.label()),
+                                Some(action.label()),
+                            ) {
                                 let this = Rc::clone(self);
                                 let action = *action;
                                 let mid = id;
@@ -860,7 +890,11 @@ impl MainWindow {
                 if quick_actions_enabled {
                     if let Some(actions_bar) = &actions_bar {
                         for action in &quick_action_items {
-                            if let Ok(btn) = ui::button(action.label()) {
+                            if let Ok(btn) = ui::button(
+                                action.label(),
+                                Some(action.label()),
+                                Some(action.label()),
+                            ) {
                                 let this = Rc::clone(self);
                                 let action = *action;
                                 let mid = id;
@@ -1400,23 +1434,29 @@ impl MainWindow {
         // "Download all" button when multiple attachments
         if visible.len() > 1 {
             if let Ok(download_all_row) = ui::stack(Orientation::Horizontal, 8.0) {
-                ui::padding(&download_all_row, 4.0, 4.0, 4.0, 4.0)?;
-                let download_all = ui::button(
-                    "Download all",
-                    Some("Download all"),
-                    Some("Download all attachments"),
-                )?;
-                let this = Rc::clone(self);
-                let mid = message_id;
-                let visible_clone = visible.clone();
-                let revoker = ui::on_click(&download_all, move || {
-                    for att in &visible_clone {
-                        let _ = this.save_attachment(mid, att.clone());
-                    }
-                })?;
-                self.attachment_events.keep(revoker);
-                ui::append(&download_all_row, &download_all)?;
-                let _ = ui::append(&self.widgets.attachments_panel, &download_all_row);
+                let build_download_all = || -> anyhow::Result<()> {
+                    ui::padding(&download_all_row, 4.0, 4.0, 4.0, 4.0)?;
+                    let download_all = ui::button(
+                        "Download all",
+                        Some("Download all"),
+                        Some("Download all attachments"),
+                    )?;
+                    let this = Rc::clone(self);
+                    let mid = message_id;
+                    let visible_clone = visible.clone();
+                    let revoker = ui::on_click(&download_all, move || {
+                        for att in &visible_clone {
+                            let _ = this.save_attachment(mid, att.clone());
+                        }
+                    })?;
+                    self.attachment_events.keep(revoker);
+                    ui::append(&download_all_row, &download_all)?;
+                    let _ = ui::append(&self.widgets.attachments_panel, &download_all_row);
+                    Ok(())
+                };
+                if let Err(error) = build_download_all() {
+                    tracing::warn!(%error, "could not build the download-all attachment row");
+                }
             }
         }
 
@@ -1891,7 +1931,8 @@ impl MainWindow {
             if let Some(this) = this.upgrade() {
                 // Store undo info and show undo banner
                 if let Some(source) = source_folder {
-                    *this.last_move.lock().unwrap() = Some((source, ids_clone.clone()));
+                    *this.last_move.lock().unwrap_or_else(|err| err.into_inner()) =
+                        Some((source, ids_clone.clone()));
                     this.show_undo_banner(&format!(
                         "Moved {} message{}",
                         ids.len(),
@@ -2186,12 +2227,31 @@ impl MainWindow {
             }
         };
         // Use a simple text input dialog for folder name
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap();
-        let _ = dialog.SetTitle(&ui::text("New Folder").unwrap());
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap();
-        ui::margin_lg(&panel).unwrap();
-        let input = ui::text_box("Folder name").unwrap();
-        ui::append(&panel, &input).unwrap();
+        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
+            self.show_error(&format!("Could not create dialog: {error}"));
+            return;
+        });
+        let title = ui::text("New Folder").unwrap_or_else(|error| {
+            self.show_error(&format!("Could not build dialog text: {error}"));
+            return;
+        });
+        let _ = dialog.SetTitle(&title);
+        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
+        ui::margin_lg(&panel).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
+        let input = ui::text_box("Folder name", Some("Folder name")).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not create text box: {error}"));
+            return;
+        });
+        ui::append(&panel, &input).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetPrimaryButtonText("Create");
         let _ = dialog.SetCloseButtonText("Cancel");
@@ -2226,13 +2286,36 @@ impl MainWindow {
         let Some(folder) = folders.iter().find(|f| f.id.0 == folder_id) else {
             return;
         };
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap();
-        let _ = dialog.SetTitle(&ui::text("Rename Folder").unwrap());
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap();
-        ui::margin_lg(&panel).unwrap();
-        let input = ui::text_box("New folder name").unwrap();
-        input.SetText(&folder.name).unwrap();
-        ui::append(&panel, &input).unwrap();
+        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
+            self.show_error(&format!("Could not create dialog: {error}"));
+            return;
+        });
+        let title = ui::text("Rename Folder").unwrap_or_else(|error| {
+            self.show_error(&format!("Could not build dialog text: {error}"));
+            return;
+        });
+        let _ = dialog.SetTitle(&title);
+        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
+        ui::margin_lg(&panel).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
+        let input =
+            ui::text_box("New folder name", Some("New folder name")).unwrap_or_else(|error| {
+                self.show_error(&format!("Could not create text box: {error}"));
+                return;
+            });
+        input.SetText(&folder.name).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not fill dialog text box: {error}"));
+            return;
+        });
+        ui::append(&panel, &input).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetPrimaryButtonText("Rename");
         let _ = dialog.SetCloseButtonText("Cancel");
@@ -2265,15 +2348,34 @@ impl MainWindow {
                 return;
             }
         };
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap();
-        let _ = dialog.SetTitle(&ui::text("Delete Folder").unwrap());
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap();
-        ui::margin_lg(&panel).unwrap();
+        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
+            self.show_error(&format!("Could not create dialog: {error}"));
+            return;
+        });
+        let title = ui::text("Delete Folder").unwrap_or_else(|error| {
+            self.show_error(&format!("Could not build dialog text: {error}"));
+            return;
+        });
+        let _ = dialog.SetTitle(&title);
+        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
+        ui::margin_lg(&panel).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
         let msg = ui::text(&format!(
             "Are you sure you want to delete this folder? This action cannot be undone."
         ))
-        .unwrap();
-        ui::append(&panel, &msg).unwrap();
+        .unwrap_or_else(|error| {
+            self.show_error(&format!("Could not build dialog text: {error}"));
+            return;
+        });
+        ui::append(&panel, &msg).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetPrimaryButtonText("Delete");
         let _ = dialog.SetCloseButtonText("Cancel");
@@ -2318,16 +2420,35 @@ impl MainWindow {
         let Some(folder) = folders.iter().find(|f| f.id.0 == folder_id) else {
             return;
         };
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap();
-        let _ = dialog.SetTitle(&ui::text("Folder Properties").unwrap());
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap();
-        ui::margin_lg(&panel).unwrap();
+        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
+            self.show_error(&format!("Could not create dialog: {error}"));
+            return;
+        });
+        let title = ui::text("Folder Properties").unwrap_or_else(|error| {
+            self.show_error(&format!("Could not build dialog text: {error}"));
+            return;
+        });
+        let _ = dialog.SetTitle(&title);
+        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
+        ui::margin_lg(&panel).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
         let info = format!(
             "Name: {}\nRole: {:?}\nSubscribed: {}\nUnread: {}\nTotal messages: {}",
             folder.name, folder.role, folder.subscribed, folder.unread_count, folder.total_messages
         );
-        let msg = ui::text(&info).unwrap();
-        ui::append(&panel, &msg).unwrap();
+        let msg = ui::text(&info).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not build dialog text: {error}"));
+            return;
+        });
+        ui::append(&panel, &msg).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+            return;
+        });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetCloseButtonText("Close");
         let _ = dialog.SetXamlRoot(&xaml_root);
@@ -2606,7 +2727,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let toolbar = ui::stack_sm(Orientation::Horizontal)?;
     ui::margin_horizontal(&toolbar, 12.0)?;
     ui::margin_vertical(&toolbar, 8.0)?;
-    let title = ui::heading("Mailin", Some(20.0), Some(700))?;
+    let title = ui::heading("Mailin", Some(20.0), Some(700), Some(1))?;
     let account_combo = ui::combo(&[], 0, Some("Switch account"))?;
     ui::min_width(&account_combo, 220.0)?;
 
@@ -2694,7 +2815,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let welcome = ui::stack_md(Orientation::Vertical)?;
     ui::margin_xl(&welcome)?;
     ui::margin_vertical(&welcome, 40.0)?;
-    let welcome_title = ui::heading("Welcome to Mailin", Some(28.0), Some(700))?;
+    let welcome_title = ui::heading("Welcome to Mailin", Some(28.0), Some(700), Some(1))?;
     let welcome_body = ui::text("Add a mail account to read and send mail.")?;
     let welcome_add = ui::button(
         "Add Account…",
@@ -2763,6 +2884,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             "Clear selection",
         ],
         0,
+        Some("Bulk actions"),
     )?;
     ui::append(&bulk_bar, &bulk_actions)?;
     ui::set_visible(&bulk_bar, false)?;
@@ -2776,7 +2898,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::margin(&message_empty, 6.0, 12.0, 6.0, 6.0)?;
     ui::set_row(&message_empty, 2)?;
     ui::append(&list_pane, &message_empty)?;
-    let load_more = ui::button("Load more")?;
+    let load_more = ui::button("Load more", Some("Load more"), Some("Load more messages"))?;
     ui::set_visible(&load_more, false)?;
     ui::set_row(&load_more, 3)?;
     ui::append(&list_pane, &load_more)?;
@@ -2794,7 +2916,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::margin_vertical(&reader_empty, 16.0)?;
     ui::append(
         &reader_empty,
-        &ui::heading("Select a message", Some(22.0), Some(600))?,
+        &ui::heading("Select a message", Some(22.0), Some(600), Some(2))?,
     )?;
     ui::append(
         &reader_empty,
@@ -2855,8 +2977,8 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::append(&actions, &read_button)?;
     ui::append(&header, &actions)?;
 
-    let reader_subject = ui::heading("", Some(22.0), Some(700))?;
-    let reader_from = ui::heading("", Some(14.0), Some(600))?;
+    let reader_subject = ui::heading("", Some(22.0), Some(700), Some(2))?;
+    let reader_from = ui::heading("", Some(14.0), Some(600), Some(3))?;
     let reader_to = ui::text("")?;
     let reader_cc = ui::text("")?;
     let reader_date = ui::text("")?;
@@ -3606,7 +3728,7 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
                                 FolderId(folder_id),
                             );
                             if let Some(source) = source_folder {
-                                *this.last_move.lock().unwrap() =
+                                *this.last_move.lock().unwrap_or_else(|err| err.into_inner()) =
                                     Some((source, vec![MessageId(msg_id)]));
                                 this.show_undo_banner("Moved 1 message");
                             }

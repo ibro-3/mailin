@@ -39,7 +39,10 @@ pub struct AppState {
 impl AppState {
     /// Read-only accessor for the live configuration.
     pub fn config(&self) -> Config {
-        self.config.read().unwrap().clone()
+        self.config
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone()
     }
 }
 

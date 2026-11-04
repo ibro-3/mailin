@@ -62,9 +62,11 @@ pub fn show_preferences(
     ui::margin_xl(&main_panel)?;
     ui::margin_vertical(&main_panel, 8.0)?;
 
-    let (general_panel, general) = create_general_section(&config.read().unwrap())?;
+    let (general_panel, general) =
+        create_general_section(&config.read().unwrap_or_else(|err| err.into_inner()))?;
     ui::append(&main_panel, &general_panel)?;
-    let (sync_panel, sync) = create_sync_section(&config.read().unwrap())?;
+    let (sync_panel, sync) =
+        create_sync_section(&config.read().unwrap_or_else(|err| err.into_inner()))?;
     ui::append(&main_panel, &sync_panel)?;
     let accounts_panel = create_accounts_section()?;
     ui::append(&main_panel, &accounts_panel)?;
@@ -96,7 +98,7 @@ pub fn show_preferences(
         let on_saved = Box::new(on_saved) as Box<dyn Fn()>;
         move |_, _| {
             let candidate = {
-                let mut guard = config.write().unwrap();
+                let mut guard = config.write().unwrap_or_else(|err| err.into_inner());
                 guard.ui.theme = match ui::selected_index(&general.theme) {
                     1 => Theme::Light,
                     2 => Theme::Dark,
@@ -150,8 +152,14 @@ pub fn show_preferences(
                     7 => 1825,
                     _ => 3650,
                 };
-                guard.validate().expect("config validated");
-                guard.save(&paths).expect("config saved");
+                if let Err(error) = guard.validate() {
+                    tracing::error!(%error, "preferences rejected by validation");
+                    return Ok(());
+                }
+                if let Err(error) = guard.save(&paths) {
+                    tracing::error!(%error, "could not save the configuration");
+                    return Ok(());
+                }
                 guard.clone()
             };
             // Apply theme immediately (on UI thread)
@@ -187,7 +195,7 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         Theme::Light => 1,
         Theme::Dark => 2,
     };
-    let theme = ui::combo(&["System", "Light", "Dark"], theme_index)?;
+    let theme = ui::combo(&["System", "Light", "Dark"], theme_index, Some("Theme"))?;
     ui::append(&panel, &ui::field("Theme", &theme)?)?;
 
     let density_index = match config.ui.message_list_density {
@@ -195,7 +203,11 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         MessageListDensity::Cozy => 1,
         MessageListDensity::Compact => 2,
     };
-    let density = ui::combo(&["Comfortable", "Cozy", "Compact"], density_index)?;
+    let density = ui::combo(
+        &["Comfortable", "Cozy", "Compact"],
+        density_index,
+        Some("Message list density"),
+    )?;
     ui::append(&panel, &ui::field("Message list density", &density)?)?;
 
     let thread_mode_index = match config.ui.thread_mode {
@@ -206,6 +218,7 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
     let thread_mode = ui::combo(
         &["Off (flat list)", "Flat (grouped)", "Nested"],
         thread_mode_index,
+        Some("Conversation view"),
     )?;
     ui::append(&panel, &ui::field("Conversation view", &thread_mode)?)?;
 

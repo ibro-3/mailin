@@ -215,10 +215,14 @@ pub fn present(
     let identity = ui::subheading("Account")?;
     ui::append(&form, &identity)?;
 
-    let name = ui::text_box("Ada Lovelace")?;
-    let email = ui::text_box("ada@example.com")?;
+    let name = ui::text_box("Ada Lovelace", Some("Account name"))?;
+    let email = ui::text_box("ada@example.com", Some("Email address"))?;
     let password = ui::password_box("Password")?;
-    let auth_method = ui::combo(&["Password", "OAuth2 (recommended)"], 0)?;
+    let auth_method = ui::combo(
+        &["Password", "OAuth2 (recommended)"],
+        0,
+        Some("Authentication"),
+    )?;
     let password_field = ui::field("Password", &password)?;
     ui::append(&form, &ui::field("Display name", &name)?)?;
     ui::append(&form, &ui::field("Email address", &email)?)?;
@@ -392,10 +396,16 @@ pub fn present(
     fn repopulate_trust_list(
         trust_container: &mailin_winui_sys::StackPanel,
         allowlist: &Arc<Mutex<Vec<String>>>,
-    ) {
-        let children = trust_container.Children().expect("Children");
+    ) -> Result<()> {
+        let children = trust_container
+            .Children()
+            .context("could not read the trust list")?;
         let _ = children.Clear();
-        for domain in allowlist.lock().unwrap().iter() {
+        for domain in allowlist
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .iter()
+        {
             let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
             let label = ui::text(domain)?;
             label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
@@ -420,10 +430,14 @@ pub fn present(
             let trust_container = trust_container.clone();
             let domain = domain.clone();
             ui::on_click(&remove, move || {
-                allowlist.lock().unwrap().retain(|entry| entry != &domain);
-                repopulate_trust_list(&trust_container, &allowlist);
+                allowlist
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .retain(|entry| entry != &domain);
+                let _ = repopulate_trust_list(&trust_container, &allowlist);
             })?;
         }
+        Ok(())
     }
     repopulate_trust_list(&trust_container, &allowlist)?;
 
@@ -439,7 +453,9 @@ pub fn present(
         window: &Window,
         revokers: &ui::Revokers,
     ) -> Result<()> {
-        let children = contacts_container.Children().expect("Children");
+        let children = contacts_container
+            .Children()
+            .context("could not read the contacts list")?;
         let _ = children.Clear();
         if let Ok(contacts) = app.mailin.store().list_contacts(&account_id) {
             for contact in contacts {
@@ -810,7 +826,16 @@ pub fn present(
             let app = Arc::clone(&app);
             let error = error.clone();
             std::thread::spawn(move || {
-                let runtime = tokio::runtime::Runtime::new().unwrap();
+                let runtime = match tokio::runtime::Runtime::new() {
+                    Ok(runtime) => runtime,
+                    Err(runtime_error) => {
+                        let _ = error.SetText(&format!(
+                            "Could not start the connection test: {runtime_error}"
+                        ));
+                        let _ = ui::set_visible(&error, true);
+                        return;
+                    }
+                };
                 let result = runtime.block_on(app.mailin.test_connection(
                     &account.imap,
                     &account.smtp,
@@ -901,7 +926,7 @@ pub fn present(
             // Apply allowlist from the shared cell
             account
                 .remote_allowed_domains
-                .clone_from(&rows.allowlist.lock().unwrap());
+                .clone_from(&rows.allowlist.lock().unwrap_or_else(|err| err.into_inner()));
             // Only update password if user entered a new one. OAuth2 accounts
             // keep tokens in the account row and do not use the keyring.
             let secret = if password.is_empty() || is_oauth {

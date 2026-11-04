@@ -5,8 +5,7 @@
 //! by the Mailin WinUI front-end that survive projection regeneration.
 
 use super::bindings::*;
-use windows_core::{Interface, Param, Result, IInspectable, EventRevoker};
-use crate::bindings::DependencyObject;
+use windows_core::Result;
 
 // ============================================================================
 // TypedEventHandler construction
@@ -72,7 +71,9 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
         .decode(input.as_bytes())
-        .map_err(|e| windows_core::Error::new(windows_core::HRESULT(0x80004005u32 as i32), e.to_string()))
+        .map_err(|e| {
+            windows_core::Error::new(windows_core::HRESULT(0x80004005u32 as i32), e.to_string())
+        })
 }
 
 // ============================================================================
@@ -82,13 +83,19 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
 /// Create a `Style` targeting a type name.
 /// TypeKind::Custom = 2 (from Windows.UI.Xaml.Interop.TypeKind)
 pub fn style(target_type: &str) -> Result<Style> {
-    let tn = TypeName { name: target_type.into(), kind: TypeKind(2) };
+    let tn = TypeName {
+        name: target_type.into(),
+        kind: TypeKind(2),
+    };
     Style::CreateInstance(&tn)
 }
 
 /// Create a `TypeName` from a string.
 pub fn type_name(name: &str) -> TypeName {
-    TypeName { name: name.into(), kind: TypeKind(2) }
+    TypeName {
+        name: name.into(),
+        kind: TypeKind(2),
+    }
 }
 
 /// Create a `Thickness` from four values.

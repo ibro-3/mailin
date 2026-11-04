@@ -1,11 +1,17 @@
 //! Integration tests for IMAP/SMTP with STARTTLS (IMAP 143→TLS, SMTP 587→TLS).
 //!
-//! These tests require a GreenMail instance configured with STARTTLS:
+//! NOTE: GreenMail does not support STARTTLS at all
+//! (<https://github.com/greenmail-mail-test/greenmail/issues/135>, open since
+//! 2016). These tests therefore cannot pass against GreenMail and are kept
+//! only for the day a STARTTLS-capable test server is available. The CI
+//! STARTTLS job is `continue-on-error` for the same reason.
+//!
+//! A STARTTLS-capable server would run against:
 //!
 //! ```text
-//! cargo xtask it-up-starttls
-//! cargo test -p mailin-core --test imap_it_starttls -- --ignored
-//! cargo xtask it-down
+//! cargo xtask it-up-tls
+//! SSL_CERT_FILE=target/it-certs/ca.crt cargo test -p mailin-core --test imap_it_starttls -- --ignored
+//! cargo xtask it-down-tls
 //! ```
 
 use std::io::{BufRead, BufReader, Write};
@@ -73,7 +79,7 @@ fn find_inbox(mailin: &Mailin, account: &AccountId) -> Option<Vec<MessageHeader>
 }
 
 #[test]
-#[ignore = "requires GreenMail with STARTTLS: cargo xtask it-up-starttls"]
+#[ignore = "GreenMail has no STARTTLS support (greenmail-mail-test/greenmail#135)"]
 fn greenmail_speaks_imap_starttls() {
     let addr = addr("MAILIN_IT_IMAP_STARTTLS_ADDR", "127.0.0.1:3143");
     let mut stream = TcpStream::connect(&addr).expect("connect to GreenMail IMAP");
@@ -111,7 +117,7 @@ fn greenmail_speaks_imap_starttls() {
 }
 
 #[test]
-#[ignore = "requires GreenMail with STARTTLS: cargo xtask it-up-starttls"]
+#[ignore = "GreenMail has no STARTTLS support (greenmail-mail-test/greenmail#135)"]
 fn greenmail_speaks_smtp_starttls() {
     let addr = addr("MAILIN_IT_SMTP_STARTTLS_ADDR", "127.0.0.1:3025");
     let mut stream = TcpStream::connect(&addr).expect("connect to GreenMail SMTP");
@@ -145,7 +151,7 @@ fn greenmail_speaks_smtp_starttls() {
 }
 
 #[test]
-#[ignore = "requires GreenMail with STARTTLS: cargo xtask it-up-starttls"]
+#[ignore = "GreenMail has no STARTTLS support (greenmail-mail-test/greenmail#135)"]
 fn sync_send_and_fetch_body_round_trip_starttls() {
     let (imap_host, imap_port) =
         host_and_port(&addr("MAILIN_IT_IMAP_STARTTLS_ADDR", "127.0.0.1:3143"));

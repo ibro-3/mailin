@@ -1795,9 +1795,11 @@ impl MainWindow {
             self.widgets
                 .folder_list
                 .append(&folder_row(&unified_folder));
-            self.widgets.folder_list.select_row(Some(
-                &self.widgets.folder_list.row_at_index(0).expect("row"),
-            ));
+            if let Some(row) = self.widgets.folder_list.row_at_index(0) {
+                self.widgets.folder_list.select_row(Some(&row));
+            } else {
+                tracing::warn!("unified folder row missing after append");
+            }
             self.widgets.folder_stack.set_visible_child_name("list");
             *self.folders.borrow_mut() = vec![unified_folder];
             self.programmatic.set(false);

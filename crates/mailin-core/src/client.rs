@@ -548,14 +548,16 @@ impl Mailin {
     }
 
     /// List all loaded plugins (blocking version).
-    pub fn list_plugins_blocking(&self) -> Vec<Plugin> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        runtime.block_on(self.list_plugins())
+    pub fn list_plugins_blocking(&self) -> Result<Vec<Plugin>> {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| Error::Config(format!("could not start the plugin runtime: {e}")))?;
+        Ok(runtime.block_on(self.list_plugins()))
     }
 
     /// Enable/disable a plugin (blocking version).
     pub fn set_plugin_enabled_blocking(&self, name: &str, enabled: bool) -> Result<()> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| Error::Config(format!("could not start the plugin runtime: {e}")))?;
         runtime.block_on(self.set_plugin_enabled(name, enabled))
     }
 

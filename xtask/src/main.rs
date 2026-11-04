@@ -41,9 +41,18 @@ fn run() -> Result<()> {
     };
     match command.as_str() {
         "check" => check(),
-        "it-up" => compose(&["up", "-d", "--wait"]),
-        "it-down" => compose(&["down", "-v"]),
-        "it-logs" => compose(&["logs", "--tail", "100", "greenmail"]),
+        "it-up" => compose_file(&["up", "-d", "--wait"], "docker-compose.it.yml"),
+        "it-down" => compose_file(&["down", "-v"], "docker-compose.it.yml"),
+        "it-logs" => compose_file(
+            &["logs", "--tail", "100", "greenmail"],
+            "docker-compose.it.yml",
+        ),
+        "it-up-tls" => {
+            it_certs()?;
+            compose_file(&["up", "-d", "--wait"], "docker-compose.it-tls.yml")
+        }
+        "it-down-tls" => compose_file(&["down", "-v"], "docker-compose.it-tls.yml"),
+        "it-certs" => it_certs(),
         "winui-bindgen" => winui_bindgen(),
         "winui-runtime" => winui_runtime(),
         "package-win" => package_win(),
@@ -64,6 +73,9 @@ fn usage() {
            it-up           start the GreenMail IMAP/SMTP test server\n\
            it-down         stop the test server and drop its volumes\n\
            it-logs         show recent test server logs\n\
+           it-up-tls       generate local test CA and start TLS-enabled GreenMail\n\
+           it-down-tls     stop the TLS test server and drop its volumes\n\
+           it-certs        generate the test CA and GreenMail PKCS12 keystore\n\
            winui-bindgen   regenerate the WinUI 3 projection from pinned metadata\n\
            winui-runtime   download the Windows App SDK bootstrapper for local builds\n\
            package-win     build self-contained Windows zip, MSIX and Inno Setup installer"
@@ -104,17 +116,124 @@ fn check() -> Result<()> {
     Ok(())
 }
 
-fn compose(args: &[&str]) -> Result<()> {
+fn compose_file(args: &[&str], file: &str) -> Result<()> {
     let root = repo_root()?;
     let status = Command::new("docker")
-        .args(["compose", "-f", "docker-compose.it.yml"])
+        .args(["compose", "-f", file])
         .args(args)
         .current_dir(&root)
         .status()
         .context("failed to run docker compose; is Docker installed and running?")?;
     if !status.success() {
-        bail!("docker compose {} failed", args.join(" "));
+        bail!("docker compose -f {} {} failed", file, args.join(" "));
     }
+    Ok(())
+}
+
+/// Generate a local test CA, a localhost server certificate and the PKCS12
+/// keystore GreenMail serves TLS with. Certificates land in `target/it-certs`
+/// (gitignored) and are only regenerated when missing or forced.
+fn it_certs() -> Result<()> {
+    let root = repo_root()?;
+    let certs = root.join("target/it-certs");
+    fs::create_dir_all(&certs).with_context(|| format!("could not create {}", certs.display()))?;
+
+    let ca_crt = certs.join("ca.crt");
+    let p12 = certs.join("greenmail.p12");
+    if ca_crt.is_file() && p12.is_file() {
+        println!("test certificates already present in {}", certs.display());
+        return Ok(());
+    }
+
+    let openssl = if cfg!(windows) {
+        "openssl.exe"
+    } else {
+        "openssl"
+    };
+    let sh = |args: &[&str]| -> Result<()> {
+        let status = Command::new(openssl)
+            .args(args)
+            .current_dir(&certs)
+            .status()
+            .with_context(|| "failed to run openssl; it is required to generate the test CA")?;
+        if !status.success() {
+            bail!("openssl {:?} failed", args);
+        }
+        Ok(())
+    };
+
+    sh(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-sha256",
+        "-nodes",
+        "-days",
+        "3650",
+        "-subj",
+        "/CN=Mailin Test CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.crt",
+    ])?;
+    sh(&[
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-subj",
+        "/CN=localhost",
+        "-addext",
+        "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        "-keyout",
+        "server.key",
+        "-out",
+        "server.csr",
+    ])?;
+    let extfile = certs.join("server.ext");
+    fs::write(
+        &extfile,
+        "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\n",
+    )?;
+    sh(&[
+        "x509",
+        "-req",
+        "-in",
+        "server.csr",
+        "-CA",
+        "ca.crt",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-days",
+        "3650",
+        "-sha256",
+        "-extfile",
+        "server.ext",
+        "-out",
+        "server.crt",
+    ])?;
+    sh(&[
+        "pkcs12",
+        "-export",
+        "-out",
+        "greenmail.p12",
+        "-inkey",
+        "server.key",
+        "-in",
+        "server.crt",
+        "-certfile",
+        "ca.crt",
+        "-name",
+        "greenmail",
+        "-passout",
+        "pass:changeit",
+    ])?;
+    println!("test certificates generated in {}", certs.display());
     Ok(())
 }
 
@@ -198,7 +317,7 @@ fn winui_bindgen() -> Result<()> {
 
     // Patch the generated bindings.rs directly
     let bindings_path = root.join("crates/mailin-winui-sys/src/bindings.rs");
-    
+
     // 1. Add public new() method to TypedEventHandler
     let typed_handler_def = r#"pub struct TypedEventHandler<TSender, TResult>(
     windows_core::IUnknown,
@@ -227,14 +346,17 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
 }
 "#;
     let content = fs::read_to_string(&bindings_path)?;
-    let content = content.replace(typed_handler_def, &format!("{typed_handler_def}\n{new_method}"));
+    let content = content.replace(
+        typed_handler_def,
+        &format!("{typed_handler_def}\n{new_method}"),
+    );
     fs::write(&bindings_path, content)?;
 
     // 2. Fix PropertyPath::CreateInstance to use HSTRING::from
     let content = fs::read_to_string(&bindings_path)?;
     let content = content.replace(
         "core::mem::transmute_copy(&path.into())",
-        "core::mem::transmute_copy(&windows_core::HSTRING::from(path))"
+        "core::mem::transmute_copy(&windows_core::HSTRING::from(path))",
     );
     fs::write(&bindings_path, content)?;
 
@@ -242,7 +364,7 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
     let content = fs::read_to_string(&bindings_path)?;
     let content = content.replace(
         "core::mem::transmute_copy::<Src, *mut c_void>(&path.into())",
-        "core::mem::transmute_copy::<Src, *mut c_void>(&windows_core::HSTRING::from(path))"
+        "core::mem::transmute_copy::<Src, *mut c_void>(&windows_core::HSTRING::from(path))",
     );
     fs::write(&bindings_path, content)?;
 
@@ -250,7 +372,7 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
     let content = fs::read_to_string(&bindings_path)?;
     let content = content.replace(
         "const VTABLE : TypedEventHandler_Vtbl",
-        "pub const VTABLE : TypedEventHandler_Vtbl"
+        "pub const VTABLE : TypedEventHandler_Vtbl",
     );
     fs::write(&bindings_path, content)?;
 
@@ -258,7 +380,7 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
     let content = fs::read_to_string(&bindings_path)?;
     let content = content.replace(
         "struct TypedEventHandlerBox<",
-        "pub struct TypedEventHandlerBox<"
+        "pub struct TypedEventHandlerBox<",
     );
     fs::write(&bindings_path, content)?;
 

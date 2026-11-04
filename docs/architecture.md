@@ -350,7 +350,7 @@ Linux development machine cross-checks the crate with the MSVC target.
 |---|---|
 | Store / search / outbox | In-memory and temp-file SQLite, real SQL, no mocks |
 | Config / credentials | Temp dirs, permission assertions, in-memory store |
-| Protocols | GreenMail container (IMAP + SMTP), ignored by default, run in CI |
+| Protocols | GreenMail container (IMAP + SMTP), ignored by default, run in CI. TLS tests use a local test CA via `SSL_CERT_FILE` (`cargo xtask it-up-tls`); STARTTLS is unsupported by GreenMail (#135) and its CI job is non-blocking |
 | Front-ends | Pure logic (formatting, autoconfig, form validation, compose prefill, HTML policy) is unit tested; an ignored GTK test renders the account wizard on a desktop |
 | Flatpak | `appstreamcli`/`desktop-file-validate` for metadata, full bundle build in CI |
 | Windows | `windows-latest` CI: clippy, tests, release build, artifact upload |

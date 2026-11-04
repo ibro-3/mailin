@@ -528,6 +528,22 @@ pub fn margin(
     Ok(())
 }
 
+/// Set only the left margin, preserving the other sides.
+pub fn margin_left(element: &impl Interface, left: f64) -> Result<()> {
+    let element: FrameworkElement = element.cast()?;
+    let mut margin = element.Margin()?;
+    margin.left = left;
+    element.SetMargin(margin)?;
+    Ok(())
+}
+
+/// Center an element vertically within its parent cell.
+pub fn vertical_alignment_center(element: &impl Interface) -> Result<()> {
+    let element: FrameworkElement = element.cast()?;
+    element.SetVerticalAlignment(VerticalAlignment::Center)?;
+    Ok(())
+}
+
 /// Set margin using design token spacing (all sides same).
 pub fn margin_all(element: &impl Interface, spacing: f64) -> Result<()> {
     margin(element, spacing, spacing, spacing, spacing)
