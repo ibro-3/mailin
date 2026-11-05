@@ -495,13 +495,14 @@ fn percent_decode(value: &str) -> String {
                 index += 1;
             }
             b'%' if index + 2 < bytes.len() => {
-                let hex = &value[index + 1..index + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => {
-                        decoded.push(byte);
+                // Validate both nibbles before using them; never slice `value`
+                // itself so multi-byte UTF-8 after `%` cannot break boundaries.
+                match (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+                    (Some(high), Some(low)) => {
+                        decoded.push((high << 4) | low);
                         index += 3;
                     }
-                    Err(_) => {
+                    _ => {
                         decoded.push(bytes[index]);
                         index += 1;
                     }
@@ -514,6 +515,15 @@ fn percent_decode(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_query(query: &str) -> HashMap<String, String> {
@@ -535,6 +545,20 @@ mod tests {
     fn percent_encoding_round_trips() {
         let value = "https://example.com/a b?x=1&y=z";
         assert_eq!(percent_decode(&percent_encode(value)), value);
+    }
+
+    #[test]
+    fn percent_decode_does_not_panic_on_non_ascii_bytes() {
+        // `%` followed by a multi-byte character used to panic with
+        // "byte index is not a char boundary".
+        assert_eq!(percent_decode("code=x&state=%€"), "code=x&state=%€");
+        assert_eq!(percent_decode("%"), "%");
+        assert_eq!(percent_decode("%1"), "%1");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+        assert_eq!(percent_decode("a+b"), "a b");
+        // Two percent-encoded bytes forming a UTF-8 sequence.
+        assert_eq!(percent_decode("%C3%A9"), "é");
     }
 
     #[test]

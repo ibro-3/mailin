@@ -1122,3 +1122,91 @@ fn unthreaded_messages_are_their_own_roots() {
         assert!(replies.is_empty());
     }
 }
+
+#[test]
+fn scheduled_actions_are_claimed_exactly_once() {
+    let (store, account) = store_with_account();
+    let id = store
+        .schedule_action(
+            &account.id,
+            1_700_000_000,
+            "snooze_message",
+            "{\"message_id\":1}",
+        )
+        .expect("schedule");
+
+    // The first claim wins; everyone else sees the action is gone.
+    assert!(store.claim_scheduled_action(id).expect("first claim"));
+    assert!(!store.claim_scheduled_action(id).expect("second claim"));
+
+    // Claimed actions are no longer returned as due.
+    assert!(store.due_actions().expect("due").is_empty());
+
+    // The startup reset re-arms interrupted actions (crash recovery).
+    assert_eq!(store.reset_running_scheduled_actions().expect("reset"), 1);
+    let due = store.due_actions().expect("due after reset");
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].id, id);
+
+    // Completing the action takes it out of the cycle entirely.
+    assert!(store.set_action_state(id, "done", None).expect("complete"));
+    assert!(store.due_actions().expect("due after done").is_empty());
+}
+
+#[test]
+fn scheduled_action_payload_lookup_matches_typed_values() {
+    let (store, account) = store_with_account();
+    let payload = concat!(
+        r#"{"message_id": 123, "return_to_folder_id": 4, "#,
+        r#""snoozed_folder_id": 9, "rfc_message_id": "<abc@example.com>"}"#
+    );
+    let id = store
+        .schedule_action(&account.id, 1_700_000_000, "snooze_message", payload)
+        .expect("schedule");
+
+    // A numeric JSON payload value matches its textual representation.
+    assert!(
+        store
+            .find_scheduled_action_by_payload("snooze_message", "message_id", "123")
+            .expect("by row id")
+            .is_some()
+    );
+
+    // A string payload value matches as before.
+    assert!(
+        store
+            .find_scheduled_action_by_payload(
+                "snooze_message",
+                "rfc_message_id",
+                "<abc@example.com>"
+            )
+            .expect("by rfc id")
+            .is_some()
+    );
+
+    // Non-matching value yields None.
+    assert!(
+        store
+            .find_scheduled_action_by_payload(
+                "snooze_message",
+                "rfc_message_id",
+                "<other@example.com>"
+            )
+            .expect("miss")
+            .is_none()
+    );
+
+    // Claimed actions still match: manual unsnooze must find them even while
+    // (or after) the scheduler claims them.
+    assert!(store.claim_scheduled_action(id).expect("claim"));
+    assert!(
+        store
+            .find_scheduled_action_by_payload(
+                "snooze_message",
+                "rfc_message_id",
+                "<abc@example.com>"
+            )
+            .expect("after claim")
+            .is_some()
+    );
+}

@@ -21,7 +21,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 
-use crate::account::{Account, AccountId, AuthMethod};
+use crate::account::{Account, AccountId, AuthMethod, OAuth2Tokens};
 use crate::client::{ClientEvent, Event, Mailin};
 use crate::compose::OutgoingMessage;
 use crate::error::{Error, Result};
@@ -894,12 +894,12 @@ async fn account_worker(
                     account_id,
                     message: error.to_string(),
                 });
-                // Connection/TCP failures -> Offline, others -> Error
-                let is_offline = error.to_string().to_lowercase().contains("connection")
-                    || error.to_string().to_lowercase().contains("tcp")
-                    || error.to_string().to_lowercase().contains("timeout")
-                    || error.to_string().to_lowercase().contains("dns")
-                    || error.to_string().to_lowercase().contains("network");
+                // Network/connection failures -> Offline, others -> Error.
+                // Match the structured io::ErrorKind first; narrow, explicit
+                // phrases are used for string-wrapped network errors so
+                // server-side failures such as "connection limit exceeded"
+                // are not misreported as the client being offline.
+                let is_offline = is_offline_error(&error);
                 let status = if is_offline {
                     SyncStatus::Offline
                 } else {
@@ -919,37 +919,110 @@ async fn account_worker(
     }
 }
 
+/// Whether an error from a sync/session indicates a connectivity problem
+/// rather than a protocol, auth or configuration failure.
+///
+/// Structured `io::Error` kinds are trusted; everything else is matched
+/// against specific network phrases (not the bare word "connection", so
+/// server-side errors like "connection limit exceeded" classify as `Error`).
+fn is_offline_error(error: &Error) -> bool {
+    if let Error::Io(io) = error {
+        return matches!(
+            io.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::NetworkUnreachable
+                | std::io::ErrorKind::HostUnreachable
+                | std::io::ErrorKind::AddrNotAvailable
+        );
+    }
+    let text = error.to_string().to_lowercase();
+    [
+        "connection refused",
+        "connection reset",
+        "connection timed out",
+        "connection closed",
+        "connection aborted",
+        "dns failure",
+        "dns resolution",
+        "name or service not known",
+        "network unreachable",
+        "host unreachable",
+        "no route to host",
+        "timed out",
+        "broken pipe",
+        "not connected",
+        "eof",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
 fn next_backoff(current: Duration) -> Duration {
     (current * 2).min(MAX_BACKOFF)
 }
 
-/// Refresh the OAuth2 access token in place when it is about to expire.
+/// Refresh the OAuth2 access tokens in place when they are about to expire.
 ///
 /// A no-op for password accounts, accounts without a refresh token, and tokens
 /// that are still valid. New tokens are written back to the store so they
 /// survive a restart.
+///
+/// IMAP and SMTP are refreshed independently when they use different grants
+/// (different provider, client id or refresh token — or only one side is an
+/// OAuth2 account). When both sides share the same grant, a single refresh
+/// covers both; refreshing twice would break providers that rotate refresh
+/// tokens on every exchange.
 async fn refresh_oauth_tokens(state: &Arc<EngineState>, account: &mut Account) -> Result<()> {
-    if account.imap.auth_method != AuthMethod::OAuth2 {
-        return Ok(());
-    }
-    let tokens = &account.imap.oauth2;
-    if tokens.refresh_token.is_empty() || !tokens.is_expired() {
+    let imap_needs =
+        account.imap.auth_method == AuthMethod::OAuth2 && needs_refresh(&account.imap.oauth2);
+    let smtp_needs =
+        account.smtp.auth_method == AuthMethod::OAuth2 && needs_refresh(&account.smtp.oauth2);
+    if !imap_needs && !smtp_needs {
         return Ok(());
     }
 
+    let shared_grant = account.imap.auth_method == AuthMethod::OAuth2
+        && account.smtp.auth_method == AuthMethod::OAuth2
+        && account.imap.oauth2.provider == account.smtp.oauth2.provider
+        && account.imap.oauth2.client_id == account.smtp.oauth2.client_id
+        && account.imap.oauth2.refresh_token == account.smtp.oauth2.refresh_token;
+
+    if shared_grant {
+        // One login, one refresh. Assign the result to both sides so the
+        // shared grant stays consistent even if only one side is expired.
+        let refreshed = refresh_tokens(&account.imap.oauth2).await?;
+        account.imap.oauth2 = refreshed.clone();
+        account.smtp.oauth2 = refreshed;
+    } else {
+        if imap_needs {
+            account.imap.oauth2 = refresh_tokens(&account.imap.oauth2).await?;
+        }
+        if smtp_needs {
+            account.smtp.oauth2 = refresh_tokens(&account.smtp.oauth2).await?;
+        }
+    }
+
+    state.mailbox.save_account(account, None)?;
+    Ok(())
+}
+
+fn needs_refresh(tokens: &OAuth2Tokens) -> bool {
+    !tokens.refresh_token.is_empty() && tokens.is_expired()
+}
+
+async fn refresh_tokens(tokens: &OAuth2Tokens) -> Result<OAuth2Tokens> {
     let provider = tokens.provider;
     let client_id = tokens.client_id.clone();
     let refresh_token = tokens.refresh_token.clone();
-    let refreshed = tokio::task::spawn_blocking(move || {
-        crate::oauth::refresh(provider, &client_id, &refresh_token)
-    })
-    .await
-    .map_err(|error| Error::OAuth(format!("token refresh task failed: {error}")))??;
-
-    account.imap.oauth2 = refreshed.clone();
-    account.smtp.oauth2 = refreshed;
-    state.mailbox.save_account(account, None)?;
-    Ok(())
+    tokio::task::spawn_blocking(move || crate::oauth::refresh(provider, &client_id, &refresh_token))
+        .await
+        .map_err(|error| Error::OAuth(format!("token refresh task failed: {error}")))?
 }
 
 /// Wait before reconnecting, but keep accepting commands. Returns `false` when
@@ -1611,12 +1684,27 @@ async fn unsnooze_messages(
             continue;
         };
 
-        // Find the scheduled action to get return_to_folder_id
-        let action = store.find_scheduled_action_by_payload(
-            "snooze_message",
-            "message_id",
-            &message_id.0.to_string(),
-        )?;
+        // Find the scheduled action to get return_to_folder_id. Match by the
+        // RFC 5322 `Message-ID` first: it survives the move into the Snoozed
+        // folder and the re-sync that re-inserts the row under a new local
+        // row id/UID. The recorded `message_id` (a local row id) only matches
+        // when the folder was never re-synced, so use it as a fallback.
+        let action = match message.message_id.as_deref() {
+            Some(rfc_id) => store.find_scheduled_action_by_payload(
+                "snooze_message",
+                "rfc_message_id",
+                rfc_id,
+            )?,
+            None => None,
+        };
+        let action = match action {
+            Some(action) => Some(action),
+            None => store.find_scheduled_action_by_payload(
+                "snooze_message",
+                "message_id",
+                &message_id.0.to_string(),
+            )?,
+        };
 
         let return_folder_id = action
             .as_ref()
@@ -2312,6 +2400,10 @@ async fn outbox_sender(state: Arc<EngineState>) {
 
 /// Background worker that executes scheduled actions (snooze, send-later, etc.)
 async fn scheduled_worker(state: Arc<EngineState>) {
+    if let Err(error) = state.mailbox.store().reset_running_scheduled_actions() {
+        tracing::warn!(%error, "could not reset interrupted scheduled actions");
+    }
+
     let notify = Arc::new(tokio::sync::Notify::new());
     let notify_clone = notify.clone();
 
@@ -2327,6 +2419,22 @@ async fn scheduled_worker(state: Arc<EngineState>) {
         };
 
         for action in actions {
+            // Claim the action before dispatching so a slow execution can
+            // never be re-dispatched on the next 60-second tick. Exactly one
+            // caller flips `pending` → `running`; everyone else skips it.
+            match state.mailbox.store().claim_scheduled_action(action.id) {
+                Ok(true) => {}
+                Ok(false) => continue, // Already claimed or finished elsewhere.
+                Err(error) => {
+                    tracing::warn!(
+                        action_id = action.id,
+                        %error,
+                        "could not claim scheduled action"
+                    );
+                    continue;
+                }
+            }
+
             // Try to send to account worker first
             let account_id = action.account_id;
             let action_clone = action.clone();
@@ -2493,12 +2601,24 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
 
     crate::smtp::send(&account.smtp, password_or_token, &entry.raw, &envelope).await?;
 
-    // Mark the message as sent before the best-effort Sent copy: a server
-    // without a usable Sent folder must not cause a second SMTP submission.
-    state
+    // The message is on its way. From here on, a failure to bookkeep must
+    // never become a re-send: the entry stays in `sending` (not `failed`), so
+    // it is not picked up by `next_queued_outbox` again this session. Marking
+    // it `Sent` here is only a local convenience for the outbox view; a lost
+    // marker is an accounting problem, not a delivery problem.
+    if let Err(error) = state
         .mailbox
         .store()
-        .set_outbox_state(entry.id, OutboxState::Sent, None)?;
+        .set_outbox_state(entry.id, OutboxState::Sent, None)
+    {
+        tracing::error!(
+            outbox = entry.id,
+            %error,
+            "message was sent but the outbox entry could not be marked as sent"
+        );
+        state.mailbox.publish(Event::OutboxChanged);
+        return Ok(());
+    }
     state.mailbox.publish(Event::OutboxChanged);
 
     append_to_sent(state, &account, password_or_token, &entry.raw).await;

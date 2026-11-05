@@ -195,13 +195,21 @@ impl ImapSession {
         let client = async_imap::Client::new(stream);
 
         // Authenticate based on the configured method
-        let mut session = if settings.auth_method == AuthMethod::OAuth2
-            && !settings.oauth2.access_token.is_empty()
-        {
-            // Use XOAUTH2 authentication
+        let mut session = if settings.auth_method == AuthMethod::OAuth2 {
+            // Prefer the token stored on the settings; fall back to the caller's
+            // secret (the engine passes the current access token there). Never
+            // silently fall back to plaintext LOGIN for an OAuth2 account: an
+            // empty token is a configuration error, not a password prompt.
+            let stored = &settings.oauth2.access_token;
+            let token = if !stored.is_empty() { stored } else { password };
+            if token.is_empty() {
+                return Err(Error::OAuth(
+                    "OAuth2 access token not configured for this account".into(),
+                ));
+            }
             let authenticator = Xoauth2Authenticator {
                 user: settings.username.clone(),
-                access_token: settings.oauth2.access_token.clone(),
+                access_token: token.to_owned(),
             };
             client
                 .authenticate("XOAUTH2", &authenticator)
@@ -370,7 +378,7 @@ impl ImapSession {
         Ok(flags)
     }
 
-    /// Fetch flags for a specific set of UIDs, used by CHANGEDSINCE flag-delta sync.
+    /// Fetch flags for a specific set of UIDs, used by the MODSEQ flag-delta sync.
     pub async fn fetch_flags_for_uids(&mut self, uids: &[u32]) -> Result<Vec<(u32, Vec<String>)>> {
         if uids.is_empty() {
             return Ok(Vec::new());
@@ -496,6 +504,10 @@ impl ImapSession {
     }
 
     /// Mark messages `\Deleted` and expunge them from the selected mailbox.
+    ///
+    /// On servers without UIDPLUS the only way to expunge is a plain `EXPUNGE`,
+    /// which removes *all* `\Deleted` messages in the selected mailbox —
+    /// including ones other clients marked. A warning is logged in that case.
     pub async fn delete_messages(&mut self, uids: &[u32]) -> Result<()> {
         if uids.is_empty() {
             return Ok(());
@@ -516,6 +528,35 @@ impl ImapSession {
                 .is_some()
             {}
         } else {
+            // No UIDPLUS: a plain EXPUNGE removes *every* message flagged
+            // \Deleted in the selected mailbox, including ones other clients
+            // marked. Detect that case and warn loudly so the user can pick a
+            // server with UIDPLUS (or not mark mail \Deleted elsewhere).
+            match self.fetch_all_flags().await {
+                Ok(flags) => {
+                    let foreign = flags
+                        .iter()
+                        .filter(|(uid, flags)| {
+                            !uids.contains(uid)
+                                && flags
+                                    .iter()
+                                    .any(|flag| flag.eq_ignore_ascii_case("\\Deleted"))
+                        })
+                        .count();
+                    if foreign > 0 {
+                        tracing::warn!(
+                            count = foreign,
+                            "server does not support UIDPLUS; EXPUNGE will also remove \\Deleted messages set by other clients"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "could not inspect existing flags; proceeding with EXPUNGE anyway"
+                    );
+                }
+            }
             let mut stream = Box::pin(
                 self.inner
                     .expunge()

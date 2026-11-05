@@ -66,14 +66,44 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+                // Restrict what we just created; a pre-existing user directory
+                // is left alone.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+                }
+            }
         }
         let mut conn = Connection::open(path)?;
         Self::configure(&mut conn)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+            match fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+                Ok(()) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    path = %path.display(),
+                    "could not restrict database permissions"
+                ),
+            }
+            // WAL/SHM sidecars carry cached message data too.
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar = path.as_os_str().to_owned();
+                sidecar.push(suffix);
+                match fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        path = ?sidecar,
+                        "could not restrict database sidecar permissions"
+                    ),
+                }
+            }
         }
         let db_path = path.to_path_buf();
         Ok(Self {
@@ -1265,8 +1295,31 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Claim a scheduled action for execution. Returns `true` only for the
+    /// caller that flipped a `pending` action to `running`, so a slow
+    /// execution can never be dispatched twice from the same queue.
+    pub fn claim_scheduled_action(&self, id: i64) -> Result<bool> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE scheduled_actions SET state = 'running' WHERE id = ?1 AND state = 'pending'",
+            params![id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Re-arm actions that were claimed but never finished, e.g. because the
+    /// process died mid-execution. Mirrors [`Store::reset_outbox_sending`].
+    pub fn reset_running_scheduled_actions(&self) -> Result<u32> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE scheduled_actions SET state = 'pending' WHERE state = 'running'",
+            [],
+        )?;
+        Ok(changed as u32)
+    }
+
     /// Find a scheduled action by kind and a field in its payload JSON.
-    /// Returns the first pending action matching the criteria.
+    /// Returns the first pending or running action matching the criteria.
     pub fn find_scheduled_action_by_payload(
         &self,
         kind: &str,
@@ -1277,7 +1330,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, account_id, due_at, kind, payload_json, state, created_at, last_error
              FROM scheduled_actions
-             WHERE state = 'pending' AND kind = ?1
+             WHERE state IN ('pending', 'running') AND kind = ?1
              ORDER BY due_at",
         )?;
         let rows = stmt.query_map(params![kind], |row| {
@@ -1301,7 +1354,10 @@ impl Store {
         for row in rows {
             let action = row?;
             if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&action.payload_json) {
-                if payload.get(payload_field).and_then(|v| v.as_str()) == Some(payload_value) {
+                if payload
+                    .get(payload_field)
+                    .is_some_and(|value| json_value_equals(value, payload_value))
+                {
                     return Ok(Some(action));
                 }
             }
@@ -2394,6 +2450,19 @@ fn map_outbox(row: &Row<'_>) -> rusqlite::Result<OutboxEntry> {
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
+}
+
+/// Type-aware comparison between a JSON payload value and a candidate string.
+/// Numbers and booleans are compared by their textual representation, so
+/// `message_id: 123` matches a candidate of `"123"` while `as_str()` alone
+/// would never match a non-string JSON value.
+fn json_value_equals(value: &serde_json::Value, candidate: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => s == candidate,
+        serde_json::Value::Number(number) => number.to_string() == candidate,
+        serde_json::Value::Bool(boolean) => boolean.to_string() == candidate,
+        _ => false,
+    }
 }
 
 /// Turn user input into a safe FTS5 query: every term becomes a quoted prefix

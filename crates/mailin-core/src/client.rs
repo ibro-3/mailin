@@ -464,10 +464,12 @@ impl Mailin {
             .store
             .pgp_keys_for_account(account)?
             .into_iter()
+            // Exact match on the addr-spec of each user ID; never a substring
+            // match, which would let lookalike addresses select the wrong key.
             .find(|key| {
                 key.user_ids
                     .iter()
-                    .any(|uid| uid.to_lowercase().contains(&address))
+                    .any(|uid| crate::pgp::user_id_email(uid).eq_ignore_ascii_case(&address))
             }))
     }
 

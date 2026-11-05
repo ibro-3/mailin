@@ -126,12 +126,28 @@ pub fn export_secret_key(cert: &Cert) -> Result<String> {
     String::from_utf8(bytes).map_err(|e| Error::Protocol(e.to_string()))
 }
 
-/// True when any user ID of `cert` mentions `address` (case-insensitive).
+/// Extract the email part of an OpenPGP user ID: `Name <addr@x>` or bare
+/// `addr@x`. Anything else (comments, multiple addresses) is trimmed as a
+/// whole string so it can still be compared exactly.
+pub fn user_id_email(uid: &str) -> &str {
+    match (uid.find('<'), uid.rfind('>')) {
+        (Some(open), Some(close)) if open < close => uid[open + 1..close].trim(),
+        _ => uid.trim(),
+    }
+}
+
+/// True when some user ID of `cert` identifies exactly `address`
+/// (case-insensitive). Substring matches are rejected on purpose: a lookalike
+/// such as `alice@example.com.evil.com` must not verify, encrypt to, or be
+/// mistaken for `alice@example.com`.
 pub fn matches_address(cert: &Cert, address: &str) -> bool {
-    let address = address.trim().to_lowercase();
+    let address = address.trim();
+    if address.is_empty() {
+        return false;
+    }
     key_user_ids(cert)
         .iter()
-        .any(|uid| uid.to_lowercase().contains(&address))
+        .any(|uid| user_id_email(uid).eq_ignore_ascii_case(address))
 }
 
 /// Build a signing key pair from a certificate containing secret key material.
@@ -502,6 +518,16 @@ pub fn fetch_wkd_key(email: &str, client: &Agent) -> Result<Option<String>> {
         .split_once('@')
         .ok_or_else(|| Error::Protocol("invalid email".into()))?;
 
+    // Never let the domain carry userinfo or shell/host oddities into the URL.
+    let domain = domain.rsplit('@').next().unwrap_or(domain);
+    let valid = !domain.is_empty()
+        && domain
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !valid {
+        return Err(Error::Protocol("invalid domain in email".into()));
+    }
+
     let hash = zbase32_hash(local_part);
 
     // Try the advanced (subdomain) method first, then the direct method.
@@ -671,5 +697,38 @@ mod tests {
 
         let encrypted = encrypt_message("secret", &[cert], None, None).unwrap();
         assert!(decrypt_message(&encrypted, &[wrong]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod address_tests {
+    use super::*;
+
+    #[test]
+    fn user_id_email_extracts_addr_spec() {
+        assert_eq!(
+            user_id_email("Alice <alice@example.com>"),
+            "alice@example.com"
+        );
+        assert_eq!(user_id_email("alice@example.com"), "alice@example.com");
+        assert_eq!(
+            user_id_email("  Bob <bob@example.com>  "),
+            "bob@example.com"
+        );
+        assert_eq!(user_id_email("not-an-email"), "not-an-email");
+        assert_eq!(user_id_email("<alice@example.com>"), "alice@example.com");
+    }
+
+    #[test]
+    fn matches_address_requires_exact_addr_spec() {
+        let (public, _secret) = generate_keypair("Alice <alice@example.com>").unwrap();
+        let cert = import_public_key(&public).unwrap();
+
+        assert!(matches_address(&cert, "alice@example.com"));
+        assert!(matches_address(&cert, "ALICE@EXAMPLE.COM"));
+        assert!(!matches_address(&cert, "alice@example.com.evil.com"));
+        assert!(!matches_address(&cert, "alice"));
+        assert!(!matches_address(&cert, "example.com"));
+        assert!(!matches_address(&cert, ""));
     }
 }

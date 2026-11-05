@@ -87,7 +87,11 @@ pub(crate) async fn sync_folder(
     let mut mode = mode;
     let mut state = folder.sync_state();
 
-    if state.uid_validity.is_some() && state.uid_validity != uid_validity {
+    // Only reset when the server actually sent a UIDVALIDITY: a missing value
+    // must not be mistaken for a changed one and wipe the cache on every sync.
+    if let (Some(old), Some(new)) = (state.uid_validity, uid_validity)
+        && old != new
+    {
         tracing::info!(
             folder = %folder.name,
             old = ?state.uid_validity,
@@ -107,7 +111,7 @@ pub(crate) async fn sync_folder(
 
     let local = mailbox.store().message_uids(folder.id)?;
 
-    // CHANGEDSINCE flag-delta sync (CONDSTORE):
+    // CONDSTORE flag-delta sync:
     // If the server supports CONDSTORE and we have a previous modseq, fetch
     // only the messages whose flags have changed since the last sync.
     // This avoids the expensive full flag refresh on large folders.
@@ -115,15 +119,17 @@ pub(crate) async fn sync_folder(
         && session.supports_condstore()
         && let Some(last_modseq) = state.highest_modseq
     {
-        // Search for messages with MODSEQ changed since our last sync
-        // CHANGEDSINCE returns UIDs where any flag changed
-        match session.search(&format!("CHANGEDSINCE {last_modseq}")).await {
+        // Search for messages with a MODSEQ greater than our last sync.
+        // RFC 7162 §3.1.5 defines `MODSEQ` as the SEARCH key (`CHANGEDSINCE`
+        // is a FETCH modifier, not a search criterion), so CONDSTORE servers
+        // reject `UID SEARCH CHANGEDSINCE` with BAD.
+        match session.search(&format!("MODSEQ {last_modseq}")).await {
             Ok(changed_uids) if !changed_uids.is_empty() => {
                 tracing::debug!(
                     folder = %folder.name,
                     count = changed_uids.len(),
                     since_modseq = last_modseq,
-                    "CONDSTORE CHANGEDSINCE found flag changes"
+                    "CONDSTORE MODSEQ found flag changes"
                 );
                 // Fetch flags only for changed messages
                 let changed_vec: Vec<u32> = changed_uids.into_iter().collect();
@@ -141,7 +147,7 @@ pub(crate) async fn sync_folder(
                 tracing::warn!(
                     folder = %folder.name,
                     error = %e,
-                    "CHANGEDSINCE search failed, falling back to full flag refresh"
+                    "MODSEQ search failed, falling back to full flag refresh"
                 );
             }
         }
@@ -220,7 +226,7 @@ pub(crate) async fn sync_folder(
     let new_state = FolderSyncState {
         uid_validity: uid_validity.or(state.uid_validity),
         uid_next: selected.uid_next,
-        highest_modseq: selected.highest_modseq,
+        highest_modseq: selected.highest_modseq.or(state.highest_modseq),
         last_synced_at: Some(crate::now_unix()),
     };
     mailbox

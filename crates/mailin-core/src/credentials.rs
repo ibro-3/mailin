@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+#[cfg(feature = "keyring")]
 use std::fmt;
 use std::sync::Mutex;
 
 use crate::account::AccountId;
 use crate::error::{Error, Result};
-use secrecy::{ExposeSecret, SecretString};
+#[cfg(any(feature = "keyring", test))]
+use secrecy::ExposeSecret;
+use secrecy::SecretString;
 
 /// Where account passwords live.
 ///
@@ -263,6 +266,7 @@ impl CredentialsStore for KeyringCredentials {
     }
 }
 
+#[cfg(feature = "keyring")]
 impl KeyringCredentials {
     fn entry_caldav(&self, account: &AccountId) -> Result<keyring::Entry> {
         keyring::Entry::new(&self.service, &format!("{}:caldav", account))

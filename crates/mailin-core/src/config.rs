@@ -304,8 +304,10 @@ impl Config {
         }
     }
 
-    /// Write `config.toml` atomically: a sibling temporary file replaces the
-    /// old one only once it has been fully written.
+    /// Write `config.toml` atomically and crash-safely: a sibling temporary
+    /// file is fully flushed and synced to disk before it replaces the old
+    /// one, and the containing directory is synced after the rename, so a
+    /// power loss cannot leave an empty or torn `config.toml`.
     pub fn save(&self, paths: &Paths) -> Result<()> {
         paths.ensure()?;
         let file = paths.config_file();
@@ -313,8 +315,21 @@ impl Config {
             .map_err(|e| Error::Config(format!("could not serialize config: {e}")))?;
         let tmp = file.with_extension("toml.tmp");
         std::fs::write(&tmp, text.as_bytes())?;
+        // Flush + sync so the bytes are durable before the rename.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&tmp)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| Error::Config(format!("could not sync config: {error}")))?;
         restrict_to_owner(&tmp)?;
         std::fs::rename(&tmp, &file)?;
+        // Sync the directory so the rename itself is durable.
+        #[cfg(unix)]
+        if let Some(parent) = file.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 
