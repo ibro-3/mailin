@@ -486,9 +486,20 @@ pub fn show_preferences(
         let config = config.clone();
         let paths = paths.clone();
         let app = Rc::clone(app);
-        move |_| {
-            if apply_config(&config, &paths, &app) {
-                on_saved();
+        move |_| match apply_config(&config, &paths, &app) {
+            Ok(()) => on_saved(),
+            Err(message) => {
+                // Never fail silently: keep the problem visible even though
+                // the preferences dialog is already closed.
+                let alert = gtk::AlertDialog::builder()
+                    .message("Couldn't save preferences")
+                    .detail(&message)
+                    .build();
+                alert.set_buttons(&["OK"]);
+                alert.set_default_button(0);
+                gtk::glib::spawn_future_local(async move {
+                    let _ = alert.choose_future(None::<&gtk::Window>).await;
+                });
             }
         }
     });
@@ -497,22 +508,22 @@ pub fn show_preferences(
 }
 
 /// Validate the edited configuration, write it to disk and install it in the
-/// running application. Returns `false` when validation failed, in which case
-/// nothing is written anywhere.
-fn apply_config(edited: &Rc<RefCell<Config>>, paths: &Paths, app: &Rc<AppState>) -> bool {
+/// running application. On failure nothing is applied or persisted.
+fn apply_config(
+    edited: &Rc<RefCell<Config>>,
+    paths: &Paths,
+    app: &Rc<AppState>,
+) -> Result<(), String> {
     let candidate = edited.borrow().clone();
 
-    if let Err(e) = candidate.validate() {
-        eprintln!("Config validation failed: {e}");
-        return false;
-    }
+    candidate.validate().map_err(|e| e.to_string())?;
 
-    if let Err(e) = candidate.save(paths) {
-        eprintln!("Failed to save config: {e}");
-    }
+    candidate
+        .save(paths)
+        .map_err(|e| format!("Could not write the configuration file: {e}"))?;
 
     // Apply theme immediately
     apply_theme(candidate.ui.theme);
     *app.config.borrow_mut() = candidate;
-    true
+    Ok(())
 }

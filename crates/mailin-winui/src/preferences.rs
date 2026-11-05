@@ -75,7 +75,20 @@ pub fn show_preferences(
     let plugins_panel = create_plugins_section(state, events)?;
     ui::append(&main_panel, &plugins_panel)?;
 
+    // Inline error line; shown when the configuration is rejected and the
+    // dialog stays open instead of closing silently.
+    let error_text = ui::text("")?;
+    ui::margin_horizontal(&error_text, 24.0)?;
+    ui::margin_vertical(&error_text, 8.0)?;
+    let _ = mailin_winui_sys::AutomationProperties::SetLiveSetting(
+        &error_text,
+        mailin_winui_sys::AutomationLiveSetting::Polite,
+    );
+    let _ = ui::set_visible(&error_text, false);
+    ui::append(&main_panel, &error_text)?;
+
     ui::set_content(&dialog, &main_panel).context("could not attach the preferences content")?;
+
     dialog
         .SetPrimaryButtonText("Save")
         .context("could not set the save button")?;
@@ -95,8 +108,9 @@ pub fn show_preferences(
         let config = Arc::clone(&config);
         let paths = paths.clone();
         let state = Arc::clone(state);
+        let error_text = error_text.clone();
         let on_saved = Box::new(on_saved) as Box<dyn Fn()>;
-        move |_, _| {
+        move |_, args| {
             let candidate = {
                 let mut guard = config.write().unwrap_or_else(|err| err.into_inner());
                 guard.ui.theme = match ui::selected_index(&general.theme) {
@@ -154,16 +168,23 @@ pub fn show_preferences(
                 };
                 if let Err(error) = guard.validate() {
                     tracing::error!(%error, "preferences rejected by validation");
+                    let _ = error_text.SetText(&format!("Preferences were not saved: {error}"));
+                    let _ = ui::set_visible(&error_text, true);
+                    let _ = args.SetCancel(true);
                     return Ok(());
                 }
                 if let Err(error) = guard.save(&paths) {
                     tracing::error!(%error, "could not save the configuration");
+                    let _ = error_text.SetText(&format!("Could not save the preferences: {error}"));
+                    let _ = ui::set_visible(&error_text, true);
+                    let _ = args.SetCancel(true);
                     return Ok(());
                 }
                 guard.clone()
             };
             // Apply theme immediately (on UI thread)
             apply_theme(candidate.ui.theme);
+            let _ = ui::set_visible(&error_text, false);
             on_saved();
             let _ = dialog.Hide();
         }

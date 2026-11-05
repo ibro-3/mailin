@@ -248,7 +248,12 @@ impl MainWindow {
         tracing::debug!(%message, "account error surfaced in the UI");
     }
 
-    fn show_toast_notification(&self, account_id: AccountId, text: &str) {
+    fn show_toast_notification(
+        &self,
+        account_id: AccountId,
+        text: &str,
+        message_ids: &[MessageId],
+    ) {
         // Check if notifications are enabled in config
         if !self.app.config().ui.notifications {
             return;
@@ -282,12 +287,18 @@ impl MainWindow {
         let _ = set_text(0, "New mail");
         let _ = set_text(1, text);
 
-        // Add action buttons using XML: "Mark as read" and "Archive"
-        // ToastGeneric supports <actions> with <action> elements
+        // Add action buttons using XML: "Mark as read" and "Archive". The
+        // arguments carry exactly the message IDs this toast is about, so a
+        // button never sweeps unrelated unread mail.
+        let ids_param = message_ids
+            .iter()
+            .map(|id| id.0.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         let actions_xml = format!(
             r#"<actions>
-                <action content="Mark as read" arguments="mark-read:{account_id}" activationType="foreground"/>
-                <action content="Archive" arguments="archive:{account_id}" activationType="foreground"/>
+                <action content="Mark as read" arguments="mark-read:{account_id}:{ids_param}" activationType="foreground"/>
+                <action content="Archive" arguments="archive:{account_id}:{ids_param}" activationType="foreground"/>
             </actions>"#
         );
 
@@ -317,19 +328,27 @@ impl MainWindow {
         // Handle toast activation (button clicks)
         let this = Rc::clone(self);
         let _activated_token = toast.Activated(&TypedEventHandler::new(move |_sender, args| {
+            fn parse_action(prefix: &str, argument: &str) -> Option<(AccountId, Vec<MessageId>)> {
+                let rest = argument.strip_prefix(prefix)?;
+                let mut parts = rest.splitn(2, ':');
+                let account_id: AccountId = parts.next()?.parse().ok()?;
+                let ids: Vec<MessageId> = parts
+                    .next()
+                    .map(|list| {
+                        list.split(',')
+                            .filter_map(|s| s.parse::<i64>().ok().map(MessageId))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some((account_id, ids))
+            }
             if let Ok(args) = args {
                 if let Ok(argument) = args.Argument() {
                     let arg_str = argument.to_string();
-                    if arg_str.starts_with("mark-read:") {
-                        let account_id_str = arg_str.strip_prefix("mark-read:").unwrap_or("");
-                        if let Ok(aid) = account_id_str.parse::<AccountId>() {
-                            this.notification_mark_read(aid);
-                        }
-                    } else if arg_str.starts_with("archive:") {
-                        let account_id_str = arg_str.strip_prefix("archive:").unwrap_or("");
-                        if let Ok(aid) = account_id_str.parse::<AccountId>() {
-                            this.notification_archive(aid);
-                        }
+                    if let Some((account_id, ids)) = parse_action("mark-read:", &arg_str) {
+                        this.notification_mark_read(account_id, ids);
+                    } else if let Some((account_id, ids)) = parse_action("archive:", &arg_str) {
+                        this.notification_archive(account_id, ids);
                     }
                 }
             }
@@ -711,9 +730,12 @@ impl MainWindow {
         for message in &messages {
             let ticked = selected.contains(&message.id);
             let density = self.app.config().ui.message_list_density;
-            if let Ok((row, button, checkbox, actions_bar)) =
+            if let Ok((row, button, checkbox, actions_bar, drag_token)) =
                 message_row(message, now, density, ticked)
             {
+                if let Some(token) = drag_token {
+                    self.message_events.keep(token);
+                }
                 let this = Rc::clone(self);
                 let open = message.clone();
                 if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
@@ -862,9 +884,12 @@ impl MainWindow {
         for message in &flat_messages {
             let ticked = selected.contains(&message.id);
             let density = self.app.config().ui.message_list_density;
-            if let Ok((row, button, checkbox, actions_bar)) =
+            if let Ok((row, button, checkbox, actions_bar, drag_token)) =
                 message_row(message, now, density, ticked)
             {
+                if let Some(token) = drag_token {
+                    self.message_events.keep(token);
+                }
                 let this = Rc::clone(self);
                 let open = message.clone();
                 if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
@@ -1766,24 +1791,32 @@ impl MainWindow {
         }
     }
 
-    /// Handle "Mark as read" action from notification for the given account.
-    fn notification_mark_read(&self, account_id: AccountId) {
-        // Fetch unread messages from the inbox for this account
-        let ids = self.get_unread_inbox_messages(account_id);
+    /// Handle "Mark as read" action from a notification.
+    ///
+    /// `ids` are the message IDs the toast was about; when it is empty the
+    /// action falls back to the account's unread inbox messages.
+    fn notification_mark_read(&self, account_id: AccountId, ids: Vec<MessageId>) {
+        let ids = if ids.is_empty() {
+            self.get_unread_inbox_messages(account_id)
+        } else {
+            ids
+        };
         if ids.is_empty() {
             return;
         }
-        // Mark as read by adding \Seen flag
         self.app
             .engine
             .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
         self.show_banner("Marked as read");
     }
 
-    /// Handle "Archive" action from notification for the given account.
-    fn notification_archive(&self, account_id: AccountId) {
-        // Fetch unread messages from the inbox for this account
-        let ids = self.get_unread_inbox_messages(account_id);
+    /// Handle "Archive" action from a notification.
+    fn notification_archive(&self, account_id: AccountId, ids: Vec<MessageId>) {
+        let ids = if ids.is_empty() {
+            self.get_unread_inbox_messages(account_id)
+        } else {
+            ids
+        };
         if ids.is_empty() {
             return;
         }
@@ -2610,8 +2643,11 @@ impl MainWindow {
                         }
                     }
                     Ok(Event::NewMessages {
-                        account_id, count, ..
-                    }) => new_messages.push((account_id, count)),
+                        account_id,
+                        count,
+                        message_ids,
+                        ..
+                    }) => new_messages.push((account_id, count, message_ids)),
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                     Ok(Event::OutboxChanged) => outbox_changed = true,
                     Ok(Event::AccountError { message, .. }) => account_error = Some(message),
@@ -2653,7 +2689,7 @@ impl MainWindow {
                 }
             }
         }
-        for (account_id, count) in new_messages {
+        for (account_id, count, message_ids) in new_messages {
             let account = self
                 .state()
                 .accounts
@@ -2664,7 +2700,7 @@ impl MainWindow {
             let noun = if count == 1 { "message" } else { "messages" };
             let text = format!("{count} new {noun} in {account}");
             self.show_banner(&text);
-            self.show_toast_notification(account_id, &text);
+            self.show_toast_notification(account_id, &text, &message_ids);
         }
         if outbox_changed {
             let state = self.state();
@@ -2712,6 +2748,23 @@ impl MainWindow {
         self.app.engine.sync_account(account);
         self.show_banner("Synchronizing…");
     }
+}
+
+// The mailto: draft is captured from the protocol activation at launch and
+// consumed when the main window is (or becomes) ready.
+thread_local! {
+    static MAILTO_DRAFT: std::cell::RefCell<Option<OutgoingMessage>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Queue a `mailto:` draft captured at process start; the next main window
+/// creation opens the composer with it.
+pub fn set_mailto_draft(draft: OutgoingMessage) {
+    MAILTO_DRAFT.with(|slot| *slot.borrow_mut() = Some(draft));
+}
+
+fn take_mailto_draft() -> Option<OutgoingMessage> {
+    MAILTO_DRAFT.with(|slot| slot.borrow_mut().take())
 }
 
 /// Create and activate the main window.
@@ -3093,6 +3146,31 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         });
     })?;
 
+    // Open links in the system browser/mail client instead of navigating
+    // the reader WebView. Anything that is not About/HTTP(S)/mailto is
+    // cancelled outright.
+    let link_token = body_html.NavigationStarting(&TypedEventHandler::new(move |_, args| {
+        if let Ok(args) = args {
+            if let Ok(uri) = args.Uri() {
+                let lower = uri.to_ascii_lowercase();
+                if lower.starts_with("about:") {
+                    // Initial document from NavigateToString — leave alone.
+                } else if lower.starts_with("http://")
+                    || lower.starts_with("https://")
+                    || lower.starts_with("mailto:")
+                {
+                    let _ = args.SetCancel(true);
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &uri])
+                        .spawn();
+                } else {
+                    let _ = args.SetCancel(true);
+                }
+            }
+        }
+        Ok(())
+    }))?;
+
     let this = Rc::new(MainWindow {
         app: Arc::clone(state),
         state: Mutex::new(State {
@@ -3172,18 +3250,25 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         },
     });
 
+    this.events.keep(link_token);
+
     // Keyboard accelerators, attached to the content root so they fire
     // wherever the focus is inside the window.
     this.events.keep(add_accelerator(
         &root,
         VirtualKey::F,
         Some(VirtualKeyModifiers::Control),
-        Some("Search mail (Ctrl+F)"),
+        Some("Focus search (Ctrl+F)"),
         {
             let this = Rc::downgrade(&this);
             move || {
                 if let Some(this) = this.upgrade() {
-                    this.run_search();
+                    // Focus-first, like Windows: Enter in the search box runs
+                    // the search, the button triggers it too.
+                    let _ = this
+                        .widgets
+                        .search
+                        .Focus(mailin_winui_sys::FocusState::Programmatic);
                 }
             }
         },
@@ -3283,28 +3368,26 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     connect(&this)?;
     this.refresh_accounts();
 
+    // A mailto: draft captured at startup opens the composer once the main
+    // window exists. (Protocol activation between launches is not wired yet:
+    // that needs AppInstance rather than command-line arguments.)
+    if let Some(draft) = take_mailto_draft() {
+        match state
+            .mailin
+            .list_accounts()
+            .ok()
+            .and_then(|accounts| accounts.into_iter().next().map(|account| account.id))
+        {
+            Some(account_id) => {
+                let _ = crate::compose::present(Arc::clone(state), account_id, draft, move || {});
+            }
+            None => tracing::warn!("mailto: draft dropped: no account is configured yet"),
+        }
+    }
+
     let _window = ui::keep_alive(&window);
     window.Activate().context("could not show the window")?;
     tracing::info!("WinUI window activated");
-    Ok(window)
-}
-
-/// Create the main window and immediately open a compose window with the given draft.
-///
-/// Kept for the (not yet wired) protocol-activation path: `mailto:` and toast
-/// activations arrive through `AppInstance`, not `IApplicationOverrides`.
-#[allow(dead_code)]
-pub fn create_with_draft(state: &Arc<AppState>, draft: OutgoingMessage) -> Result<Window> {
-    let window = create(state)?;
-    // Open compose window with the draft
-    if let Some(account_id) = state
-        .mailin
-        .list_accounts()
-        .ok()
-        .and_then(|accounts| accounts.first().map(|a| a.id))
-    {
-        let _ = crate::compose::present(Arc::clone(state), account_id, draft, move || {});
-    }
     Ok(window)
 }
 
@@ -3393,6 +3476,24 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
             }
         }
     })?);
+    // Enter in the search box runs the search.
+    this.events
+        .keep(this.widgets.search.KeyDown(&TypedEventHandler::new({
+            let this = Rc::downgrade(&this);
+            move |_, args| {
+                if let Ok(args) = args {
+                    if let Ok(key) = args.Key() {
+                        if key == mailin_winui_sys::VirtualKey::Enter {
+                            if let Some(this) = this.upgrade() {
+                                this.run_search();
+                            }
+                            let _ = args.SetHandled(true);
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }))?);
     this.events.keep(ui::on_click(&this.widgets.load_more, {
         let this = Rc::clone(this);
         move || this.request_more()
@@ -3766,7 +3867,13 @@ fn message_row(
     now: i64,
     density: MessageListDensity,
     selected: bool,
-) -> Result<(Grid, Button, CheckBox, Option<StackPanel>)> {
+) -> Result<(
+    Grid,
+    Button,
+    CheckBox,
+    Option<StackPanel>,
+    Option<EventRevoker>,
+)> {
     use MessageListDensity::{Compact, Cozy};
     let seen = message.is_seen();
     let is_thread_root = message.thread_reply_count > 0
@@ -3869,7 +3976,9 @@ fn message_row(
     )?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
 
-    // Drag source: allow dragging messages to folders
+    // Drag source: allow dragging messages to folders. The revoker is handed
+    // back to the caller, which keeps it in the row's event set — dropping it
+    // would silently disable drag-and-drop.
     let msg_id = message.id.0.to_string();
     let button_element: mailin_winui_sys::UIElement = button.cast()?;
     let drag_start_token =
@@ -3882,10 +3991,6 @@ fn message_row(
             }
             Ok(())
         }))?;
-    // Note: The revoker needs to be kept alive. Since this is a standalone function,
-    // we can't store it here. The caller (refresh_messages) should keep the revokers.
-    // We'll return the revoker as part of the tuple or handle it differently.
-    // For now, we'll skip keeping the revoker - it will be kept by the UI element itself.
 
     // The checkbox is a sibling of the content button rather than its child:
     // ticking a box must not also open the message.
@@ -3912,7 +4017,13 @@ fn message_row(
     ui::append(&row, &button)?;
     ui::set_column(&actions_bar, 2)?;
     ui::append(&row, &actions_bar)?;
-    Ok((row, button, checkbox, Some(actions_bar)))
+    Ok((
+        row,
+        button,
+        checkbox,
+        Some(actions_bar),
+        Some(drag_start_token),
+    ))
 }
 
 fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {

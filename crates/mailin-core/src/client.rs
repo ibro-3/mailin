@@ -48,10 +48,13 @@ pub enum Event {
     },
     /// New messages arrived in the background. Front-ends use this for desktop
     /// notifications; the rows are also covered by [`Event::MessagesChanged`].
+    /// `message_ids` lists the messages that were created by this sync so
+    /// notification actions can target exactly those messages.
     NewMessages {
         account_id: AccountId,
         folder_id: FolderId,
         count: u32,
+        message_ids: Vec<MessageId>,
     },
     BodyReady {
         message_id: MessageId,

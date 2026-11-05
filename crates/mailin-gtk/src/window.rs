@@ -127,6 +127,8 @@ struct Widgets {
     hamburger_button: gtk::Button,
     /// Back button for mobile navigation (reader -> message list).
     back_button: gtk::Button,
+    /// Message list pane; hidden while the mobile reader is on screen.
+    list_pane: gtk::Box,
     /// Paned widget for message list / reader split.
     split: adw::OverlaySplitView,
 }
@@ -155,6 +157,36 @@ pub fn take_mailto_draft() -> Option<OutgoingMessage> {
         guard.take()
     } else {
         None
+    }
+}
+
+// The live main window, weakly held on the GTK main thread so runtime
+// `mailto:` activations can find it after startup.
+thread_local! {
+    static MAIN_WINDOW: RefCell<Option<std::rc::Weak<MainWindow>>> =
+        const { RefCell::new(None) };
+}
+
+/// Open (or queue) the mailto draft captured at launch or runtime.
+///
+/// If the main window exists, present it and open the composer now; otherwise
+/// keep the draft for the next window creation.
+pub fn handle_mailto_draft() {
+    let Some(draft) = take_mailto_draft() else {
+        return;
+    };
+    let window = MAIN_WINDOW
+        .with(|slot| slot.borrow().clone())
+        .and_then(|weak| weak.upgrade());
+    match window {
+        Some(window) => {
+            window.present();
+            window.open_compose_with_draft(draft);
+        }
+        None => {
+            // No window yet; leave it for MainWindow::new to consume.
+            set_mailto_draft(draft);
+        }
     }
 }
 
@@ -191,6 +223,7 @@ impl MainWindow {
             .default_width(1180)
             .default_height(760)
             .build();
+        window.set_size_request(640, 480);
 
         let title = adw::WindowTitle::new("Mailin", "No account");
         let header = adw::HeaderBar::new();
@@ -236,10 +269,17 @@ impl MainWindow {
             .build();
         let sync_button = icon_button("view-refresh-symbolic", "Synchronize now (F5)");
 
-        // Sync status indicator
-        let sync_status = gtk::Image::new();
+        // Sync status indicator (icon + colour per state; screen readers get
+        // an accessible name, not just a tooltip)
+        let sync_status = gtk::Image::from_icon_name("network-transmit-receive-symbolic");
+        sync_status.set_pixel_size(16);
+        sync_status.set_accessible_role(gtk::AccessibleRole::Status);
         sync_status.add_css_class("sync-status-idle");
         sync_status.set_tooltip_text(Some("Sync status: Idle"));
+        {
+            use gtk::accessible::Property;
+            sync_status.update_property(&[Property::Label("Sync status: Idle")]);
+        }
 
         // Scope toggle (Current folder / All mail)
         let scope_button = gtk::ToggleButton::builder()
@@ -693,12 +733,16 @@ impl MainWindow {
                 sync_status,
                 hamburger_button,
                 back_button,
+                list_pane,
                 split,
             },
         });
 
         Self::connect(&this);
         this.refresh_accounts();
+
+        // Remember the window so runtime "mailto:" activations can find it.
+        MAIN_WINDOW.with(|slot| *slot.borrow_mut() = Some(Rc::downgrade(&this)));
 
         // Check for a mailto: draft that was set before window creation
         if let Some(draft) = take_mailto_draft() {
@@ -746,18 +790,13 @@ impl MainWindow {
         });
         this.widgets.window.add_controller(key_controller);
 
-        // Responsive layout update function. `GtkWindow` has no resize signal,
-        // so a lightweight poll compares the allocated width and only rebuilds
-        // when it actually changed.
-        let update_responsive_layout = {
+        // Responsive layout update. `GtkWindow` has no resize signal, so a
+        // lightweight poll compares the allocated width and only rebuilds
+        // when it actually changed. All breakpoint logic lives in one place
+        // so the initial pass and the poll can never drift apart.
+        let apply_breakpoints = {
             let this = Rc::clone(this);
-            move || {
-                let allocated = this.widgets.window.width();
-                let width = if allocated > 0 {
-                    allocated as f64
-                } else {
-                    this.widgets.window.default_width() as f64
-                };
+            move |width: f64| {
                 let is_mobile = width < BREAKPOINT_MOBILE;
                 let is_tablet = (BREAKPOINT_MOBILE..BREAKPOINT_TABLET).contains(&width);
                 let is_desktop = width >= BREAKPOINT_TABLET;
@@ -765,75 +804,62 @@ impl MainWindow {
                 let mut selection = this.selection.borrow_mut();
                 selection.window_width = width;
                 selection.is_mobile = is_mobile;
+                drop(selection);
 
                 // Update hamburger button visibility
-                let hamburger = &this.widgets.hamburger_button;
-                hamburger.set_visible(is_mobile || is_tablet);
+                this.widgets
+                    .hamburger_button
+                    .set_visible(is_mobile || is_tablet);
 
                 // Secondary search controls collapse into the overflow menu.
                 this.widgets.scope_button.set_visible(is_desktop);
                 this.widgets.history_button.set_visible(is_desktop);
                 this.widgets.overflow_button.set_visible(!is_desktop);
 
-                // Update responsive layout
                 if is_mobile {
                     // Mobile: collapse sidebar and use navigation stack
                     this.widgets.split.set_collapsed(true);
                     this.widgets.split.set_show_sidebar(false);
-                } else if is_tablet {
-                    // Tablet: narrow sidebar, keep paned
-                    this.widgets.split.set_collapsed(false);
-                    this.widgets.split.set_show_sidebar(true);
-                    this.widgets.split.set_min_sidebar_width(200.0);
-                    this.widgets.split.set_max_sidebar_width(280.0);
                 } else {
-                    // Desktop: full layout
+                    // Tablet: narrow sidebar; Desktop: full layout
                     this.widgets.split.set_collapsed(false);
                     this.widgets.split.set_show_sidebar(true);
-                    this.widgets.split.set_min_sidebar_width(220.0);
-                    this.widgets.split.set_max_sidebar_width(320.0);
+                    if is_tablet {
+                        this.widgets.split.set_min_sidebar_width(200.0);
+                        this.widgets.split.set_max_sidebar_width(280.0);
+                    } else {
+                        this.widgets.split.set_min_sidebar_width(220.0);
+                        this.widgets.split.set_max_sidebar_width(320.0);
+                    }
+                    // Desktop widths always show the list side by side.
+                    this.reset_mobile_nav();
+                }
+            }
+        };
+
+        let current_width = {
+            let this = Rc::clone(this);
+            move || {
+                let allocated = this.widgets.window.width();
+                if allocated > 0 {
+                    allocated as f64
+                } else {
+                    this.widgets.window.default_width() as f64
                 }
             }
         };
 
         // Call it once initially, then on width changes.
-        update_responsive_layout();
+        apply_breakpoints(current_width());
         {
-            let this = Rc::clone(this);
             let last_width = Cell::new(0.0f64);
+            let apply_breakpoints = apply_breakpoints.clone();
+            let current_width = current_width.clone();
             glib::timeout_add_local(Duration::from_millis(200), move || {
-                let width = this.widgets.window.width() as f64;
+                let width = current_width();
                 if (width - last_width.get()).abs() > 1.0 {
                     last_width.set(width);
-                    // Recompute using the same logic as the initial pass.
-                    let is_mobile = width < BREAKPOINT_MOBILE;
-                    let is_tablet = (BREAKPOINT_MOBILE..BREAKPOINT_TABLET).contains(&width);
-                    let is_desktop = width >= BREAKPOINT_TABLET;
-                    {
-                        let mut selection = this.selection.borrow_mut();
-                        selection.window_width = width;
-                        selection.is_mobile = is_mobile;
-                    }
-                    this.widgets
-                        .hamburger_button
-                        .set_visible(is_mobile || is_tablet);
-                    this.widgets.scope_button.set_visible(is_desktop);
-                    this.widgets.history_button.set_visible(is_desktop);
-                    this.widgets.overflow_button.set_visible(!is_desktop);
-                    if is_mobile {
-                        this.widgets.split.set_collapsed(true);
-                        this.widgets.split.set_show_sidebar(false);
-                    } else if is_tablet {
-                        this.widgets.split.set_collapsed(false);
-                        this.widgets.split.set_show_sidebar(true);
-                        this.widgets.split.set_min_sidebar_width(200.0);
-                        this.widgets.split.set_max_sidebar_width(280.0);
-                    } else {
-                        this.widgets.split.set_collapsed(false);
-                        this.widgets.split.set_show_sidebar(true);
-                        this.widgets.split.set_min_sidebar_width(220.0);
-                        this.widgets.split.set_max_sidebar_width(320.0);
-                    }
+                    apply_breakpoints(width);
                 }
                 glib::ControlFlow::Continue
             });
@@ -1027,10 +1053,9 @@ impl MainWindow {
             move |_| {
                 let mut selection = this.selection.borrow_mut();
                 if let Some(NavTarget::MessageReader) = selection.nav_stack.pop() {
-                    // Go back to message list
-                    this.widgets.reader_stack.set_visible_child_name("list");
-                    let back_button = &this.widgets.back_button;
-                    back_button.set_visible(false);
+                    // Back to the list: show it, hide the back button
+                    this.widgets.list_pane.set_visible(true);
+                    this.widgets.back_button.set_visible(false);
                 }
             }
         });
@@ -1341,55 +1366,61 @@ impl MainWindow {
         let history_list = gtk::ListBox::new();
         history_list.set_selection_mode(gtk::SelectionMode::None);
         history_popover.set_child(Some(&history_list));
+        history_popover.set_parent(&this.widgets.history_button);
 
-        let history_button = this.widgets.history_button.clone();
-
-        // Set parent for popover positioning (must be done before moving into closure)
-        history_popover.set_parent(&history_button);
-
-        history_button.connect_clicked({
+        this.widgets.history_button.connect_clicked({
             let this = Rc::clone(this);
             let history_popover = history_popover.clone();
             let history_list = history_list.clone();
-            let history_button = history_button.clone();
             move |_| {
-                if let Some(account) = this.selection.borrow().account {
-                    let history = this.app.mailin.search_history(&account);
-                    if !history.is_empty() {
-                        // Clear and repopulate
-                        while let Some(child) = history_list.first_child() {
-                            history_list.remove(&child);
-                        }
-                        let now = format::now_unix();
-                        for entry in history {
-                            let row = adw::ActionRow::builder()
-                                .title(&entry.query)
-                                .subtitle(format!(
-                                    "{} ago",
-                                    format::list_time(now, entry.timestamp)
-                                ))
-                                .build();
-                            row.add_css_class("search-history-row");
-                            row.connect_activated({
-                                let this = Rc::clone(&this);
-                                let query = entry.query.clone();
-                                let folder_id = entry.folder_id;
-                                let history_popover = history_popover.clone();
-                                move |_| {
-                                    history_popover.popdown();
-                                    this.widgets.search.set_text(&query);
-                                    if let Some(folder_id) = folder_id {
-                                        this.select_folder_by_id(folder_id);
-                                    }
-                                    this.run_search();
-                                }
-                            });
-                            history_list.append(&row);
-                        }
-                        history_popover.set_parent(&history_button);
-                        history_popover.popup();
-                    }
+                // Always answer the click: an empty or unavailable history
+                // is shown as a placeholder row, not as no response at all.
+                while let Some(child) = history_list.first_child() {
+                    history_list.remove(&child);
                 }
+                let Some(account) = this.selection.borrow().account else {
+                    let row = adw::ActionRow::builder()
+                        .title("Search history is stored per account")
+                        .subtitle("Open an account to see its recent searches.")
+                        .build();
+                    history_list.append(&row);
+                    history_popover.popup();
+                    return;
+                };
+                let history = this.app.mailin.search_history(&account);
+                if history.is_empty() {
+                    let row = adw::ActionRow::builder()
+                        .title("No recent searches")
+                        .subtitle("Searches you run will appear here.")
+                        .build();
+                    history_list.append(&row);
+                    history_popover.popup();
+                    return;
+                }
+                let now = format::now_unix();
+                for entry in history {
+                    let row = adw::ActionRow::builder()
+                        .title(&entry.query)
+                        .subtitle(format!("{} ago", format::list_time(now, entry.timestamp)))
+                        .build();
+                    row.add_css_class("search-history-row");
+                    row.connect_activated({
+                        let this = Rc::clone(&this);
+                        let query = entry.query.clone();
+                        let folder_id = entry.folder_id;
+                        let history_popover = history_popover.clone();
+                        move |_| {
+                            history_popover.popdown();
+                            this.widgets.search.set_text(&query);
+                            if let Some(folder_id) = folder_id {
+                                this.select_folder_by_id(folder_id);
+                            }
+                            this.run_search();
+                        }
+                    });
+                    history_list.append(&row);
+                }
+                history_popover.popup();
             }
         });
 
@@ -1904,6 +1935,7 @@ impl MainWindow {
             selection.show_outbox = is_outbox;
             selection.limit = self.page_size();
         }
+        self.reset_mobile_nav();
         self.programmatic.set(true);
         self.widgets.search.set_text("");
         self.programmatic.set(false);
@@ -1961,8 +1993,31 @@ impl MainWindow {
         };
 
         if unified_inbox {
-            let limit = limit.max(self.page_size());
             let account_ids: Vec<AccountId> = self.accounts.borrow().iter().map(|a| a.id).collect();
+            if search {
+                // Search across every account (unified inbox has no
+                // single folder to scope to, so use the all-mail scope).
+                let mut results = Vec::new();
+                let mut failure: Option<String> = None;
+                for account_id in &account_ids {
+                    match self
+                        .app
+                        .mailin
+                        .search_messages(account_id, None, &query, SEARCH_LIMIT)
+                    {
+                        Ok(mut found) => results.append(&mut found),
+                        Err(error) => failure = Some(error.to_string()),
+                    }
+                }
+                results.sort_by_key(|a| std::cmp::Reverse(a.received_at));
+                results.truncate(SEARCH_LIMIT as usize);
+                self.show_messages(results, format!("Results for “{query}” (All mail)"), false);
+                if let Some(error) = failure {
+                    self.show_error(&format!("Some accounts could not be searched: {error}"));
+                }
+                return;
+            }
+            let limit = limit.max(self.page_size());
             match self.app.mailin.list_messages_virtual(
                 mailin_core::model::VirtualFolderKind::UnifiedInbox,
                 &account_ids,
@@ -2391,12 +2446,13 @@ impl MainWindow {
             self.remote_allowed.set(None);
         }
 
-        // Mobile: push to navigation stack and show back button
+        // Mobile: push to navigation stack, show the reader full-screen
         if is_mobile {
             self.selection
                 .borrow_mut()
                 .nav_stack
                 .push(NavTarget::MessageReader);
+            self.widgets.list_pane.set_visible(false);
             let back_button = &self.widgets.back_button;
             back_button.set_visible(true);
         }
@@ -2963,6 +3019,9 @@ impl MainWindow {
 
     fn show_reader_empty(&self) {
         self.widgets.reader_stack.set_visible_child_name("empty");
+        // If the reader was dismissed while the mobile list was hidden,
+        // bring the list back.
+        self.reset_mobile_nav();
     }
 
     fn selected_message(&self) -> Option<MessageHeader> {
@@ -2987,6 +3046,39 @@ impl MainWindow {
 
     fn toast(&self, text: &str) {
         self.widgets.toast.add_toast(adw::Toast::new(text));
+    }
+
+    /// Return the mobile UI to the message list (folder switch, width
+    /// growth, or explicit back navigation). Harmless on desktop widths.
+    fn reset_mobile_nav(&self) {
+        self.selection.borrow_mut().nav_stack.clear();
+        self.widgets.list_pane.set_visible(true);
+        self.widgets.back_button.set_visible(false);
+    }
+
+    /// Ask for confirmation before a destructive action, then run it.
+    /// `run` is only invoked when the user picks the destructive button;
+    /// Cancel (or closing the dialog) is always the safe default.
+    fn confirm_destructive(
+        &self,
+        title: &str,
+        detail: &str,
+        ok_label: &str,
+        run: impl FnOnce() + 'static,
+    ) {
+        let confirm = gtk::AlertDialog::builder()
+            .message(title)
+            .detail(detail)
+            .build();
+        confirm.set_buttons(&["Cancel", ok_label]);
+        confirm.set_cancel_button(0);
+        confirm.set_default_button(0);
+        let window = self.widgets.window.clone();
+        glib::spawn_future_local(async move {
+            if let Ok(1) = confirm.choose_future(Some(&window)).await {
+                run();
+            }
+        });
     }
 
     /// Show or hide the bulk action bar for the current selection.
@@ -3091,23 +3183,36 @@ impl MainWindow {
         if ids.is_empty() {
             return;
         }
-        if permanent {
-            self.app.engine.permanently_delete_messages(&ids);
-            self.toast("Deleting…");
-            return;
-        }
         let in_trash = self
             .selection
             .borrow()
             .folder
             .and_then(|folder_id| self.app.mailin.folder(folder_id).ok().flatten())
             .is_some_and(|folder| folder.role == FolderRole::Trash);
+        // Deleting from Trash and an explicit permanent delete are both
+        // irreversible — ask first, showing how much will be destroyed.
+        if permanent || in_trash {
+            let count = ids.len();
+            let noun = if count == 1 { "message" } else { "messages" };
+            let app = self.app.clone();
+            let toast = self.widgets.toast.clone();
+            self.confirm_destructive(
+                &format!("Delete {count} {noun} permanently?"),
+                "The selected messages will be deleted from the server and from local storage. This cannot be undone.",
+                "Delete",
+                move || {
+                    app.engine.permanently_delete_messages(&ids);
+                    toast.add_toast(adw::Toast::new(if count == 1 {
+                        "Message deleted permanently"
+                    } else {
+                        "Messages deleted permanently"
+                    }));
+                },
+            );
+            return;
+        }
         self.app.engine.delete_messages(&ids);
-        self.toast(if in_trash {
-            "Deleting permanently…"
-        } else {
-            "Moving to Trash…"
-        });
+        self.toast("Moving to Trash…");
     }
 
     fn mark_selected_junk(&self, junk: bool) {
@@ -3127,8 +3232,17 @@ impl MainWindow {
         let Some(account_id) = self.selection.borrow().account else {
             return;
         };
-        self.app.engine.empty_trash(account_id);
-        self.toast("Emptying Trash…");
+        let app = self.app.clone();
+        let toast = self.widgets.toast.clone();
+        self.confirm_destructive(
+            "Empty Trash?",
+            "All messages in Trash will be permanently deleted from the server and from local storage. This cannot be undone.",
+            "Empty Trash",
+            move || {
+                app.engine.empty_trash(account_id);
+                toast.add_toast(adw::Toast::new("Trash emptied"));
+            },
+        );
     }
 
     fn outbox_retry_selected(&self) {
@@ -3343,7 +3457,7 @@ impl MainWindow {
         }
     }
 
-    fn open_compose(this: &Rc<Self>, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
+    fn open_compose(this: &Self, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
         let Some(account_id) = this.selection.borrow().account else {
             this.widgets
                 .toast
@@ -3364,39 +3478,9 @@ impl MainWindow {
         .map(|window| window.upcast::<gtk::Window>().downgrade())
     }
 
-    /// Public method to open compose window with a draft (for mailto: links).
+    /// Public method to open a compose window with a draft (for mailto: links).
     pub fn open_compose_with_draft(&self, draft: OutgoingMessage) {
-        // We need an Rc<Self> for open_compose, so we create a weak reference
-        // and upgrade it. Since this is called on an existing window, we can
-        // use the fact that the window is already reference-counted.
-        // We'll create a new Rc by using the existing window's reference.
-        // For simplicity, we'll use a workaround: create a dummy Rc that
-        // doesn't actually own the window but just calls the method.
-        // The real solution would be to restructure open_compose to take &Self.
-
-        // Instead, let's just call open_compose directly with a workaround
-        // We can't easily get an Rc<Self> from &Self, so let's use a different approach.
-        // Store the draft in the selection and trigger compose via the existing mechanism.
-        // Actually, the simplest fix: make open_compose take &Self instead of &Rc<Self>
-
-        // For now, let's use a different approach: just call the internal logic directly
-        let Some(account_id) = self.selection.borrow().account else {
-            self.widgets
-                .toast
-                .add_toast(adw::Toast::new("Add an account before composing mail"));
-            return;
-        };
-        let parent = self.widgets.window.clone().upcast::<gtk::Window>();
-        let toast = self.widgets.toast.clone();
-        compose::present(
-            &parent,
-            Rc::clone(&self.app),
-            account_id,
-            draft,
-            move || {
-                toast.add_toast(adw::Toast::new("Message queued in the outbox"));
-            },
-        );
+        let _ = Self::open_compose(self, draft);
     }
 
     // --------------------------------------------------------------- events
@@ -3421,8 +3505,11 @@ impl MainWindow {
                     }
                 }
                 Ok(ClientEvent::NewMessages {
-                    account_id, count, ..
-                }) => new_messages.push((account_id, count)),
+                    account_id,
+                    count,
+                    message_ids,
+                    ..
+                }) => new_messages.push((account_id, count, message_ids)),
                 Ok(ClientEvent::BodyReady { message_id }) => body_ready = Some(message_id),
                 Ok(ClientEvent::OutboxChanged) => outbox_changed = true,
                 Ok(ClientEvent::AccountError { message, .. }) => account_error = Some(message),
@@ -3460,6 +3547,10 @@ impl MainWindow {
                         sync_status.remove_css_class("sync-status-error");
                         sync_status.add_css_class(css_class);
                         sync_status.set_tooltip_text(Some(tooltip));
+                        {
+                            use gtk::accessible::Property;
+                            sync_status.update_property(&[Property::Label(tooltip)]);
+                        }
                         if matches!(status, mailin_core::model::SyncStatus::Error) {
                             self.widgets.banner.set_button_label(Some("Retry"));
                             self.widgets.banner.set_title("Sync failed");
@@ -3498,8 +3589,8 @@ impl MainWindow {
                 }
             }
         }
-        for (account_id, count) in new_messages {
-            self.notify_new_mail(account_id, count);
+        for (account_id, count, message_ids) in new_messages {
+            self.notify_new_mail(account_id, count, &message_ids);
         }
         if let Some(message) = account_error {
             self.show_error(&message);
@@ -3517,8 +3608,9 @@ impl MainWindow {
     }
 
     /// Desktop notification for background mail. Clicking it activates the
-    /// application through the default action. Buttons allow marking read/archiving.
-    fn notify_new_mail(&self, account_id: AccountId, count: u32) {
+    /// application through the default action. Buttons act on exactly the
+    /// messages that arrived in this sync — never on the whole unread inbox.
+    fn notify_new_mail(&self, account_id: AccountId, count: u32, message_ids: &[MessageId]) {
         let application_active = self
             .widgets
             .window
@@ -3543,9 +3635,22 @@ impl MainWindow {
             .map(|account| account.email.clone())
             .unwrap_or_else(|| "Mailin".to_owned());
 
-        // Parameter for notification actions: account_id (message IDs would be ideal but
-        // NewMessages event doesn't include them; handlers will fetch unread inbox messages)
-        let param = account_id.to_string();
+        // Parameter for notification actions: account_id plus the message IDs
+        // this notification is about (comma-separated). The handlers fall back
+        // to unread inbox messages only when the IDs are missing.
+        let param = if message_ids.is_empty() {
+            account_id.to_string()
+        } else {
+            format!(
+                "{}:{}",
+                account_id,
+                message_ids
+                    .iter()
+                    .map(|id| id.0.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
 
         let notification = gio::Notification::new(if count == 1 {
             "New message"

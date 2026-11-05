@@ -138,8 +138,10 @@ pub fn present(
     let initial_html = if draft.html_body.is_some() {
         draft.html_body.clone().unwrap_or_default()
     } else {
-        // Convert plain text to simple HTML
-        draft.body.replace('\n', "<br>")
+        // Convert plain text to simple HTML, escaping any markup in the
+        // original message (the WebView runs JavaScript, so unescaped
+        // markup from the quoted body would execute).
+        mailin_core::html::escape(&draft.body).replace('\n', "<br>")
     };
 
     let editor_html = format!(
@@ -691,6 +693,7 @@ pub fn present(
                                                 .map(|value| jsc_string(&value))
                                                 .unwrap_or_default();
                                             if current_html.trim().is_empty() {
+                                                let draft_body = sanitize_html(&draft_body);
                                                 webview_outer.evaluate_javascript(
                                                     &format!(
                                                         "document.body.innerHTML = {}",
@@ -1173,8 +1176,12 @@ pub fn present(
     let send_closed = Rc::clone(&closed);
     let send_encrypt = Rc::clone(&pgp_encrypt);
     let send_sign = Rc::clone(&pgp_sign);
+    let send_for_click = send.clone();
     send.connect_clicked(move |_| {
         let app = Rc::clone(&app);
+        let send_for_click = send_for_click.clone();
+        send_for_click.set_sensitive(false);
+        let send_for_report = send_for_click.clone();
         let banner = banner.clone();
         let send_key = Rc::clone(&send_key);
         let send_sent = Rc::clone(&send_sent);
@@ -1203,11 +1210,13 @@ pub fn present(
                     Err(error) => {
                         banner.set_title(&format!("Could not queue the message: {error}"));
                         banner.set_revealed(true);
+                        send_for_report.set_sensitive(true);
                     }
                 },
                 Err(error) => {
                     banner.set_title(&format!("Could not send: {error}"));
                     banner.set_revealed(true);
+                    send_for_report.set_sensitive(true);
                 }
             }
         }));

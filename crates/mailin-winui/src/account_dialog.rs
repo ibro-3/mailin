@@ -17,6 +17,7 @@ use secrecy::SecretString;
 use windows_core::Interface;
 
 use crate::app::AppState;
+use crate::design_tokens;
 use crate::ui;
 
 /// Values read back from the form. Kept separate from the widgets so account
@@ -784,8 +785,11 @@ pub fn present(
         }
     })?);
 
+    let test_button = test.clone();
     revokers.keep(ui::on_click(&test, {
+        let window = window.clone();
         let app = Arc::clone(&app);
+        let test_button = test_button.clone();
         let rows = FormRows {
             name: rows.name.clone(),
             email: rows.email.clone(),
@@ -823,33 +827,43 @@ pub fn present(
             };
             let _ = error.SetText("Testing connection…");
             let _ = ui::set_visible(&error, true);
+            let _ = ui::set_enabled(&test_button, false);
             let app = Arc::clone(&app);
             let error = error.clone();
+            let window = window.clone();
+            let test_button = test_button.clone();
             std::thread::spawn(move || {
-                let runtime = match tokio::runtime::Runtime::new() {
-                    Ok(runtime) => runtime,
+                // The engine owns the shared runtime, so create a short-lived
+                // one here (only on the worker thread, never on the UI
+                // thread). The button is disabled until this completes, so
+                // the runtime cannot be created concurrently.
+                let result = tokio::runtime::Runtime::new().map(|runtime| {
+                    runtime.block_on(app.mailin.test_connection(
+                        &account.imap,
+                        &account.smtp,
+                        &password,
+                    ))
+                });
+                let message = match result {
+                    Ok(Ok(())) => "Connection successful!".to_owned(),
+                    Ok(Err(e)) => format!("Connection failed: {e}"),
                     Err(runtime_error) => {
-                        let _ = error.SetText(&format!(
-                            "Could not start the connection test: {runtime_error}"
-                        ));
-                        let _ = ui::set_visible(&error, true);
-                        return;
+                        format!("Could not start the connection test: {runtime_error}")
                     }
                 };
-                let result = runtime.block_on(app.mailin.test_connection(
-                    &account.imap,
-                    &account.smtp,
-                    &password,
-                ));
-                match result {
-                    Ok(()) => {
-                        let _ = error.SetText("Connection successful!");
-                    }
-                    Err(e) => {
-                        let _ = error.SetText(&format!("Connection failed: {e}"));
-                    }
+                // XAML objects are thread-affine: hand the result back to the
+                // UI thread via the dispatcher queue.
+                let enqueue = window.DispatcherQueue().and_then(|queue| {
+                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+                        let _ = error.SetText(&message);
+                        let _ = ui::set_visible(&error, true);
+                        let _ = ui::set_enabled(&test_button, true);
+                    });
+                    queue.TryEnqueue(handler.to_ref())
+                });
+                if let Err(enqueue_error) = enqueue {
+                    tracing::warn!(%enqueue_error, "could not report the connection test on the UI thread");
                 }
-                let _ = ui::set_visible(&error, true);
             });
         }
     })?);
@@ -945,33 +959,73 @@ pub fn present(
         }
     })?);
 
-    // Remove account handler
+    // Remove account handler (asks for confirmation first: the removal
+    // deletes the account and all locally stored mail and cannot be undone)
     if let Some(remove) = remove {
         let window = window.clone();
         let app = Arc::clone(&app);
         let existing = existing_account_for_remove;
+        let revokers_for_remove = revokers.clone();
         revokers.keep(ui::on_click(&remove, move || {
             let Some(account) = &existing else { return };
             let account_id = account.id;
-            let mailin = Arc::clone(&app.mailin);
+            let email = account.email.clone();
             let window = window.clone();
-            std::thread::spawn(move || {
-                if let Err(error) = mailin.remove_account(&account_id) {
-                    tracing::warn!(%error, "could not remove the account");
-                    return;
-                }
-                // The store tells the main window to refresh; close the
-                // wizard on the UI thread.
-                let closed = window.DispatcherQueue().and_then(|queue| {
-                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
-                        let _ = window.Close();
+            let app = Arc::clone(&app);
+            let revokers_for_remove = revokers_for_remove.clone();
+
+            let shown = (|| -> Result<()> {
+                let dialog = mailin_winui_sys::ContentDialog::new()
+                    .context("could not create the remove confirmation")?;
+                dialog.SetTitle("Remove account?")?;
+                let body = ui::text(&format!(
+                    "Are you sure you want to remove '{email}'? This deletes the account and all locally stored mail on this device. This cannot be undone."
+                ))?;
+                ui::set_content(&dialog, &body)?;
+                dialog.SetPrimaryButtonText("Remove")?;
+                dialog.SetCloseButtonText("Cancel")?;
+                dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Close)?;
+                let element: mailin_winui_sys::IUIElement = dialog.cast()?;
+                element.SetXamlRoot(&ui::window_xaml_root(&window)?)?;
+
+                let window_for_click = window.clone();
+                let app_for_click = Arc::clone(&app);
+                let error_for_failure = error.clone();
+                let revoker = dialog.PrimaryButtonClick(move |_, _| {
+                    let window = window_for_click.clone();
+                    let app = Arc::clone(&app_for_click);
+                    let mailin = Arc::clone(&app.mailin);
+                    let error = error_for_failure.clone();
+                    std::thread::spawn(move || {
+                        let outcome = mailin.remove_account(&account_id);
+                        let closed = window.DispatcherQueue().and_then(|queue| {
+                            let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+                                match outcome {
+                                    Ok(()) => {
+                                        let _ = window.Close();
+                                    }
+                                    Err(error) => {
+                                        let _ = error.SetText(&format!(
+                                            "Could not remove the account: {error}"
+                                        ));
+                                        let _ = ui::set_visible(&error, true);
+                                    }
+                                }
+                            });
+                            queue.TryEnqueue(handler.to_ref())
+                        });
+                        if let Err(error) = closed {
+                            tracing::warn!(%error, "could not report the removal result on the UI thread");
+                        }
                     });
-                    queue.TryEnqueue(handler.to_ref())
-                });
-                if let Err(error) = closed {
-                    tracing::warn!(%error, "could not close the account wizard");
-                }
-            });
+                })?;
+                revokers_for_remove.keep(revoker);
+                let _ = dialog.ShowAsync()?;
+                Ok(())
+            })();
+            if let Err(error) = shown {
+                tracing::warn!(%error, "could not ask to remove the account");
+            }
         })?);
     }
 

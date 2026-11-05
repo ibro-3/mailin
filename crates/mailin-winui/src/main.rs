@@ -41,6 +41,17 @@ fn main() -> anyhow::Result<()> {
             )
             .with_target(false)
             .init();
+        // Protocol activation from an unpackaged install launches us with the
+        // URL as the first argument (e.g. by the system's mailto handler).
+        // Packaged protocol activation goes through AppInstance and is not
+        // wired yet.
+        if let Some(url) = std::env::args().nth(1) {
+            if url.starts_with("mailto:")
+                && let Some(draft) = mailin_core::mailto::parse_mailto_uri(&url)
+            {
+                window::set_mailto_draft(draft);
+            }
+        }
         app::run()
     }
 

@@ -20,6 +20,20 @@ use mailin_core::{
 use crate::app::AppState;
 use crate::autoconfig::{self, Suggestion};
 
+/// Error/status line at the bottom of the wizard. Both semantic classes are
+/// always cleared first so stale styling (e.g. a red "Testing connection…"
+/// line that later turns into a success message) never leaks.
+fn set_status_message(label: &gtk::Label, text: &str, kind: &str) {
+    label.remove_css_class("error");
+    label.remove_css_class("success");
+    label.set_text(text);
+    match kind {
+        "error" | "success" => label.add_css_class(kind),
+        _ => {} // plain interstitial text, e.g. "Testing connection…"
+    }
+    label.set_visible(true);
+}
+
 /// A shared, replaceable refresh callback stored behind interior mutability.
 type RefreshFn = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
@@ -374,7 +388,6 @@ pub fn present(
         .hexpand(true)
         .visible(false)
         .build();
-    error_label.add_css_class("error");
     // Alert role so validation/connection errors are announced.
     error_label.set_accessible_role(gtk::AccessibleRole::Alert);
 
@@ -661,14 +674,11 @@ pub fn present(
             let account = match draft.build(require_password) {
                 Ok(account) => account,
                 Err(error) => {
-                    error_label.set_text(&error);
-                    error_label.set_visible(true);
+                    set_status_message(&error_label, &error, "error");
                     return;
                 }
             };
-            error_label.set_visible(false);
-            error_label.set_text("Testing connection…");
-            error_label.set_visible(true);
+            set_status_message(&error_label, "Testing connection…", "info");
             let app = Rc::clone(&app);
             let error_label = error_label.clone();
             glib::spawn_future_local(async move {
@@ -678,14 +688,14 @@ pub fn present(
                     .await
                 {
                     Ok(()) => {
-                        error_label.set_text("Connection successful!");
-                        error_label.add_css_class("success");
-                        error_label.set_visible(true);
+                        set_status_message(&error_label, "Connection successful!", "success");
                     }
                     Err(error) => {
-                        error_label.set_text(&format!("Connection failed: {error}"));
-                        error_label.add_css_class("error");
-                        error_label.set_visible(true);
+                        set_status_message(
+                            &error_label,
+                            &format!("Connection failed: {error}"),
+                            "error",
+                        );
                     }
                 }
             });
@@ -1021,8 +1031,7 @@ pub fn present(
             let mut account = match draft.build(require_password) {
                 Ok(account) => account,
                 Err(error) => {
-                    error_label.set_text(&error);
-                    error_label.set_visible(true);
+                    set_status_message(&error_label, &error, "error");
                     return;
                 }
             };
@@ -1070,8 +1079,7 @@ pub fn present(
                 Some(secrecy::SecretString::new(password.into()))
             };
             if let Err(error) = app.mailin.save_account(&account, password_opt.as_ref()) {
-                error_label.set_text(&error.to_string());
-                error_label.set_visible(true);
+                set_status_message(&error_label, &error.to_string(), "error");
                 return;
             }
             app.engine.sync_account(account.id);
@@ -1317,8 +1325,11 @@ fn new_template_dialog(
                         refresh();
                     }
                     Err(e) => {
-                        error_label.set_text(&format!("Could not save template: {e}"));
-                        error_label.set_visible(true);
+                        set_status_message(
+                            &error_label,
+                            &format!("Could not save template: {e}"),
+                            "error",
+                        );
                     }
                 }
             }
@@ -1411,8 +1422,11 @@ fn edit_template_dialog(
                         error_label.set_visible(false);
                     }
                     Err(e) => {
-                        error_label.set_text(&format!("Could not save template: {e}"));
-                        error_label.set_visible(true);
+                        set_status_message(
+                            &error_label,
+                            &format!("Could not save template: {e}"),
+                            "error",
+                        );
                     }
                 }
             }
@@ -1479,8 +1493,11 @@ fn new_contact_dialog(
                         }
                     }
                     Err(e) => {
-                        error_label.set_text(&format!("Could not save contact: {e}"));
-                        error_label.set_visible(true);
+                        set_status_message(
+                            &error_label,
+                            &format!("Could not save contact: {e}"),
+                            "error",
+                        );
                     }
                 }
             }
@@ -1556,8 +1573,11 @@ fn edit_contact_dialog(
                         }
                     }
                     Err(e) => {
-                        error_label.set_text(&format!("Could not save contact: {e}"));
-                        error_label.set_visible(true);
+                        set_status_message(
+                            &error_label,
+                            &format!("Could not save contact: {e}"),
+                            "error",
+                        );
                     }
                 }
             }

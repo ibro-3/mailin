@@ -6,10 +6,10 @@
 //! Rich text editing is provided by WebView2 hosting a `contenteditable` div
 //! with a JS bridge for formatting, paste sanitization and inline images.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use mailin_core::compose::{
@@ -86,10 +86,17 @@ pub fn present(
     let sent = Arc::new(AtomicBool::new(false));
     let is_html_mode = Arc::new(AtomicBool::new(draft.html_body.is_some()));
 
-    // Shared state for capturing content from WebView
-    let pending_html: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let pending_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let content_request_id: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    // Shared state for one in-flight content capture (send or draft save).
+    #[derive(Default)]
+    struct PendingCapture {
+        request_id: u64,
+        want_html: bool,
+        html: Option<String>,
+        text: Option<String>,
+        on_done: Option<Box<dyn FnOnce(Option<String>, String)>>,
+    }
+
+    let pending_capture = Rc::new(RefCell::new(PendingCapture::default()));
 
     let revokers = ui::Revokers::default();
     let attachment_events = ui::Revokers::default();
@@ -101,9 +108,7 @@ pub fn present(
     // Set up the WebMessageReceived bridge for paste sanitization, image paste, and content capture
     // This MUST be done before loading HTML so handlers are ready when the page loads
     let webview_for_messages = webview.clone();
-    let pending_html_clone = pending_html.clone();
-    let pending_text_clone = pending_text.clone();
-    let content_request_id_clone = content_request_id.clone();
+    let pending_capture_clone = pending_capture.clone();
     let attachments_for_paste = attachments.clone();
     let dirty_for_paste = dirty.clone();
 
@@ -161,21 +166,26 @@ pub fn present(
                                     payload.get("requestId").and_then(|v| v.as_u64()),
                                     payload.get("content").and_then(|v| v.as_str()),
                                 ) {
-                                    let current_id = *content_request_id_clone
-                                        .lock()
-                                        .unwrap_or_else(|err| err.into_inner());
-                                    if request_id == current_id {
-                                        if let Some(want_html) = payload.get("wantHtml").and_then(|v| v.as_bool()) {
-                                            if want_html {
-                                                *pending_html_clone
-                                                    .lock()
-                                                    .unwrap_or_else(|err| err.into_inner()) =
-                                                    Some(content.to_owned());
-                                            } else {
-                                                *pending_text_clone
-                                                    .lock()
-                                                    .unwrap_or_else(|err| err.into_inner()) =
-                                                    Some(content.to_owned());
+                                    let want_html = payload
+                                        .get("wantHtml")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    let mut cap = pending_capture_clone.borrow_mut();
+                                    if request_id == cap.request_id && cap.on_done.is_some() {
+                                        if want_html {
+                                            cap.html = Some(content.to_owned());
+                                        } else {
+                                            cap.text = Some(content.to_owned());
+                                        }
+                                        if cap.text.is_some()
+                                            && (!cap.want_html || cap.html.is_some())
+                                        {
+                                            let done = cap.on_done.take();
+                                            let html = cap.html.take();
+                                            let text = cap.text.take().unwrap_or_default();
+                                            drop(cap);
+                                            if let Some(done) = done {
+                                                done(html, text);
                                             }
                                         }
                                     }
@@ -195,8 +205,10 @@ pub fn present(
     let initial_html = if draft.html_body.is_some() {
         draft.html_body.clone().unwrap_or_default()
     } else {
-        // Convert plain text to simple HTML
-        draft.body.replace('\n', "<br>")
+        // Convert plain text to simple HTML, escaping markup from the
+        // original message (the editor WebView runs JavaScript, so raw
+        // markup from a quoted body would execute).
+        mailin_core::html::escape(&draft.body).replace('\n', "<br>")
     };
 
     let editor_html = format!(
@@ -590,55 +602,33 @@ pub fn present(
         Ok(())
     })?);
 
-    // Function to capture content from WebView
-    let capture_content = {
+    // Start an asynchronous content capture. The WebView answers every
+    // `__mailinGetContent` request with a `contentResponse` message on this
+    // (UI) thread, where the handler finalizes the outgoing message.
+    // Returns false when a capture is already in flight.
+    let start_capture = {
         let webview = webview.clone();
-        let pending_html = pending_html.clone();
-        let pending_text = pending_text.clone();
-        let content_request_id = content_request_id.clone();
-        move |want_html: bool| -> Option<String> {
+        let pending_capture = pending_capture.clone();
+        move |want_html: bool, on_done: Box<dyn FnOnce(Option<String>, String)>| -> bool {
             let request_id = {
-                let mut id = content_request_id
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
-                *id += 1;
-                *id
-            };
-            // Clear previous pending content
-            *pending_html.lock().unwrap_or_else(|err| err.into_inner()) = None;
-            *pending_text.lock().unwrap_or_else(|err| err.into_inner()) = None;
-
-            let script = format!(
-                "__mailinGetContent({}, {});",
-                request_id,
-                if want_html { "true" } else { "false" }
-            );
-            let _ = webview.ExecuteScriptAsync(&script);
-
-            // Wait for response (with timeout)
-            let start = std::time::Instant::now();
-            let timeout = Duration::from_millis(500);
-            while start.elapsed() < timeout {
-                if want_html {
-                    if let Some(content) = pending_html
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .take()
-                    {
-                        return Some(content);
-                    }
-                } else {
-                    if let Some(content) = pending_text
-                        .lock()
-                        .unwrap_or_else(|err| err.into_inner())
-                        .take()
-                    {
-                        return Some(content);
-                    }
+                let mut cap = pending_capture.borrow_mut();
+                if cap.on_done.is_some() {
+                    return false;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                cap.request_id += 1;
+                cap.want_html = want_html;
+                cap.html = None;
+                cap.text = None;
+                cap.on_done = Some(on_done);
+                cap.request_id
+            };
+            let _ =
+                webview.ExecuteScriptAsync(&format!("__mailinGetContent({request_id}, false);"));
+            if want_html {
+                let _ =
+                    webview.ExecuteScriptAsync(&format!("__mailinGetContent({request_id}, true);"));
             }
-            None
+            true
         }
     };
 
@@ -657,7 +647,7 @@ pub fn present(
         let in_reply_to = draft.in_reply_to.clone();
         let references = draft.references.clone();
         let is_html_mode = is_html_mode.clone();
-        let capture_content = capture_content.clone();
+        let start_capture = start_capture.clone();
         Arc::new(move |force: bool| {
             if sent.load(Ordering::Relaxed) {
                 return;
@@ -666,42 +656,58 @@ pub fn present(
                 return;
             }
 
-            let html_body = if is_html_mode.load(Ordering::Relaxed) {
-                capture_content(true)
-            } else {
-                None
-            };
-            let body_text = capture_content(false).unwrap_or_default();
+            let want_html = is_html_mode.load(Ordering::Relaxed);
+            // Clone everything the continuation needs.
+            let app = Arc::clone(&app);
+            let banner = banner.clone();
+            let dirty = Arc::clone(&dirty);
+            let to = to.clone();
+            let cc = cc.clone();
+            let bcc = bcc.clone();
+            let subject = subject.clone();
+            let draft_key = Arc::clone(&draft_key);
+            let attachments = Arc::clone(&attachments);
+            let in_reply_to = in_reply_to.clone();
+            let references = references.clone();
+            let from_name = account.display_name.clone();
+            let from_addr = account.email.clone();
+            let on_done: Box<dyn FnOnce(Option<String>, String)> =
+                Box::new(move |html_body, body_text: String| {
+                    let outgoing = OutgoingMessage {
+                        from_name,
+                        from_addr,
+                        to: ui::text_value(&to),
+                        cc: ui::text_value(&cc),
+                        bcc: ui::text_value(&bcc),
+                        subject: ui::text_value(&subject),
+                        body: body_text,
+                        html_body,
+                        in_reply_to,
+                        references,
+                        draft_key: draft_key.lock().map(|key| key.clone()).ok(),
+                        attachments: attachments
+                            .lock()
+                            .map(|items| items.clone())
+                            .unwrap_or_default(),
+                    };
 
-            let outgoing = OutgoingMessage {
-                from_name: account.display_name.clone(),
-                from_addr: account.email.clone(),
-                to: ui::text_value(&to),
-                cc: ui::text_value(&cc),
-                bcc: ui::text_value(&bcc),
-                subject: ui::text_value(&subject),
-                body: body_text,
-                html_body,
-                in_reply_to: in_reply_to.clone(),
-                references: references.clone(),
-                draft_key: draft_key.lock().map(|key| key.clone()).ok(),
-                attachments: attachments
-                    .lock()
-                    .map(|items| items.clone())
-                    .unwrap_or_default(),
-            };
-
-            match outgoing.build_draft() {
-                Ok(_) => {
-                    app.engine.save_draft(account_id, outgoing);
-                    let _ = banner.SetText("Draft saved");
-                    let _ = ui::set_visible(&banner, true);
-                }
-                Err(failure) => {
-                    dirty.store(true, Ordering::Relaxed);
-                    let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
-                    let _ = ui::set_visible(&banner, true);
-                }
+                    match outgoing.build_draft() {
+                        Ok(_) => {
+                            app.engine.save_draft(account_id, outgoing);
+                            let _ = banner.SetText("Draft saved");
+                            let _ = ui::set_visible(&banner, true);
+                        }
+                        Err(failure) => {
+                            dirty.store(true, Ordering::Relaxed);
+                            let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
+                            let _ = ui::set_visible(&banner, true);
+                        }
+                    }
+                });
+            if !start_capture(want_html, on_done) {
+                // A capture is already in flight; restore the dirty marker so
+                // the next autosave or close retries this save.
+                dirty.store(true, Ordering::Relaxed);
             }
         })
     };
@@ -755,8 +761,9 @@ pub fn present(
     let send_encrypt = encrypt_toggle.clone();
     let send_sign = sign_toggle.clone();
     let is_html_mode_for_send = is_html_mode.clone();
-    let capture_content_for_send = capture_content.clone();
+    let start_capture_for_send = start_capture.clone();
     revokers.keep(ui::on_click(&send, {
+        let send = send.clone();
         let window = window.clone();
         let app = Arc::clone(&app);
         let on_sent = Arc::clone(&on_sent);
@@ -764,7 +771,6 @@ pub fn present(
         let draft_key = Arc::clone(&draft_key);
         let sent = Arc::clone(&sent);
         let banner = error.clone();
-        let dirty = Arc::clone(&dirty);
         let attachments = Arc::clone(&attachments);
         let to = to.clone();
         let cc = cc.clone();
@@ -773,30 +779,12 @@ pub fn present(
         let in_reply_to = draft.in_reply_to.clone();
         let references = draft.references.clone();
         move || {
-            let html_body = if is_html_mode_for_send.load(Ordering::Relaxed) {
-                capture_content_for_send(true)
-            } else {
-                None
-            };
-            let body_text = capture_content_for_send(false).unwrap_or_default();
-
-            let outgoing = OutgoingMessage {
-                from_name: account.display_name.clone(),
-                from_addr: account.email.clone(),
-                to: ui::text_value(&to),
-                cc: ui::text_value(&cc),
-                bcc: ui::text_value(&bcc),
-                subject: ui::text_value(&subject),
-                body: body_text,
-                html_body,
-                in_reply_to: in_reply_to.clone(),
-                references: references.clone(),
-                draft_key: draft_key.lock().map(|key| key.clone()).ok(),
-                attachments: attachments
-                    .lock()
-                    .map(|items| items.clone())
-                    .unwrap_or_default(),
-            };
+            let _ = ui::set_enabled(&send, false);
+            let want_html = is_html_mode_for_send.load(Ordering::Relaxed);
+            let to_value = ui::text_value(&to);
+            let cc_value = ui::text_value(&cc);
+            let bcc_value = ui::text_value(&bcc);
+            let subject_value = ui::text_value(&subject);
 
             let pgp = PgpOptions {
                 encrypt: send_encrypt.IsOn().unwrap_or(false),
@@ -804,53 +792,99 @@ pub fn present(
             };
             if pgp.encrypt {
                 let mut recipients = Vec::new();
-                for field in [&outgoing.to, &outgoing.cc, &outgoing.bcc] {
+                for field in [&to_value, &cc_value, &bcc_value] {
                     if let Ok(addresses) = recipient_addresses(field) {
                         recipients.extend(addresses);
                     }
                 }
-                match app.mailin.missing_pgp_keys(&account.id, &recipients) {
+                let report = app.mailin.missing_pgp_keys(&account.id, &recipients);
+                let failure = match report {
                     Ok(missing) if !missing.is_empty() => {
-                        let _ =
-                            banner.SetText(&format!("No public key for: {}", missing.join(", ")));
-                        let _ = ui::set_visible(&banner, true);
-                        return;
+                        Some(format!("No public key for: {}", missing.join(", ")))
                     }
-                    Err(failure) => {
-                        let _ = banner.SetText(&format!("Could not check PGP keys: {failure}"));
-                        let _ = ui::set_visible(&banner, true);
-                        return;
-                    }
-                    _ => {}
+                    Err(failure) => Some(format!("Could not check PGP keys: {failure}")),
+                    _ => None,
+                };
+                if let Some(message) = failure {
+                    let _ = banner.SetText(&message);
+                    let _ = ui::set_visible(&banner, true);
+                    let _ = ui::set_enabled(&send, true);
+                    return;
                 }
             }
             if pgp.sign && !app.mailin.has_signing_key(&account.id) {
                 let _ = banner
                     .SetText("No secret key available. Add one in Account Settings → Encryption.");
                 let _ = ui::set_visible(&banner, true);
+                let _ = ui::set_enabled(&send, true);
                 return;
             }
-            match app.mailin.build_outgoing(&account.id, &outgoing, pgp) {
-                Ok((raw, envelope)) => match app.engine.queue_and_send(account.id, raw, envelope) {
-                    Ok(_) => {
-                        sent.store(true, Ordering::Relaxed);
-                        if let Ok(key) = draft_key.lock()
-                            && !key.is_empty()
-                        {
-                            app.engine.discard_draft(account.id, key.clone());
+            let account_id = account.id;
+            let from_name = account.display_name.clone();
+            let from_addr = account.email.clone();
+            let app = Arc::clone(&app);
+            let on_sent = Arc::clone(&on_sent);
+            let window = window.clone();
+            let send_for_done = send.clone();
+            let banner = banner.clone();
+            let draft_key = Arc::clone(&draft_key);
+            let attachments = Arc::clone(&attachments);
+            let sent = Arc::clone(&sent);
+            let in_reply_to = in_reply_to.clone();
+            let references = references.clone();
+            let on_done: Box<dyn FnOnce(Option<String>, String)> =
+                Box::new(move |html_body, body_text: String| {
+                    let outgoing = OutgoingMessage {
+                        from_name,
+                        from_addr,
+                        to: to_value,
+                        cc: cc_value,
+                        bcc: bcc_value,
+                        subject: subject_value,
+                        body: body_text,
+                        html_body,
+                        in_reply_to,
+                        references,
+                        draft_key: draft_key.lock().map(|key| key.clone()).ok(),
+                        attachments: attachments
+                            .lock()
+                            .map(|items| items.clone())
+                            .unwrap_or_default(),
+                    };
+
+                    match app.mailin.build_outgoing(&account_id, &outgoing, pgp) {
+                        Ok((raw, envelope)) => {
+                            match app.engine.queue_and_send(account_id, raw, envelope) {
+                                Ok(_) => {
+                                    sent.store(true, Ordering::Relaxed);
+                                    if let Ok(key) = draft_key.lock()
+                                        && !key.is_empty()
+                                    {
+                                        app.engine.discard_draft(account_id, key.clone());
+                                    }
+                                    on_sent();
+                                    let _ = window.Close();
+                                }
+                                Err(failure) => {
+                                    let _ = banner.SetText(&format!(
+                                        "Could not queue the message: {failure}"
+                                    ));
+                                    let _ = ui::set_visible(&banner, true);
+                                    let _ = ui::set_enabled(&send_for_done, true);
+                                }
+                            }
                         }
-                        on_sent();
-                        let _ = window.Close();
+                        Err(failure) => {
+                            let _ = banner.SetText(&format!("Could not send: {failure}"));
+                            let _ = ui::set_visible(&banner, true);
+                            let _ = ui::set_enabled(&send_for_done, true);
+                        }
                     }
-                    Err(failure) => {
-                        let _ = banner.SetText(&format!("Could not queue the message: {failure}"));
-                        let _ = ui::set_visible(&banner, true);
-                    }
-                },
-                Err(failure) => {
-                    let _ = banner.SetText(&format!("Could not send: {failure}"));
-                    let _ = ui::set_visible(&banner, true);
-                }
+                });
+            if !start_capture_for_send(want_html, on_done) {
+                let _ = banner.SetText("Still finishing the previous capture — try again.");
+                let _ = ui::set_visible(&banner, true);
+                let _ = ui::set_enabled(&send, true);
             }
         }
     })?);
@@ -1115,104 +1149,6 @@ fn quoted_reply(message: &MessageHeader, body: Option<&str>) -> String {
     text
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mailin_core::{FolderId, MessageId};
-
-    fn account() -> Account {
-        Account::new(
-            "Ada",
-            "ada@example.com",
-            mailin_core::ServerSettings::imap("imap.example.com", "ada@example.com"),
-            mailin_core::ServerSettings::smtp("smtp.example.com", "ada@example.com"),
-        )
-    }
-
-    fn message() -> MessageHeader {
-        MessageHeader {
-            id: MessageId(1),
-            folder_id: FolderId(1),
-            uid: 1,
-            message_id: Some("parent@example.com".into()),
-            thread_key: Some("root@example.com".into()),
-            subject: "Quarterly report".into(),
-            from_name: Some("Grace Hopper".into()),
-            from_addr: Some("grace@example.com".into()),
-            to_addrs: "Ada <ada@example.com>, bob@example.com".into(),
-            cc_addrs: "carol@example.com".into(),
-            sent_at: Some(1_700_000_000),
-            received_at: 1_700_000_000,
-            snippet: None,
-            size: None,
-            flags: Vec::new(),
-            has_attachments: false,
-            body_fetched: true,
-        }
-    }
-
-    #[test]
-    fn reply_goes_to_the_sender_and_quotes_the_body() {
-        let draft = reply(&account(), &message(), Some("Hello\nworld"));
-        assert_eq!(draft.to, "grace@example.com");
-        assert!(draft.cc.is_empty());
-        assert_eq!(draft.subject, "Re: Quarterly report");
-        assert!(draft.body.contains("> Hello\n> world"));
-        assert_eq!(draft.in_reply_to.as_deref(), Some("parent@example.com"));
-        assert_eq!(
-            draft.references,
-            vec!["root@example.com", "parent@example.com"]
-        );
-    }
-
-    #[test]
-    fn reply_all_keeps_other_recipients_but_not_the_account() {
-        let draft = reply_all(&account(), &message(), None);
-        assert_eq!(draft.to, "grace@example.com");
-        assert_eq!(draft.cc, "bob@example.com, carol@example.com");
-    }
-
-    #[test]
-    fn subjects_do_not_get_double_prefixes() {
-        assert_eq!(reply_subject("Re: Hi"), "Re: Hi");
-        assert_eq!(reply_subject(""), "Re:");
-        assert_eq!(forward_subject("Fwd: Hi"), "Fwd: Hi");
-        assert_eq!(forward_subject("Hi"), "Fwd: Hi");
-    }
-
-    #[test]
-    fn signatures_sit_above_quotes_and_forwards() {
-        let mut account = account();
-        account.signature = "Ada\nhttps://ada.example".into();
-
-        let reply_draft = reply(&account, &message(), Some("Hello"));
-        assert!(
-            reply_draft
-                .body
-                .starts_with("-- \nAda\nhttps://ada.example\n\nOn "),
-            "signature missing from reply: {:?}",
-            reply_draft.body
-        );
-        assert!(reply_draft.body.contains("> Hello"));
-
-        let forward_draft = forward(&account, &message(), Some("Body text"));
-        assert!(
-            forward_draft.body.starts_with(
-                "-- \nAda\nhttps://ada.example\n\n---------- Forwarded message ----------"
-            ),
-            "signature missing from forward: {:?}",
-            forward_draft.body
-        );
-    }
-
-    #[test]
-    fn blank_signatures_leave_bodies_untouched() {
-        let draft = reply(&account(), &message(), Some("Hello"));
-        assert!(draft.body.starts_with("\n\nOn "));
-        assert!(!draft.body.contains("-- \n"));
-    }
-}
-
 /// Set up contact autocomplete for a recipient text box.
 fn setup_contact_autocomplete(
     text_box: &mailin_winui_sys::TextBox,
@@ -1221,11 +1157,28 @@ fn setup_contact_autocomplete(
     account_id: AccountId,
     revokers: &ui::Revokers,
 ) -> Result<()> {
-    use mailin_winui_sys::{Button, Orientation, TextBlock, VerticalAlignment};
+    use mailin_winui_sys::{Button, Orientation, VerticalAlignment};
 
     let text_box = text_box.clone();
     let suggestions_panel = suggestions_panel.clone();
     let app = Arc::clone(app);
+
+    // Hide the suggestion list shortly after the text box loses focus, so a
+    // click on a suggestion still registers before the panel disappears. The
+    // timer lives on the UI thread and fires exactly once.
+    let hide_timer = DispatcherQueue::GetForCurrentThread()
+        .and_then(|queue| queue.CreateTimer())
+        .context("could not create the suggestion hide timer")?;
+    hide_timer.SetInterval(windows_time::TimeSpan {
+        duration: 150 * 10_000,
+    })?;
+    hide_timer.SetIsRepeating(false)?;
+    {
+        let suggestions_panel = suggestions_panel.clone();
+        revokers.keep(hide_timer.Tick(move |_, _| {
+            let _ = ui::set_visible(&suggestions_panel, false);
+        })?);
+    }
 
     // TextChanged event to show/filter suggestions
     revokers.keep(
@@ -1256,7 +1209,6 @@ fn setup_contact_autocomplete(
                 }
 
                 for contact in contacts {
-                    let row = ui::stack_sm(Orientation::Horizontal)?;
                     let labels = ui::stack_xs(Orientation::Vertical)?;
                     let email_label = ui::text(&contact.email)?;
                     ui::append(&labels, &email_label)?;
@@ -1265,12 +1217,12 @@ fn setup_contact_autocomplete(
                         ui::append(&labels, &name_label)?;
                     }
                     ui::stretch_horizontal(&labels)?;
-                    ui::append(&row, &labels)?;
 
                     // Click handler to insert the email
                     let text_box = text_box.clone();
                     let suggestions_panel = suggestions_panel.clone();
                     let email = contact.email.clone();
+                    let contact_name = contact.display_name.clone();
                     let button = Button::new()?;
                     button.SetContent(&labels)?;
                     button
@@ -1287,7 +1239,15 @@ fn setup_contact_autocomplete(
                     button.SetBackground(mailin_winui_sys::SolidColorBrush::CreateInstance(
                         &mailin_winui_sys::color_from_argb(0, 0, 0, 0),
                     )?)?;
-                    ui::on_click(&button, move || {
+                    AutomationProperties::SetName(
+                        &button,
+                        &if contact_name.is_empty() {
+                            format!("Insert {email}")
+                        } else {
+                            format!("Insert {contact_name} <{email}>")
+                        },
+                    )?;
+                    revokers.keep(ui::on_click(&button, move || {
                         let current = ui::text_value(&text_box);
                         let new_text = if current.trim().is_empty() {
                             email.clone()
@@ -1304,9 +1264,9 @@ fn setup_contact_autocomplete(
                         };
                         let _ = text_box.SetText(&new_text);
                         let _ = ui::set_visible(&suggestions_panel, false);
-                    })?;
+                    })?);
 
-                    children.Append(&row)?;
+                    children.Append(&button)?;
                 }
                 let _ = ui::set_visible(&suggestions_panel, true);
             }
@@ -1314,15 +1274,12 @@ fn setup_contact_autocomplete(
         }))?,
     );
 
-    // Hide suggestions when text box loses focus (with a small delay to allow click)
+    // Hide suggestions when the text box loses focus (the timer fires from
+    // the UI thread, so the focused button's Click still gets to run first).
     revokers.keep(text_box.LostFocus(&TypedEventHandler::new({
-        let suggestions_panel = suggestions_panel.clone();
+        let hide_timer = hide_timer.clone();
         move |_sender, _args| {
-            // Use a small delay so clicks on suggestions register first
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(150));
-                let _ = ui::set_visible(&suggestions_panel, false);
-            });
+            let _ = hide_timer.Start();
             Ok(())
         }
     }))?);

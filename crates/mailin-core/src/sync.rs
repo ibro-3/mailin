@@ -172,18 +172,20 @@ pub(crate) async fn sync_folder(
     new_uids.sort_unstable();
     let new_count = new_uids.len();
     let mut created = 0usize;
+    let mut created_ids: Vec<crate::model::MessageId> = Vec::new();
     for chunk in new_uids.chunks(HEADER_CHUNK) {
         let headers = session.fetch_headers(chunk).await?;
         let messages: Vec<NewMessage> = headers
             .iter()
             .map(|header| message_from_header(folder.id, header))
             .collect();
-        created += mailbox
-            .store()
-            .upsert_messages(&messages)?
-            .iter()
-            .filter(|result| result.created)
-            .count();
+        let results = mailbox.store().upsert_messages(&messages)?;
+        for result in results {
+            if result.created {
+                created += 1;
+                created_ids.push(result.id);
+            }
+        }
 
         // Seed contacts from new messages
         for message in &messages {
@@ -250,6 +252,7 @@ pub(crate) async fn sync_folder(
             account_id: folder.account_id,
             folder_id: folder.id,
             count: u32::try_from(created).unwrap_or(u32::MAX),
+            message_ids: created_ids,
         });
     }
 
