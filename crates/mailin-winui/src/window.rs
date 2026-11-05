@@ -116,6 +116,7 @@ struct Widgets {
     remote_panel: StackPanel,
     remote_once: Button,
     remote_trust: Button,
+    remote_dismiss: Button,
     pgp_panel: StackPanel,
     pgp_status: TextBlock,
     pgp_action: Button,
@@ -152,8 +153,12 @@ pub struct MainWindow {
     /// Whether the current OpenPGP message has been unwrapped.
     pgp_shown: AtomicBool,
     closed: AtomicBool,
-    /// Undo state for move operations: (source_folder_id, message_ids)
-    last_move: Mutex<Option<(FolderId, Vec<MessageId>)>>,
+    /// Undo state for move operations: (message_id, source_folder_id) pairs,
+    /// one per message, so mixed selections restore each message to where it
+    /// came from.
+    last_move: Mutex<Option<Vec<(MessageId, FolderId)>>>,
+    /// The auto-hide timer for the undo banner; exactly one at a time.
+    undo_timer: std::rc::Rc<std::cell::RefCell<Option<mailin_winui_sys::DispatcherQueueTimer>>>,
     events: ui::Revokers,
     folder_events: ui::Revokers,
     message_events: ui::Revokers,
@@ -174,7 +179,10 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.banner, !text.is_empty());
     }
 
-    fn show_undo_banner(&self, text: &str) {
+    /// Show the undo banner for a folder-moving action and remember the
+    /// per-message source folders. Undo is a single fixed button registered
+    /// once at creation time; this only records what undo should do.
+    fn show_undo_banner(&self, text: &str, pairs: Vec<(MessageId, FolderId)>) {
         let _ = ui::set_visible(&self.widgets.undo_banner, true);
         // Update the text in the undo banner (first child is the text block)
         if let Ok(children) = self.widgets.undo_banner.Children() {
@@ -186,56 +194,86 @@ impl MainWindow {
                 }
             }
         }
-        // Set up the undo button handler
-        let this = Rc::new(self.clone());
-        let undo_button = self.widgets.undo_button.clone();
-        let revoker = undo_button.Click(&TypedEventHandler::new(move |_, _| {
-            if let Some((source_folder, message_ids)) = this
-                .last_move
-                .lock()
-                .unwrap_or_else(|err| err.into_inner())
-                .take()
-            {
-                for msg_id in message_ids {
-                    this.move_message_to_folder_silent(msg_id, source_folder);
-                }
-                this.show_banner("Move undone");
-            }
-            let _ = ui::set_visible(&this.widgets.undo_banner, false);
-            Ok(())
-        }));
-        this.events.keep(revoker);
+        *self.last_move.lock().unwrap_or_else(|err| err.into_inner()) = Some(pairs);
 
-        // Auto-hide after 5 seconds
-        let undo_banner = self.widgets.undo_banner.clone();
-        let queue = DispatcherQueue::GetForCurrentThread().unwrap_or_else(|error| {
-            tracing::warn!(%error, "undo auto-hide skipped: no dispatcher on this thread");
+        // Auto-hide after 5 seconds. A newer banner drops the previous timer,
+        // so only the newest one can hide it.
+        let Ok(queue) = DispatcherQueue::GetForCurrentThread() else {
             return;
-        });
-        let timer = queue.CreateTimer().unwrap_or_else(|error| {
-            tracing::warn!(%error, "undo auto-hide skipped: could not create timer");
+        };
+        let Ok(timer) = queue.CreateTimer() else {
             return;
-        });
-        if let Err(error) = timer.SetInterval(windows_time::TimeSpan {
-            duration: 5 * 10_000_000,
-        }) {
-            tracing::warn!(%error, "undo auto-hide skipped: SetInterval failed");
-            return;
-        }
-        if let Err(error) = timer.SetIsRepeating(false) {
-            tracing::warn!(%error, "undo auto-hide skipped: SetIsRepeating failed");
+        };
+        if timer
+            .SetInterval(windows_time::TimeSpan {
+                duration: 5 * 10_000_000,
+            })
+            .is_err()
+        {
             return;
         }
-        let undo_banner_clone = undo_banner.clone();
-        let this_clone = self.clone();
+        let _ = timer.SetIsRepeating(false);
+        let banner = self.widgets.undo_banner.clone();
+        let slot = self.undo_timer.clone();
         let _ = timer.Tick(move |_, _| {
-            let _ = ui::set_visible(&undo_banner_clone, false);
-            let _ = ui::set_visible(&this_clone.widgets.undo_banner, false);
-            Ok(())
+            let _ = ui::set_visible(&banner, false);
+            *slot.borrow_mut() = None;
         });
-        if let Err(error) = timer.Start() {
-            tracing::warn!(%error, "undo auto-hide skipped: could not start timer");
+        let _ = timer.Start();
+        // Dropping the previous timer (if any) cancels its pending hide.
+        *self.undo_timer.borrow_mut() = Some(timer);
+    }
+
+    /// (message_id, source_folder) pairs for the given ids. Messages outside
+    /// the current view fall back to the selected folder.
+    fn undo_pairs(&self, ids: &[MessageId]) -> Vec<(MessageId, FolderId)> {
+        let state = self.state();
+        let fallback = state.selection.folder;
+        ids.iter()
+            .filter_map(|id| {
+                state
+                    .messages
+                    .iter()
+                    .find(|message| message.id == *id)
+                    .map(|message| (message.id, message.folder_id))
+                    .or_else(|| fallback.map(|folder| (*id, folder)))
+            })
+            .collect()
+    }
+
+    /// Restore whatever the last undoable action moved, grouped by the
+    /// folder each message came from.
+    fn undo_last_move(&self) {
+        let pending = self
+            .last_move
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .take();
+        let Some(pairs) = pending else {
+            let _ = ui::set_visible(&self.widgets.undo_banner, false);
+            return;
+        };
+        let mut groups: std::collections::HashMap<FolderId, Vec<MessageId>> =
+            std::collections::HashMap::new();
+        for (id, folder) in pairs {
+            groups.entry(folder).or_default().push(id);
         }
+        for (folder, ids) in groups {
+            self.app.engine.move_messages(&ids, folder);
+        }
+        self.refresh_folders();
+        self.refresh_messages();
+        self.show_banner("Move undone");
+        let _ = ui::set_visible(&self.widgets.undo_banner, false);
+    }
+
+    /// True when the selected folder is Trash (deletes there are permanent).
+    fn current_folder_is_trash(&self) -> bool {
+        self.state()
+            .selection
+            .folder
+            .and_then(|id| self.app.mailin.folder(id).ok().flatten())
+            .is_some_and(|folder| folder.role == FolderRole::Trash)
     }
 
     fn show_error(&self, message: &str) {
@@ -246,6 +284,47 @@ impl MainWindow {
         }
         self.show_banner(&format!("Problem: {text}"));
         tracing::debug!(%message, "account error surfaced in the UI");
+    }
+
+    /// Show a simple toast notification with no action buttons.
+    fn show_simple_toast(&self, title: &str, body: &str) {
+        if !self.app.config().ui.notifications {
+            return;
+        }
+        let Some(notifier) = &self.app.toast_notifier else {
+            return;
+        };
+        let xml =
+            match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastGeneric) {
+                Ok(xml) => xml,
+                Err(error) => {
+                    tracing::warn!(%error, "failed to get the toast template");
+                    return;
+                }
+            };
+        let text_nodes = match xml.GetElementsByTagName("text") {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                tracing::warn!(%error, "failed to get the toast text elements");
+                return;
+            }
+        };
+        let set_text = |index: u32, value: &str| -> windows_core::Result<()> {
+            let node: IXmlNodeSerializer = text_nodes.Item(index)?.cast()?;
+            node.SetInnerText(value)
+        };
+        let _ = set_text(0, title);
+        let _ = set_text(1, body);
+        let toast = match ToastNotification::CreateToastNotification(&xml) {
+            Ok(toast) => toast,
+            Err(error) => {
+                tracing::warn!(%error, "failed to create the toast notification");
+                return;
+            }
+        };
+        if let Err(error) = notifier.Show(&toast) {
+            tracing::warn!(%error, "failed to show the toast notification");
+        }
     }
 
     fn show_toast_notification(
@@ -1731,24 +1810,42 @@ impl MainWindow {
         let Some(message) = self.selected_message() else {
             return;
         };
-        self.app.engine.archive_messages(&[message.id]);
-        self.show_banner("Archiving…");
+        let ids = vec![message.id];
+        let pairs = self.undo_pairs(&ids);
+        self.app.engine.archive_messages(&ids);
+        self.show_undo_banner("Archived 1 message", pairs);
     }
 
     fn delete_selected(&self) {
         let Some(message) = self.selected_message() else {
             return;
         };
-        self.app.engine.delete_messages(&[message.id]);
-        self.show_banner("Moving to Trash…");
+        let ids = vec![message.id];
+        if self.current_folder_is_trash() {
+            self.app.engine.permanently_delete_messages(&ids);
+            self.show_banner("Deleting permanently…");
+            return;
+        }
+        let pairs = self.undo_pairs(&ids);
+        self.app.engine.delete_messages(&ids);
+        self.show_undo_banner("Moved 1 message to Trash", pairs);
     }
 
-    fn mark_selected_junk(&self) {
+    fn mark_selected_junk(&self, junk: bool) {
         let Some(message) = self.selected_message() else {
             return;
         };
-        self.app.engine.mark_messages_junk(&[message.id], true);
-        self.show_banner("Marking as Junk…");
+        let ids = vec![message.id];
+        let pairs = self.undo_pairs(&ids);
+        self.app.engine.mark_messages_junk(&ids, junk);
+        self.show_undo_banner(
+            if junk {
+                "Marked 1 message as Junk"
+            } else {
+                "Moved 1 message to Inbox"
+            },
+            pairs,
+        );
     }
 
     /// Run a quick action on a specific message (from hover/swipe).
@@ -1757,16 +1854,24 @@ impl MainWindow {
         let ids = vec![message_id];
         match action {
             QuickAction::Archive => {
+                let pairs = self.undo_pairs(&ids);
                 self.app.engine.archive_messages(&ids);
-                self.show_banner("Archiving…");
+                self.show_undo_banner("Archived 1 message", pairs);
             }
             QuickAction::Delete => {
+                if self.current_folder_is_trash() {
+                    self.app.engine.permanently_delete_messages(&ids);
+                    self.show_banner("Deleting permanently…");
+                    return;
+                }
+                let pairs = self.undo_pairs(&ids);
                 self.app.engine.delete_messages(&ids);
-                self.show_banner("Moving to Trash…");
+                self.show_undo_banner("Moved 1 message to Trash", pairs);
             }
             QuickAction::Junk => {
+                let pairs = self.undo_pairs(&ids);
                 self.app.engine.mark_messages_junk(&ids, true);
-                self.show_banner("Marking as Junk…");
+                self.show_undo_banner("Marked 1 message as Junk", pairs);
             }
             QuickAction::Flag => {
                 self.app
@@ -1925,8 +2030,17 @@ impl MainWindow {
         if ids.is_empty() {
             return;
         }
+        let count = ids.len();
+        let pairs = self.undo_pairs(&ids);
         self.app.engine.archive_messages(&ids);
-        self.show_banner("Archiving…");
+        self.show_undo_banner(
+            &format!(
+                "Archived {} message{}",
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            pairs,
+        );
         self.clear_bulk_selection();
     }
 
@@ -1935,8 +2049,27 @@ impl MainWindow {
         if ids.is_empty() {
             return;
         }
+        let count = ids.len();
+        if self.current_folder_is_trash() {
+            self.app.engine.permanently_delete_messages(&ids);
+            self.show_banner(&format!(
+                "Deleted {} message{} permanently",
+                count,
+                if count == 1 { "" } else { "s" }
+            ));
+            self.clear_bulk_selection();
+            return;
+        }
+        let pairs = self.undo_pairs(&ids);
         self.app.engine.delete_messages(&ids);
-        self.show_banner("Moving to Trash…");
+        self.show_undo_banner(
+            &format!(
+                "Moved {} message{} to Trash",
+                count,
+                if count == 1 { "" } else { "s" }
+            ),
+            pairs,
+        );
         self.clear_bulk_selection();
     }
 
@@ -1946,7 +2079,6 @@ impl MainWindow {
         if ids.is_empty() {
             return;
         }
-        let source_folder = self.state().selection.folder;
         let folders = self.state().folders.clone();
         let exclude = self.state().selection.folder;
         let xaml_root = match ui::window_xaml_root(&self.widgets.window) {
@@ -1962,17 +2094,16 @@ impl MainWindow {
         let picked = move |target: FolderId| {
             app.engine.move_messages(&ids, target);
             if let Some(this) = this.upgrade() {
-                // Store undo info and show undo banner
-                if let Some(source) = source_folder {
-                    *this.last_move.lock().unwrap_or_else(|err| err.into_inner()) =
-                        Some((source, ids_clone.clone()));
-                    this.show_undo_banner(&format!(
+                let count = ids_clone.len();
+                let pairs = this.undo_pairs(&ids_clone);
+                this.show_undo_banner(
+                    &format!(
                         "Moved {} message{}",
-                        ids.len(),
-                        if ids.len() == 1 { "" } else { "s" }
-                    ));
-                }
-                this.show_banner("Moving…");
+                        count,
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    pairs,
+                );
                 this.clear_bulk_selection();
             }
         };
@@ -2236,10 +2367,11 @@ impl MainWindow {
             self.show_banner("Add an account before composing mail");
             return;
         };
-        let banner = self.widgets.banner.clone();
+        let this = Rc::clone(self);
         match compose::present(Arc::clone(&self.app), account_id, draft, move || {
-            let _ = banner.SetText("Message queued in the outbox");
-            let _ = ui::set_visible(&banner, true);
+            // Show a real toast so the user sees confirmation even if the
+            // main window is behind other windows.
+            this.show_simple_toast("Mailin", "Message queued in the outbox");
         }) {
             Ok(_) => {}
             Err(error) => self.show_error(&format!("Could not open the composer: {error:#}")),
@@ -2651,6 +2783,9 @@ impl MainWindow {
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                     Ok(Event::OutboxChanged) => outbox_changed = true,
                     Ok(Event::AccountError { message, .. }) => account_error = Some(message),
+                    Ok(Event::ActionFailed { message, .. }) => {
+                        self.show_error(&message);
+                    }
                     Ok(Event::SyncStatusChanged { account_id, status }) => {
                         let state = self.state();
                         if state.selection.account == Some(account_id) {
@@ -3053,9 +3188,17 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         Some("Always allow sender"),
         Some("Always load remote content from this sender"),
     )?;
+    let remote_dismiss = ui::button("×", Some("Dismiss"), Some("Not now"))?;
+    remote_dismiss.SetPadding(mailin_winui_sys::Thickness {
+        left: 8.0,
+        top: 2.0,
+        right: 8.0,
+        bottom: 2.0,
+    })?;
     ui::append(&remote_panel, &remote_text)?;
     ui::append(&remote_panel, &remote_once)?;
     ui::append(&remote_panel, &remote_trust)?;
+    ui::append(&remote_panel, &remote_dismiss)?;
     ui::set_visible(&remote_panel, false)?;
     ui::append(&header, &remote_panel)?;
 
@@ -3184,6 +3327,8 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         html_mode: AtomicBool::new(state.config().ui.html_enabled),
         pgp_shown: AtomicBool::new(false),
         closed: AtomicBool::new(false),
+        last_move: Mutex::new(None),
+        undo_timer: std::rc::Rc::new(std::cell::RefCell::new(None)),
         events: ui::Revokers::default(),
         folder_events: ui::Revokers::default(),
         message_events: ui::Revokers::default(),
@@ -3224,6 +3369,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             remote_panel,
             remote_once,
             remote_trust,
+            remote_dismiss,
             pgp_panel,
             pgp_status,
             pgp_action,
@@ -3251,6 +3397,16 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     });
 
     this.events.keep(link_token);
+
+    // Undo banner button: restore whatever the last undoable action moved.
+    this.events.keep(ui::on_click(&this.widgets.undo_button, {
+        let this = Rc::downgrade(&this);
+        move || {
+            if let Some(this) = this.upgrade() {
+                this.undo_last_move();
+            }
+        }
+    })?);
 
     // Keyboard accelerators, attached to the content root so they fire
     // wherever the focus is inside the window.
@@ -3517,7 +3673,7 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     })?);
     this.events.keep(ui::on_click(&this.widgets.junk_button, {
         let this = Rc::clone(this);
-        move || this.mark_selected_junk()
+        move || this.mark_selected_junk(true)
     })?);
     this.events
         .keep(ui::on_click(&this.widgets.outbox_retry_button, {
@@ -3567,6 +3723,13 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
         let this = Rc::clone(this);
         move || this.trust_current_sender()
     })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.remote_dismiss, {
+            let this = Rc::clone(this);
+            move || {
+                let _ = ui::set_visible(&this.widgets.remote_panel, false);
+            }
+        })?);
     this.events.keep(ui::on_click(&this.widgets.reply_button, {
         let this = Rc::clone(this);
         move || this.compose_reply(false)
@@ -3823,16 +3986,12 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
                 if let Ok(text_async) = data_view.GetTextAsync() {
                     if let Ok(msg_id_str) = text_async.get() {
                         if let Ok(msg_id) = msg_id_str.parse::<i64>() {
-                            let source_folder = this.state().selection.folder;
                             this.move_message_to_folder_silent(
                                 MessageId(msg_id),
                                 FolderId(folder_id),
                             );
-                            if let Some(source) = source_folder {
-                                *this.last_move.lock().unwrap_or_else(|err| err.into_inner()) =
-                                    Some((source, vec![MessageId(msg_id)]));
-                                this.show_undo_banner("Moved 1 message");
-                            }
+                            let pairs = this.undo_pairs(&[MessageId(msg_id)]);
+                            this.show_undo_banner("Moved 1 message", pairs);
                         }
                     }
                 }

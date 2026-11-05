@@ -841,7 +841,7 @@ async fn account_worker(
         if let Err(error) = refresh_oauth_tokens(&state, &mut account).await {
             state.mailbox.publish(Event::AccountError {
                 account_id,
-                message: error.to_string(),
+                message: error.friendly(),
             });
             tracing::warn!(%account_id, %error, "could not refresh OAuth2 tokens");
             if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
@@ -874,7 +874,7 @@ async fn account_worker(
                 Err(error) => {
                     state.mailbox.publish(Event::AccountError {
                         account_id,
-                        message: error.to_string(),
+                        message: error.friendly(),
                     });
                     if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
                         return;
@@ -890,10 +890,22 @@ async fn account_worker(
         match run_session(&state, &account, auth_creds, &mut commands, &mut pending).await {
             Ok(()) => return,
             Err(error) => {
-                state.mailbox.publish(Event::AccountError {
-                    account_id,
-                    message: error.to_string(),
-                });
+                match &error {
+                    // A command the user asked for failed: say what didn't
+                    // work, without suggesting a full sync as "Retry".
+                    Error::ActionFailed { .. } => {
+                        state.mailbox.publish(Event::ActionFailed {
+                            account_id,
+                            message: error.friendly(),
+                        });
+                    }
+                    _ => {
+                        state.mailbox.publish(Event::AccountError {
+                            account_id,
+                            message: error.friendly(),
+                        });
+                    }
+                }
                 // Network/connection failures -> Offline, others -> Error.
                 // Match the structured io::ErrorKind first; narrow, explicit
                 // phrases are used for string-wrapped network errors so
@@ -925,6 +937,40 @@ async fn account_worker(
 /// Structured `io::Error` kinds are trusted; everything else is matched
 /// against specific network phrases (not the bare word "connection", so
 /// server-side errors like "connection limit exceeded" classify as `Error`).
+fn worker_action_name(command: &WorkerCommand) -> &'static str {
+    match command {
+        WorkerCommand::MoveMessages { target, .. } => match target {
+            MoveTarget::Archive => "archive the messages",
+            MoveTarget::Trash => "move the messages to Trash",
+            MoveTarget::Junk => "mark the messages as Junk",
+            MoveTarget::Inbox => "move the messages to Inbox",
+            MoveTarget::Permanent => "permanently delete the messages",
+            MoveTarget::Folder(_) => "move the messages",
+        },
+        WorkerCommand::EmptyTrash => "empty Trash",
+        WorkerCommand::SaveDraft { .. } => "save the draft",
+        WorkerCommand::DiscardDraft { .. } => "discard the draft",
+        WorkerCommand::RetryOutbox { .. } => "retry sending the message",
+        WorkerCommand::CancelOutbox { .. } => "cancel the message",
+        WorkerCommand::SetFlags { .. } | WorkerCommand::BulkSetFlags { .. } => {
+            "update the messages"
+        }
+        WorkerCommand::SnoozeMessages { .. } => "snooze the messages",
+        WorkerCommand::UnsnoozeMessages { .. } => "unsnooze the messages",
+        WorkerCommand::ApplyRules { .. } => "apply the rules",
+        _ => "run a command",
+    }
+}
+
+/// Attach the operation a worker was performing to its failure, so the UI can
+/// tell the user what didn't work instead of a bare transport error.
+fn action_failed(action: &'static str, error: Error) -> Error {
+    Error::ActionFailed {
+        action: action.into(),
+        reason: error.to_string(),
+    }
+}
+
 fn is_offline_error(error: &Error) -> bool {
     if let Error::Io(io) = error {
         return matches!(
@@ -1078,7 +1124,11 @@ async fn run_session(
     loop {
         // Pending commands were queued while the worker was reconnecting.
         if let Some(command) = pending.pop_front() {
-            if handle_command(&mut session, state, account, command).await? {
+            let action = worker_action_name(&command);
+            if handle_command(&mut session, state, account, command)
+                .await
+                .map_err(|error| action_failed(action, error))?
+            {
                 session.logout().await;
                 return Ok(());
             }
@@ -1090,7 +1140,11 @@ async fn run_session(
                 return Ok(());
             }
             Ok(command) => {
-                if handle_command(&mut session, state, account, command).await? {
+                let action = worker_action_name(&command);
+                if handle_command(&mut session, state, account, command)
+                    .await
+                    .map_err(|error| action_failed(action, error))?
+                {
                     session.logout().await;
                     return Ok(());
                 }
@@ -1133,7 +1187,11 @@ async fn run_session(
         }
 
         if let Some(command) = command {
-            if handle_command(&mut session, state, account, command).await? {
+            let action = worker_action_name(&command);
+            if handle_command(&mut session, state, account, command)
+                .await
+                .map_err(|error| action_failed(action, error))?
+            {
                 session.logout().await;
                 return Ok(());
             }

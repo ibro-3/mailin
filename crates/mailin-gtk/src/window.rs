@@ -114,6 +114,7 @@ struct Widgets {
     remote_panel: gtk::Revealer,
     remote_once: gtk::Button,
     remote_trust: gtk::Button,
+    remote_dismiss: gtk::Button,
     reader_attachments: gtk::Box,
     reader_body: gtk::Box,
     read_button: gtk::Button,
@@ -519,11 +520,15 @@ impl MainWindow {
         remote_once.add_css_class("flat");
         let remote_trust = gtk::Button::with_label("Always allow sender");
         remote_trust.add_css_class("flat");
+        let remote_dismiss = gtk::Button::from_icon_name("window-close-symbolic");
+        remote_dismiss.add_css_class("flat");
+        remote_dismiss.set_tooltip_text(Some("Not now"));
         let remote_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         remote_row.add_css_class("remote-banner");
         remote_row.append(&remote_text);
         remote_row.append(&remote_once);
         remote_row.append(&remote_trust);
+        remote_row.append(&remote_dismiss);
         let remote_panel = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
             .reveal_child(false)
@@ -722,6 +727,7 @@ impl MainWindow {
                 remote_panel,
                 remote_once,
                 remote_trust,
+                remote_dismiss,
                 reader_attachments,
                 reader_body,
                 read_button,
@@ -1272,6 +1278,13 @@ impl MainWindow {
             move |_| this.trust_current_sender()
         });
 
+        this.widgets.remote_dismiss.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| {
+                this.widgets.remote_panel.set_reveal_child(false);
+            }
+        });
+
         this.widgets.compose_button.connect_clicked({
             let this = Rc::clone(this);
             move |_| {
@@ -1608,24 +1621,14 @@ impl MainWindow {
         this.widgets.window.add_action(&move_to_folder_action);
 
         let undo_move_action =
-            gio::SimpleAction::new("undo-move-message", Some(glib::VariantTy::STRING));
+            gio::SimpleAction::new("undo-move-multi", Some(glib::VariantTy::STRING));
         undo_move_action.connect_activate({
             let this = Rc::clone(this);
             move |_, parameter| {
                 let Some(param) = parameter.and_then(|v| v.str()) else {
                     return;
                 };
-                let mut parts = param.splitn(2, ':');
-                let (Some(source_str), Some(msg_str)) = (parts.next(), parts.next()) else {
-                    return;
-                };
-                let Ok(source_id) = source_str.parse::<i64>() else {
-                    return;
-                };
-                let Ok(msg_id) = msg_str.parse::<i64>() else {
-                    return;
-                };
-                this.undo_move_message(FolderId(source_id), MessageId(msg_id));
+                this.undo_move_multi(param);
             }
         });
         this.widgets.window.add_action(&undo_move_action);
@@ -3102,8 +3105,16 @@ impl MainWindow {
         if ids.is_empty() {
             return;
         }
+        let pairs = self.undo_pairs(&ids);
+        let count = ids.len();
         self.app.engine.archive_messages(&ids);
-        self.toast("Archiving…");
+        self.toast_undo_move(
+            &format!(
+                "Archived {count} message{}",
+                if count == 1 { "" } else { "s" }
+            ),
+            &pairs,
+        );
     }
 
     /// Handle "Mark as read" action from notification.
@@ -3211,8 +3222,16 @@ impl MainWindow {
             );
             return;
         }
+        let pairs = self.undo_pairs(&ids);
+        let count = ids.len();
         self.app.engine.delete_messages(&ids);
-        self.toast("Moving to Trash…");
+        self.toast_undo_move(
+            &format!(
+                "Moved {count} message{} to Trash",
+                if count == 1 { "" } else { "s" }
+            ),
+            &pairs,
+        );
     }
 
     fn mark_selected_junk(&self, junk: bool) {
@@ -3220,12 +3239,18 @@ impl MainWindow {
         if ids.is_empty() {
             return;
         }
+        let pairs = self.undo_pairs(&ids);
+        let count = ids.len();
         self.app.engine.mark_messages_junk(&ids, junk);
-        self.toast(if junk {
-            "Marking as Junk…"
+        let text = if junk {
+            format!(
+                "Marked {count} message{} as Junk",
+                if count == 1 { "" } else { "s" }
+            )
         } else {
-            "Moving to Inbox…"
-        });
+            "Moved to Inbox".to_owned()
+        };
+        self.toast_undo_move(&text, &pairs);
     }
 
     fn empty_trash(&self) {
@@ -3384,8 +3409,13 @@ impl MainWindow {
         crate::move_dialog::show(&this.widgets.window, &folders, current, {
             let this = Rc::clone(this);
             move |folder_id| {
+                let pairs = this.undo_pairs(&ids);
+                let count = ids.len();
                 this.app.engine.move_messages(&ids, folder_id);
-                this.toast("Moving…");
+                this.toast_undo_move(
+                    &format!("Moved {count} message{}", if count == 1 { "" } else { "s" }),
+                    &pairs,
+                );
             }
         });
     }
@@ -3513,6 +3543,10 @@ impl MainWindow {
                 Ok(ClientEvent::BodyReady { message_id }) => body_ready = Some(message_id),
                 Ok(ClientEvent::OutboxChanged) => outbox_changed = true,
                 Ok(ClientEvent::AccountError { message, .. }) => account_error = Some(message),
+                Ok(ClientEvent::ActionFailed { message, .. }) => {
+                    self.widgets.banner.set_title(&message);
+                    self.widgets.banner.set_revealed(true);
+                }
                 Ok(ClientEvent::ScheduledActionRan { .. }) => {
                     // Scheduled action completed, refresh folders and messages
                     folders_changed = true;
@@ -3715,32 +3749,69 @@ impl MainWindow {
         self.refresh_messages();
 
         if let Some(source_folder) = source_folder {
-            let toast = adw::Toast::new("Moved 1 message");
-            toast.set_button_label(Some("Undo"));
-            toast.set_timeout(5);
-            let param = format!("{}:{}", source_folder.0, message_id.0);
-            // Activate the undo action through the window when the button is
-            // pressed.
-            let window = self.widgets.window.clone();
-            toast.connect_button_clicked(move |_| {
-                let _ = gtk::prelude::WidgetExt::activate_action(
-                    &window,
-                    "undo-move-message",
-                    Some(&param.to_variant()),
-                );
-            });
-            self.widgets.toast.add_toast(toast);
+            self.toast_undo_move("Moved 1 message", &[(message_id, source_folder)]);
         }
     }
 
-    fn move_message_to_folder_silent(&self, message_id: MessageId, target_folder: FolderId) {
-        self.app.engine.move_messages(&[message_id], target_folder);
-        self.refresh_folders();
-        self.refresh_messages();
+    /// (id, source folder) pairs for the given messages. Mixed selections
+    /// store a pair per message so undo restores each to its origin.
+    fn undo_pairs(&self, ids: &[MessageId]) -> Vec<(MessageId, FolderId)> {
+        let messages = self.messages.borrow();
+        ids.iter()
+            .filter_map(|id| {
+                messages
+                    .iter()
+                    .find(|message| message.id == *id)
+                    .map(|message| (message.id, message.folder_id))
+            })
+            .collect()
     }
 
-    fn undo_move_message(&self, source_folder: FolderId, message_id: MessageId) {
-        self.move_message_to_folder_silent(message_id, source_folder);
+    /// Show an undo toast for a folder-moving action. Per-message sources
+    /// are encoded in the payload so mixed selections unwind correctly.
+    fn toast_undo_move(&self, text: &str, pairs: &[(MessageId, FolderId)]) {
+        if pairs.is_empty() {
+            return;
+        }
+        let param = pairs
+            .iter()
+            .map(|(message, folder)| format!("{}:{}", message.0, folder.0))
+            .collect::<Vec<_>>()
+            .join(",");
+        let toast = adw::Toast::new(text);
+        toast.set_button_label(Some("Undo"));
+        toast.set_timeout(5);
+        let window = self.widgets.window.clone();
+        toast.connect_button_clicked(move |_| {
+            let _ = gtk::prelude::WidgetExt::activate_action(
+                &window,
+                "undo-move-multi",
+                Some(&param.to_variant()),
+            );
+        });
+        self.widgets.toast.add_toast(toast);
+    }
+
+    /// Undo a folder-moving action: move each message back to its source
+    /// folder. Permanent deletes never reach this path.
+    fn undo_move_multi(&self, param: &str) {
+        let mut groups: std::collections::HashMap<i64, Vec<MessageId>> =
+            std::collections::HashMap::new();
+        for pair in param.split(',') {
+            let mut parts = pair.split(':');
+            let (Some(message), Some(folder)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            if let (Ok(message), Ok(folder)) = (message.parse::<i64>(), folder.parse::<i64>()) {
+                groups.entry(folder).or_default().push(MessageId(message));
+            }
+        }
+        for (folder, ids) in groups {
+            self.app.engine.move_messages(&ids, FolderId(folder));
+        }
+        self.refresh_folders();
+        self.refresh_messages();
+        self.toast("Move undone");
     }
 
     fn add_account(this: &Rc<Self>) {

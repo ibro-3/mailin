@@ -69,6 +69,13 @@ pub enum Event {
         account_id: AccountId,
         message: String,
     },
+    /// A user-initiated action (archive, delete, send…) failed. The message
+    /// is user-facing (see [`crate::error::Error::friendly`]); the technical
+    /// details are only in the log.
+    ActionFailed {
+        account_id: AccountId,
+        message: String,
+    },
     /// Sync status changed for an account.
     SyncStatusChanged {
         account_id: AccountId,
