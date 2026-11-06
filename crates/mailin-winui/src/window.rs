@@ -20,9 +20,9 @@ use mailin_winui_sys::{
     Application, AutomationProperties, Button, CheckBox, ComboBox, ContentDialog,
     ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType, IToggleButton,
     IXmlNodeSerializer, KeyboardAccelerator, MenuFlyout, MenuFlyoutItem, Orientation,
-    ResourceDictionary, RightTappedRoutedEventArgs, ScrollViewer, StackPanel, TextBlock, TextBox,
-    ToastNotification, ToastNotificationManager, ToastTemplateType, TypedEventHandler,
-    VerticalAlignment, VirtualKey, VirtualKeyModifiers, Visibility, WebView2, Window, XamlRoot,
+    ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification,
+    ToastNotificationManager, ToastTemplateType, TypedEventHandler, VerticalAlignment, VirtualKey,
+    VirtualKeyModifiers, Visibility, WebView2, Window, XamlRoot,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -809,12 +809,9 @@ impl MainWindow {
         for message in &messages {
             let ticked = selected.contains(&message.id);
             let density = self.app.config().ui.message_list_density;
-            if let Ok((row, button, checkbox, actions_bar, drag_token)) =
+            if let Ok((row, button, checkbox, actions_bar)) =
                 message_row(message, now, density, ticked)
             {
-                if let Some(token) = drag_token {
-                    self.message_events.keep(token);
-                }
                 let this = Rc::clone(self);
                 let open = message.clone();
                 if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
@@ -963,12 +960,9 @@ impl MainWindow {
         for message in &flat_messages {
             let ticked = selected.contains(&message.id);
             let density = self.app.config().ui.message_list_density;
-            if let Ok((row, button, checkbox, actions_bar, drag_token)) =
+            if let Ok((row, button, checkbox, actions_bar)) =
                 message_row(message, now, density, ticked)
             {
-                if let Some(token) = drag_token {
-                    self.message_events.keep(token);
-                }
                 let this = Rc::clone(self);
                 let open = message.clone();
                 if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
@@ -2113,12 +2107,6 @@ impl MainWindow {
     }
 
     /// Move a message to a folder without showing the undo banner (used for undo).
-    fn move_message_to_folder_silent(&self, message_id: MessageId, target_folder: FolderId) {
-        self.app.engine.move_messages(&[message_id], target_folder);
-        self.refresh_folders();
-        self.refresh_messages();
-    }
-
     /// Dispatch the action chosen in the bulk bar's dropdown.
     ///
     /// The dropdown is parked on its placeholder first; that fires
@@ -2187,27 +2175,30 @@ impl MainWindow {
 
     /// Move selection to the previous message (Up arrow).
     fn select_previous_message(&self) {
-        let state = self.state();
-        if state.show_outbox || state.messages.is_empty() {
-            return;
-        }
-        let selected = &state.selected;
-        let new_idx = if let Some(&last) = selected.iter().last() {
-            // Find the index of the last selected message and go to previous
-            state
-                .messages
-                .iter()
-                .position(|m| m.id == last)
-                .map(|i| i.saturating_sub(1))
-                .unwrap_or(0)
-        } else {
-            // Nothing selected, select the first message
-            0
+        let new_idx = {
+            let state = self.state();
+            if state.show_outbox || state.messages.is_empty() {
+                return;
+            }
+            if let Some(&last) = state.selected.iter().last() {
+                // Find the index of the last selected message and go to previous
+                state
+                    .messages
+                    .iter()
+                    .position(|m| m.id == last)
+                    .map(|i| i.saturating_sub(1))
+                    .unwrap_or(0)
+            } else {
+                // Nothing selected, select the first message
+                0
+            }
         };
+        let mut state = self.state();
         if new_idx < state.messages.len() {
-            let msg = &state.messages[new_idx];
-            selected.clear();
-            selected.insert(msg.id);
+            let msg_id = state.messages[new_idx].id;
+            state.selected.clear();
+            state.selected.insert(msg_id);
+            drop(state);
             // Update checkbox UI
             let checkboxes = self.checkboxes.borrow().clone();
             for (i, checkbox) in checkboxes.iter().enumerate() {
@@ -2221,27 +2212,30 @@ impl MainWindow {
 
     /// Move selection to the next message (Down arrow).
     fn select_next_message(&self) {
-        let state = self.state();
-        if state.show_outbox || state.messages.is_empty() {
-            return;
-        }
-        let selected = &state.selected;
-        let new_idx = if let Some(&last) = selected.iter().last() {
-            // Find the index of the last selected message and go to next
-            state
-                .messages
-                .iter()
-                .position(|m| m.id == last)
-                .map(|i| (i + 1).min(state.messages.len() - 1))
-                .unwrap_or(0)
-        } else {
-            // Nothing selected, select the first message
-            0
+        let new_idx = {
+            let state = self.state();
+            if state.show_outbox || state.messages.is_empty() {
+                return;
+            }
+            if let Some(&last) = state.selected.iter().last() {
+                // Find the index of the last selected message and go to next
+                state
+                    .messages
+                    .iter()
+                    .position(|m| m.id == last)
+                    .map(|i| (i + 1).min(state.messages.len() - 1))
+                    .unwrap_or(0)
+            } else {
+                // Nothing selected, select the first message
+                0
+            }
         };
+        let mut state = self.state();
         if new_idx < state.messages.len() {
-            let msg = &state.messages[new_idx];
-            selected.clear();
-            selected.insert(msg.id);
+            let msg_id = state.messages[new_idx].id;
+            state.selected.clear();
+            state.selected.insert(msg_id);
+            drop(state);
             // Update checkbox UI
             let checkboxes = self.checkboxes.borrow().clone();
             for (i, checkbox) in checkboxes.iter().enumerate() {
@@ -3894,6 +3888,12 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let flyout = MenuFlyout::new()?;
     let folder_id = folder.id.0.to_string();
 
+    // Every action row needs both a `MenuFlyoutItemBase` for `Items()` and the
+    // concrete item to wire `Click`, so keep the pair around.
+    let item_base = |item: MenuFlyoutItem| -> Result<mailin_winui_sys::MenuFlyoutItemBase> {
+        item.cast().context("could not cast a menu item")
+    };
+
     // New Folder
     let new_folder_item = MenuFlyoutItem::new()?;
     new_folder_item.SetText("New Folder")?;
@@ -3903,7 +3903,7 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
         Ok(())
     }))?;
     this.folder_events.keep(new_folder_revoker);
-    flyout.Items()?.Append(&new_folder_item)?;
+    flyout.Items()?.Append(&item_base(new_folder_item)?)?;
 
     // Rename Folder
     let rename_item = MenuFlyoutItem::new()?;
@@ -3915,7 +3915,7 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
         Ok(())
     }))?;
     this.folder_events.keep(rename_revoker);
-    flyout.Items()?.Append(&rename_item)?;
+    flyout.Items()?.Append(&item_base(rename_item)?)?;
 
     // Delete Folder
     let delete_item = MenuFlyoutItem::new()?;
@@ -3927,7 +3927,7 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
         Ok(())
     }))?;
     this.folder_events.keep(delete_revoker);
-    flyout.Items()?.Append(&delete_item)?;
+    flyout.Items()?.Append(&item_base(delete_item)?)?;
 
     // Subscribe/Unsubscribe
     let sub_text = if folder.subscribed {
@@ -3945,7 +3945,7 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
         Ok(())
     }))?;
     this.folder_events.keep(sub_revoker);
-    flyout.Items()?.Append(&sub_item)?;
+    flyout.Items()?.Append(&item_base(sub_item)?)?;
 
     // Properties
     let props_item = MenuFlyoutItem::new()?;
@@ -3957,62 +3957,12 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
         Ok(())
     }))?;
     this.folder_events.keep(props_revoker);
-    flyout.Items()?.Append(&props_item)?;
+    flyout.Items()?.Append(&item_base(props_item)?)?;
 
-    // Attach the flyout to the button's RightTapped event
-    let flyout_clone = flyout.clone();
+    // ContextFlyout gives pointer right-click and Shift+F10/Menu key for free.
     let button_element: mailin_winui_sys::UIElement = button.cast()?;
-    let right_tapped_token =
-        button_element.RightTapped(&TypedEventHandler::new(move |sender, args| {
-            if let Ok(sender) = sender {
-                if let Ok(args) = args {
-                    let _ = flyout_clone.ShowAt(&sender.cast()?);
-                    let _ = args.SetHandled(true);
-                }
-            }
-            Ok(())
-        }))?;
-    this.folder_events.keep(right_tapped_token);
-
-    // Drop target for messages dragged onto this folder
-    let drop_target = mailin_winui_sys::DropTarget::new()?;
-    drop_target.SetAllowDrop(true)?;
-    let this_clone = this.clone();
-    let folder_id = folder.id.0;
-    let drop_token = drop_target.Drop(&TypedEventHandler::new(move |sender, args| {
-        if let Ok(args) = args {
-            if let Ok(data_view) = args.DataView() {
-                // For string data (message IDs), use GetTextAsync
-                if let Ok(text_async) = data_view.GetTextAsync() {
-                    if let Ok(msg_id_str) = text_async.get() {
-                        if let Ok(msg_id) = msg_id_str.parse::<i64>() {
-                            this.move_message_to_folder_silent(
-                                MessageId(msg_id),
-                                FolderId(folder_id),
-                            );
-                            let pairs = this.undo_pairs(&[MessageId(msg_id)]);
-                            this.show_undo_banner("Moved 1 message", pairs);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }))?;
-    let drag_over_token = drop_target.DragOver(&TypedEventHandler::new(move |_, args| {
-        if let Ok(args) = args {
-            args.AcceptedOperation(mailin_winui_sys::DataPackageOperation::Move)?;
-            let _ = args.DragUIOverride().SetIsCaptionVisible(true);
-            let _ = args.DragUIOverride().SetIsContentVisible(true);
-            let _ = args.DragUIOverride().SetIsGlyphVisible(true);
-        }
-        Ok(())
-    }))?;
-    this.folder_events.keep(drop_token);
-    this.folder_events.keep(drag_over_token);
-    // Note: AddDropTarget would be needed, but we use the UIElement approach
-    let ui_element: mailin_winui_sys::UIElement = button.cast()?;
-    let _ = ui_element.AddDropTarget(&drop_target);
+    let flyout_base: mailin_winui_sys::FlyoutBase = flyout.cast()?;
+    let _ = button_element.SetContextFlyout(&flyout_base);
 
     Ok(button)
 }
@@ -4026,13 +3976,7 @@ fn message_row(
     now: i64,
     density: MessageListDensity,
     selected: bool,
-) -> Result<(
-    Grid,
-    Button,
-    CheckBox,
-    Option<StackPanel>,
-    Option<EventRevoker>,
-)> {
+) -> Result<(Grid, Button, CheckBox, Option<StackPanel>)> {
     use MessageListDensity::{Compact, Cozy};
     let seen = message.is_seen();
     let is_thread_root = message.thread_reply_count > 0
@@ -4135,22 +4079,6 @@ fn message_row(
     )?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
 
-    // Drag source: allow dragging messages to folders. The revoker is handed
-    // back to the caller, which keeps it in the row's event set — dropping it
-    // would silently disable drag-and-drop.
-    let msg_id = message.id.0.to_string();
-    let button_element: mailin_winui_sys::UIElement = button.cast()?;
-    let drag_start_token =
-        button_element.DragStarting(&TypedEventHandler::new(move |sender, args| {
-            if let Ok(args) = args {
-                if let Ok(data) = args.Data() {
-                    data.SetText(&msg_id)?;
-                    data.RequestedOperation(mailin_winui_sys::DataPackageOperation::Move)?;
-                }
-            }
-            Ok(())
-        }))?;
-
     // The checkbox is a sibling of the content button rather than its child:
     // ticking a box must not also open the message.
     let checkbox = CheckBox::new().context("could not create a selection checkbox")?;
@@ -4176,13 +4104,7 @@ fn message_row(
     ui::append(&row, &button)?;
     ui::set_column(&actions_bar, 2)?;
     ui::append(&row, &actions_bar)?;
-    Ok((
-        row,
-        button,
-        checkbox,
-        Some(actions_bar),
-        Some(drag_start_token),
-    ))
+    Ok((row, button, checkbox, Some(actions_bar)))
 }
 
 fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {

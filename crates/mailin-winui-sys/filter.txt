@@ -110,7 +110,13 @@ Microsoft.Web.WebView2.Core.ICoreWebView2
 Windows.Foundation.TypedEventHandler
 Microsoft.UI.Xaml.Input.RightTappedRoutedEventArgs
 Microsoft.UI.Xaml.Controls.MenuFlyout
+Microsoft.UI.Xaml.Controls.IMenuFlyout
+Microsoft.UI.Xaml.Controls.IMenuFlyoutFactory
 Microsoft.UI.Xaml.Controls.MenuFlyoutItem
+Microsoft.UI.Xaml.Controls.IMenuFlyoutItem
+Microsoft.UI.Xaml.Controls.IMenuFlyoutItemFactory
+Microsoft.UI.Xaml.Controls.MenuFlyoutItemBase
+Microsoft.UI.Xaml.Controls.IMenuFlyoutItemBase
 Microsoft.UI.Xaml.UIElement
 Microsoft.UI.Xaml.DragEventArgs
 Microsoft.UI.Xaml.DropCompletedEventArgs
@@ -119,6 +125,7 @@ Windows.ApplicationModel.DataTransfer.DataPackageView
 Windows.ApplicationModel.DataTransfer.DataPackageOperation
 Microsoft.UI.Xaml.DragUIOverride
 Microsoft.UI.Xaml.Controls.Primitives.FlyoutBase
+Microsoft.UI.Xaml.Controls.Primitives.IFlyoutBase
 Microsoft.UI.Xaml.Controls.XamlControlsResources
 Microsoft.UI.Xaml.Markup.XamlReader
 Microsoft.UI.Xaml.Markup.IXamlReader
