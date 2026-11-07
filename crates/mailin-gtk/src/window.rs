@@ -5379,8 +5379,8 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {
         error_label.set_ellipsize(pango::EllipsizeMode::End);
         error_label.set_hexpand(true);
         line.append(&error_label);
-    } else {
-        let attempts_label = gtk::Label::new(Some(&format!("attempt {}/5", entry.attempts + 1)));
+    } else if entry.attempts > 0 {
+        let attempts_label = gtk::Label::new(Some(&format!("Attempt {}", entry.attempts + 1)));
         attempts_label.add_css_class("caption");
         attempts_label.add_css_class("dim-label");
         line.append(&attempts_label);
@@ -5406,7 +5406,9 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {
 
     outer.append(&column);
     row.set_child(Some(&outer));
-    row.set_tooltip_text(Some(&format!("ID: {}", entry.id)));
+    let accessible = format!("Queued message, {}, {}", entry.state.as_str(), subject);
+    row.update_property(&[Property::Label(&accessible)]);
+    row.set_tooltip_text(Some(&subject));
     row
 }
 
