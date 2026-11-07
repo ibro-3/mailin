@@ -1019,6 +1019,17 @@ pub fn present(
     };
     refresh_trust();
 
+    fn suffix_icon_button(icon: &str, tooltip: &str, a11y: &str, destructive: bool) -> gtk::Button {
+        let btn = gtk::Button::from_icon_name(icon);
+        btn.add_css_class("flat");
+        if destructive {
+            btn.add_css_class("destructive-action");
+        }
+        btn.set_valign(gtk::Align::Center);
+        btn.set_tooltip_text(Some(tooltip));
+        btn.update_property(&[Property::Label(a11y)]);
+        btn
+    }
     // Templates manager: populate list and handle add/edit/delete
     let refresh_templates: RefreshFn = Rc::new(RefCell::new(None));
     {
@@ -1042,23 +1053,20 @@ pub fn present(
                             .subtitle(&template.subject)
                             .build();
                         row.set_activatable(false);
-                        let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
-                        edit_btn.add_css_class("flat");
-                        edit_btn.set_valign(gtk::Align::Center);
-                        edit_btn.set_tooltip_text(Some("Edit template"));
-                        edit_btn.update_property(&[Property::Label(&format!(
-                            "Edit template {}",
-                            template.name
-                        ))]);
-                        let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
-                        delete_btn.add_css_class("flat");
-                        delete_btn.add_css_class("destructive-action");
-                        delete_btn.set_valign(gtk::Align::Center);
-                        delete_btn.set_tooltip_text(Some("Delete template"));
-                        delete_btn.update_property(&[Property::Label(&format!(
-                            "Delete template {}",
-                            template.name
-                        ))]);
+                        let edit_a11y = format!("Edit template {}", template.name);
+                        let delete_a11y = format!("Delete template {}", template.name);
+                        let edit_btn = suffix_icon_button(
+                            "document-edit-symbolic",
+                            "Edit template",
+                            &edit_a11y,
+                            false,
+                        );
+                        let delete_btn = suffix_icon_button(
+                            "user-trash-symbolic",
+                            "Delete template",
+                            &delete_a11y,
+                            true,
+                        );
                         row.add_suffix(&edit_btn);
                         row.add_suffix(&delete_btn);
 
@@ -1148,23 +1156,20 @@ pub fn present(
                                 .subtitle(&subtitle)
                                 .build();
                             row.set_activatable(false);
-                            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
-                            edit_btn.add_css_class("flat");
-                            edit_btn.set_valign(gtk::Align::Center);
-                            edit_btn.set_tooltip_text(Some("Edit contact"));
-                            edit_btn.update_property(&[Property::Label(&format!(
-                                "Edit contact {}",
-                                contact.email
-                            ))]);
-                            let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
-                            delete_btn.add_css_class("flat");
-                            delete_btn.add_css_class("destructive-action");
-                            delete_btn.set_valign(gtk::Align::Center);
-                            delete_btn.set_tooltip_text(Some("Delete contact"));
-                            delete_btn.update_property(&[Property::Label(&format!(
-                                "Delete contact {}",
-                                contact.email
-                            ))]);
+                            let edit_a11y = format!("Edit contact {}", contact.email);
+                            let delete_a11y = format!("Delete contact {}", contact.email);
+                            let edit_btn = suffix_icon_button(
+                                "document-edit-symbolic",
+                                "Edit contact",
+                                &edit_a11y,
+                                false,
+                            );
+                            let delete_btn = suffix_icon_button(
+                                "user-trash-symbolic",
+                                "Delete contact",
+                                &delete_a11y,
+                                true,
+                            );
                             row.add_suffix(&edit_btn);
                             row.add_suffix(&delete_btn);
 
