@@ -4779,6 +4779,8 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .tooltip_text(tooltip)
         .build();
     button.add_css_class("flat");
+    // M3a-8: maintain a comfortable touch/click target.
+    button.set_size_request(32, 32);
     // Icon-only buttons have no text content, so screen readers have nothing
     // to announce. `Property::Label` is the accessible *name*; the tooltip
     // remains as the accessible *description* (GTK maps tooltip-text to it).
