@@ -202,6 +202,7 @@ pub fn present(
         .tooltip_text("Attach files")
         .build();
     attach.add_css_class("flat");
+    attach.set_size_request(32, 32);
     {
         use gtk::accessible::Property;
         attach.update_property(&[Property::Label("Attach files")]);
@@ -214,6 +215,7 @@ pub fn present(
         .tooltip_text("Message templates")
         .build();
     templates_btn.add_css_class("flat");
+    templates_btn.set_size_request(32, 32);
     {
         use gtk::accessible::Property;
         templates_btn.update_property(&[Property::Label("Message templates")]);
@@ -326,6 +328,7 @@ pub fn present(
         .tooltip_text("Formatting options")
         .build();
     format_btn.add_css_class("flat");
+    format_btn.set_size_request(32, 32);
     {
         use gtk::accessible::Property;
         format_btn.update_property(&[Property::Label("Formatting options")]);
@@ -365,6 +368,11 @@ pub fn present(
             .tooltip_text(label)
             .build();
         btn.add_css_class("flat");
+        btn.set_size_request(32, 32);
+        {
+            use gtk::accessible::Property;
+            btn.update_property(&[Property::Label(label)]);
+        }
         let cmd_str = cmd.to_string();
         let webview_clone = webview.clone();
         btn.connect_clicked(move |_| {
@@ -425,6 +433,7 @@ pub fn present(
         .tooltip_text("Encrypt this message (PGP)")
         .build();
     encrypt_toggle.add_css_class("flat");
+    encrypt_toggle.set_size_request(32, 32);
     {
         use gtk::accessible::Property;
         encrypt_toggle.update_property(&[Property::Label("Encrypt message")]);
@@ -435,6 +444,7 @@ pub fn present(
         .tooltip_text("Sign this message (PGP)")
         .build();
     sign_toggle.add_css_class("flat");
+    sign_toggle.set_size_request(32, 32);
     {
         use gtk::accessible::Property;
         sign_toggle.update_property(&[Property::Label("Sign message")]);
