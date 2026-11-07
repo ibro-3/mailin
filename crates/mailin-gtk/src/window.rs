@@ -1809,6 +1809,9 @@ impl MainWindow {
                 let Ok(folder_id) = folder_str.parse::<i64>() else {
                     return;
                 };
+                if folder_id <= 0 {
+                    return;
+                }
                 let Ok(msg_id) = msg_str.parse::<i64>() else {
                     return;
                 };
@@ -5007,21 +5010,23 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     });
     row.add_controller(key);
 
-    // Accept messages dragged from the list onto this folder row.
-    let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
-    let folder_id = folder.id.0;
-    drop_target.connect_drop(move |target, value, _, _| {
-        let Ok(msg_id) = value.get::<String>() else {
-            return false;
-        };
-        let Some(widget) = target.widget() else {
-            return false;
-        };
-        let param = format!("{folder_id}:{msg_id}");
-        let _ = widget.activate_action("move-messages-to-folder", Some(&param.to_variant()));
-        true
-    });
-    row.add_controller(drop_target);
+    // Accept messages dragged onto real folders only (not virtual/system views).
+    if folder.id.0 > 0 {
+        let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
+        let folder_id = folder.id.0;
+        drop_target.connect_drop(move |target, value, _, _| {
+            let Ok(msg_id) = value.get::<String>() else {
+                return false;
+            };
+            let Some(widget) = target.widget() else {
+                return false;
+            };
+            let param = format!("{folder_id}:{msg_id}");
+            let _ = widget.activate_action("move-messages-to-folder", Some(&param.to_variant()));
+            true
+        });
+        row.add_controller(drop_target);
+    }
 
     row
 }
