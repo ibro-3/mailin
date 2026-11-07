@@ -3274,14 +3274,14 @@ impl MainWindow {
             size_label.add_css_class("caption");
             size_label.add_css_class("dim-label");
             if is_large {
-                size_label.add_css_class("error"); // Red color for large files
+                size_label.add_css_class("warning");
             }
             row.append(&size_label);
         }
 
         if is_large {
             let warning = gtk::Label::new(Some("⚠ Large file"));
-            warning.add_css_class("error");
+            warning.add_css_class("warning");
             warning.set_margin_end(8);
             // Convey the warning text to screen readers (the ⚠ glyph alone is
             // decorative).
