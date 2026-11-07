@@ -1652,6 +1652,7 @@ fn rebuild_attachments(
             .valign(gtk::Align::Center)
             .build();
         remove.add_css_class("flat");
+        remove.set_size_request(32, 32);
         {
             use gtk::accessible::Property;
             let remove_name = format!("Remove attachment {}", attachment.filename);
@@ -1882,8 +1883,9 @@ fn save_as_template_dialog(
     webview: &WebView,
     banner: &adw::Banner,
 ) {
-    let _ = parent;
     let dialog = adw::MessageDialog::builder()
+        .transient_for(parent)
+        .modal(true)
         .heading("Save as template")
         .body("Enter a name for this template. Templates store plain text; formatting and attachments are not saved.")
         .build();
@@ -1938,6 +1940,12 @@ fn save_as_template_dialog(
                     Ok(_) => {
                         banner.set_title("Template saved");
                         banner.set_revealed(true);
+                        let banner_hide = banner.clone();
+                        glib::timeout_add_seconds_local_once(3, move || {
+                            if banner_hide.title().as_str() == "Template saved" {
+                                banner_hide.set_revealed(false);
+                            }
+                        });
                     }
                     Err(e) => {
                         banner.set_title(&format!("Could not save template: {e}"));
@@ -1950,6 +1958,7 @@ fn save_as_template_dialog(
     });
 
     dialog.present();
+    entry.grab_focus();
 }
 
 #[cfg(test)]
