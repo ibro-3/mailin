@@ -5,7 +5,7 @@
 //! channel on the UI thread and refreshes the panes that changed. Widgets are
 //! composed from Rust; there is no XAML compiler in a plain Cargo build.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -166,6 +166,10 @@ pub struct MainWindow {
     /// The row checkboxes, parallel to `State::messages`, used to tick or
     /// untick the whole list at once (Ctrl+A, Escape, bulk actions).
     checkboxes: std::cell::RefCell<Vec<CheckBox>>,
+    /// M3b-1 prep: checkbox lookup by message ID for future incremental reconcile.
+    /// Kept in sync with `checkboxes`/`State::messages` on full rebuilds.
+    /// Runtime incremental apply/scroll/focus preservation: Windows CI.
+    checkboxes_by_id: std::cell::RefCell<HashMap<MessageId, CheckBox>>,
     widgets: Widgets,
 }
 
@@ -903,6 +907,9 @@ impl MainWindow {
                         }
                     }
                 }
+                self.checkboxes_by_id
+                    .borrow_mut()
+                    .insert(id, checkbox.clone());
                 self.checkboxes.borrow_mut().push(checkbox);
                 let _ = ui::append(&self.widgets.message_list, &row);
             }
@@ -978,6 +985,7 @@ impl MainWindow {
         self.message_events.clear();
         let _ = ui::clear(&self.widgets.message_list);
         self.checkboxes.borrow_mut().clear();
+        self.checkboxes_by_id.borrow_mut().clear();
         // The ticked set never outlives the rows that are on screen.
         let visible: BTreeSet<MessageId> = flat_messages.iter().map(|message| message.id).collect();
         let selected = {
@@ -1054,6 +1062,9 @@ impl MainWindow {
                         }
                     }
                 }
+                self.checkboxes_by_id
+                    .borrow_mut()
+                    .insert(message.id, checkbox.clone());
                 self.checkboxes.borrow_mut().push(checkbox);
                 let _ = ui::append(&self.widgets.message_list, &row);
             }
@@ -2200,6 +2211,7 @@ impl MainWindow {
     fn reset_bulk_selection(&self) {
         self.state().selected.clear();
         self.checkboxes.borrow_mut().clear();
+        self.checkboxes_by_id.borrow_mut().clear();
         self.update_bulk_bar();
     }
 
@@ -3359,6 +3371,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         message_events: ui::Revokers::default(),
         attachment_events: ui::Revokers::default(),
         checkboxes: std::cell::RefCell::new(Vec::new()),
+        checkboxes_by_id: std::cell::RefCell::new(HashMap::new()),
         widgets: Widgets {
             window: window.clone(),
             title,
