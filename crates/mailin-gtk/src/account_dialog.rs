@@ -1578,7 +1578,7 @@ fn new_template_dialog(
     let error_label = error_label.clone();
     let refresh = refresh.clone();
     let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let prior_focus = root.as_ref().and_then(gtk::prelude::RootExt::focus);
     let name_c = name_entry.clone();
     let subject_c = subject_entry.clone();
     let body_c = body_view.clone();
@@ -1623,6 +1623,7 @@ fn new_template_dialog(
 }
 
 /// Dialog to edit an existing template.
+#[allow(clippy::too_many_arguments)]
 fn edit_template_dialog(
     parent: &adw::Dialog,
     app: &Rc<AppState>,
@@ -1684,7 +1685,7 @@ fn edit_template_dialog(
     let error_label = error_label.clone();
     let old_name = current_name.to_owned();
     let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let prior_focus = root.as_ref().and_then(gtk::prelude::RootExt::focus);
     let name_c = name_entry.clone();
     let subject_c = subject_entry.clone();
     let body_c = body_view.clone();
@@ -1772,7 +1773,7 @@ fn new_contact_dialog(
     let error_label = error_label.clone();
     let refresh = Rc::clone(&refresh);
     let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let prior_focus = root.as_ref().and_then(gtk::prelude::RootExt::focus);
     let email_c = email_entry.clone();
     let name_c = name_entry.clone();
     dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
@@ -1856,7 +1857,7 @@ fn edit_contact_dialog(
     let refresh = Rc::clone(&refresh);
     let old_email = current_email.to_owned();
     let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
-    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let prior_focus = root.as_ref().and_then(gtk::prelude::RootExt::focus);
     let email_c = email_entry.clone();
     let name_c = name_entry.clone();
     dialog.connect_response(None, move |d: &adw::MessageDialog, response| {

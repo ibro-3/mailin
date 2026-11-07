@@ -871,14 +871,20 @@ fn winui_deref() -> Result<()> {
     let root = repo_root()?;
     let metadata = root.join("target/winui-bindgen/metadata");
     if !metadata.is_dir() {
-        bail!("no metadata in {}: run `cargo xtask winui-bindgen` first", metadata.display());
+        bail!(
+            "no metadata in {}: run `cargo xtask winui-bindgen` first",
+            metadata.display()
+        );
     }
 
     let mut files = Vec::new();
     for entry in fs::read_dir(&metadata).context("could not read the metadata directory")? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|extension| extension == "winmd") {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "winmd")
+        {
             if let Some(file) = File::read(&path) {
                 files.push(file);
             }
@@ -928,13 +934,17 @@ fn winui_deref() -> Result<()> {
     if std::env::var_os("WINUI_DEREF_DEBUG").is_some() {
         for (namespace, name, item) in index.iter_items() {
             let Item::Type(def) = item else { continue };
-            if !matches!(name, "IControl" | "ITextBox" | "IFrameworkElement" | "IUIElement" | "Control" | "Button") {
+            if !matches!(
+                name,
+                "IControl" | "ITextBox" | "IFrameworkElement" | "IUIElement" | "Control" | "Button"
+            ) {
                 continue;
             }
             println!(
                 "{namespace}.{name}: category={:?} extends={:?} impls={:?}",
                 def.category(),
-                def.extends().map(|e| (e.namespace().to_string(), e.name().to_string())),
+                def.extends()
+                    .map(|e| (e.namespace().to_string(), e.name().to_string())),
                 def.interface_impls()
                     .map(|i| i.interface(&[]))
                     .map(|t| format!("{t:?}"))

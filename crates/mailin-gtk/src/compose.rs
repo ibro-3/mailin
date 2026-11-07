@@ -1475,7 +1475,7 @@ pub fn present(
                     }
                     "discard" => {
                         let key = draft_key_c.borrow().clone();
-                        let _ = app_c.engine.discard_draft(account_id, key);
+                        app_c.engine.discard_draft(account_id, key);
                         on_closed_c(false);
                         closed_c.set(true);
                         window_c.close();
