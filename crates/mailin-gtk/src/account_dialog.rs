@@ -995,6 +995,7 @@ pub fn present(
             let remove = gtk::Button::from_icon_name("list-remove-symbolic");
             remove.add_css_class("flat");
             remove.set_valign(gtk::Align::Center);
+            remove.set_size_request(32, 32);
             remove.set_tooltip_text(Some(&format!("Stop trusting {domain}")));
             let remove_name = format!("Stop trusting {domain}");
             remove.update_property(&[Property::Label(&remove_name)]);
@@ -1026,6 +1027,8 @@ pub fn present(
             btn.add_css_class("destructive-action");
         }
         btn.set_valign(gtk::Align::Center);
+        // M3a-8: maintain a comfortable touch/click target.
+        btn.set_size_request(32, 32);
         btn.set_tooltip_text(Some(tooltip));
         btn.update_property(&[Property::Label(a11y)]);
         btn
