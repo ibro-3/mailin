@@ -765,4 +765,14 @@ mod tests {
         assert_eq!(attachment(None).display_name(), "attachment");
         assert_eq!(attachment(Some("   ")).display_name(), "attachment");
     }
+
+    #[test]
+    fn folder_id_virtual_ui_helpers() {
+        assert!(FolderId::UNIFIED_INBOX.is_virtual_ui());
+        assert!(FolderId::UNIFIED_INBOX.is_unified_inbox());
+        assert!(FolderId::OUTBOX.is_virtual_ui());
+        assert!(FolderId::OUTBOX.is_outbox());
+        assert!(!FolderId(42).is_virtual_ui());
+        assert!(!FolderId(42).is_outbox());
+    }
 }

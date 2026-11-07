@@ -571,7 +571,7 @@ impl MainWindow {
         let outbox_len = self.app.mailin.outbox_len().unwrap_or(0);
         if outbox_len > 0 {
             folders.push(Folder {
-                id: FolderId(-1), // Virtual ID for Outbox
+                id: FolderId::OUTBOX, // UI virtual: Outbox
                 account_id,
                 name: "Outbox".to_owned(),
                 delimiter: "/".to_owned(),
@@ -580,6 +580,7 @@ impl MainWindow {
                 uid_next: None,
                 highest_modseq: None,
                 last_synced_at: None,
+                subscribed: true,
                 message_count: outbox_len,
                 unread_count: outbox_len,
             });
@@ -634,7 +635,7 @@ impl MainWindow {
     }
 
     fn select_folder(self: &Rc<Self>, folder: Folder) {
-        let is_outbox = folder.id.0 == -1;
+        let is_outbox = folder.id.is_outbox();
         {
             let mut state = self.state();
             if state.selection.folder == Some(folder.id)

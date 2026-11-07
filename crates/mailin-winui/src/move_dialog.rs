@@ -16,7 +16,7 @@ use crate::ui;
 use crate::window::folder_title;
 
 /// Show the picker attached to `xaml_root`. `exclude` is the folder the
-/// messages are already in; the outbox (`FolderId(-1)`) is never offered.
+/// messages are already in; the outbox (`FolderId::OUTBOX`) is never offered.
 pub fn show(
     xaml_root: &XamlRoot,
     events: &ui::Revokers,
