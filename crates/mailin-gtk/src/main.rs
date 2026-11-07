@@ -4,6 +4,7 @@ mod account_dialog;
 mod app;
 mod autoconfig;
 mod compose;
+mod dialogs;
 mod format;
 mod html;
 mod move_dialog;

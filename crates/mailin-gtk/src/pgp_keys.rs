@@ -80,7 +80,19 @@ pub fn present(parent: &gtk::Window, app: Rc<AppState>, account: AccountId) {
         });
     }
 
+    // M3a-5: initial focus and restore to parent.
+    let prior_focus = gtk::prelude::RootExt::focus(parent);
+    let parent_c = parent.clone();
+    window.connect_close_request(move |_| {
+        if let Some(focus) = prior_focus.clone() {
+            let _ = focus.grab_focus();
+        } else {
+            let _ = parent_c.grab_focus();
+        }
+        gtk::glib::Propagation::Proceed
+    });
     window.present();
+    import.grab_focus();
 }
 
 /// Rebuild the list of keys from the store.

@@ -563,6 +563,9 @@ pub fn present(
     if let Some(account) = existing_account.clone() {
         name_row.set_text(&account.display_name);
         email_row.set_text(&account.email);
+        // M4-F: email identifies the account and cannot be changed in place.
+        email_row.set_sensitive(false);
+        email_row.set_tooltip_text(Some("Email identifies the account and can't be changed."));
         // Password left empty - user can enter new one to change it
 
         signature_buffer
@@ -1360,55 +1363,54 @@ pub fn present(
         }
     });
 
-    // Remove account handler
+    // Remove account handler (M3a-2: shared destructive confirm).
     if let Some(remove) = remove {
         let dialog = dialog.clone();
         let app = Rc::clone(&app);
         let existing = existing_account_for_remove.clone();
-        // Get parent window before the closure to avoid lifetime issues
         let window = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
         remove.connect_clicked(move |_| {
             if let Some(account) = &existing {
-                // Show confirmation dialog
-                let confirm = gtk::AlertDialog::builder()
-                    .message("Remove account?")
-                    .detail(format!(
-                        "Are you sure you want to remove '{}' ({})? This will delete all local data for this account.",
-                        account.display_name, account.email
-                    ))
-                    .build();
-                confirm.set_buttons(&["Cancel", "Remove"]);
-                confirm.set_cancel_button(0);
-                confirm.set_default_button(0);
-
-                // Extract the mailin from app for use in callback
                 let mailin = app.mailin.clone();
-                let dialog = dialog.clone();
-                let account_id = account.id;
-                let window = window.clone();
-
-                // Use choose_future to handle the response asynchronously
-                glib::spawn_future_local(async move {
-                    let response = confirm.choose_future(window.as_ref()).await;
-                    match response {
-                        Ok(1) => { // "Remove" button (index 1)
-                            if let Err(e) = mailin.remove_account(&account_id) {
-                                eprintln!("Failed to remove account: {e}");
-                            } else {
-                                // sync_account is called by the remove_account internally
-                            }
-                            dialog.close();
-                        }
-                        _ => {
-                            // Cancel or other - do nothing
-                        }
-                    }
-                });
+                let dialog_ok = dialog.clone();
+                let dialog_err = dialog.clone();
+                let parent_win = window.clone();
+                crate::dialogs::confirm_remove_account(
+                    parent_win.as_ref(),
+                    mailin,
+                    account,
+                    move || {
+                        dialog_ok.close();
+                    },
+                    move |e| {
+                        let alert = gtk::AlertDialog::builder()
+                            .message("Couldn't remove account")
+                            .detail(e)
+                            .build();
+                        alert.set_buttons(&["OK"]);
+                        alert.set_default_button(0);
+                        let p = dialog_err
+                            .root()
+                            .and_then(|r| r.downcast::<gtk::Window>().ok());
+                        gtk::glib::spawn_future_local(async move {
+                            let _ = alert.choose_future(p.as_ref()).await;
+                        });
+                    },
+                );
             }
         });
     }
 
+    // M3a-5: focus the first identity field.
+    let focus_row = if existing_account.is_some() {
+        name_row.clone()
+    } else {
+        email_row.clone()
+    };
     dialog.present(Some(parent));
+    glib::idle_add_local_once(move || {
+        let _ = focus_row.grab_focus();
+    });
 }
 
 struct FormRows {

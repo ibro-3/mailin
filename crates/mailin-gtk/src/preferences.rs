@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use mailin_core::{Config, MessageListDensity, Paths, Theme, ThreadMode};
+use mailin_core::{Config, MessageListDensity, Paths, QuickAction, Theme, ThreadMode};
 
 use crate::app::{AppState, apply_theme};
 
@@ -43,41 +43,46 @@ pub fn show_preferences(
     // Appearance group
     let appearance_group = adw::PreferencesGroup::builder().title("Appearance").build();
 
-    let theme_combo = gtk::DropDown::from_strings(&["System", "Light", "Dark"]);
-    match config.borrow().ui.theme {
-        Theme::System => theme_combo.set_selected(0),
-        Theme::Light => theme_combo.set_selected(1),
-        Theme::Dark => theme_combo.set_selected(2),
-    }
-    theme_combo.connect_selected_notify({
+    let theme_row = adw::ComboRow::new();
+    theme_row.set_title("Theme");
+    theme_row.set_model(Some(&gtk::StringList::new(&["System", "Light", "Dark"])));
+    theme_row.set_subtitle("Choose the application color scheme");
+    theme_row.set_selected(match config.borrow().ui.theme {
+        Theme::System => 0,
+        Theme::Light => 1,
+        Theme::Dark => 2,
+    });
+    theme_row.connect_selected_notify({
         let config = Rc::clone(&config);
-        move |combo| {
-            let theme = match combo.selected() {
+        move |row| {
+            let theme = match row.selected() {
                 1 => Theme::Light,
                 2 => Theme::Dark,
                 _ => Theme::System,
             };
             config.borrow_mut().ui.theme = theme;
+            apply_theme(theme);
         }
     });
-
-    let theme_row = adw::ActionRow::builder()
-        .title("Theme")
-        .subtitle("Choose the application color scheme")
-        .build();
-    theme_row.add_suffix(&theme_combo);
     appearance_group.add(&theme_row);
 
-    let density_combo = gtk::DropDown::from_strings(&["Comfortable", "Cozy", "Compact"]);
-    density_combo.set_selected(match config.borrow().ui.message_list_density {
+    let density_row = adw::ComboRow::new();
+    density_row.set_title("Message list density");
+    density_row.set_model(Some(&gtk::StringList::new(&[
+        "Comfortable",
+        "Cozy",
+        "Compact",
+    ])));
+    density_row.set_subtitle("Row spacing and preview lines in the message list");
+    density_row.set_selected(match config.borrow().ui.message_list_density {
         MessageListDensity::Comfortable => 0,
         MessageListDensity::Cozy => 1,
         MessageListDensity::Compact => 2,
     });
-    density_combo.connect_selected_notify({
+    density_row.connect_selected_notify({
         let config = Rc::clone(&config);
-        move |combo| {
-            let density = match combo.selected() {
+        move |row| {
+            let density = match row.selected() {
                 1 => MessageListDensity::Cozy,
                 2 => MessageListDensity::Compact,
                 _ => MessageListDensity::Comfortable,
@@ -85,26 +90,25 @@ pub fn show_preferences(
             config.borrow_mut().ui.message_list_density = density;
         }
     });
-
-    let density_row = adw::ActionRow::builder()
-        .title("Message list density")
-        .subtitle("Row spacing and preview lines in the message list")
-        .build();
-    density_row.add_suffix(&density_combo);
     appearance_group.add(&density_row);
 
-    // Thread mode
-    let thread_mode_combo =
-        gtk::DropDown::from_strings(&["Off (flat list)", "Flat (grouped)", "Nested"]);
-    thread_mode_combo.set_selected(match config.borrow().ui.thread_mode {
+    let thread_row = adw::ComboRow::new();
+    thread_row.set_title("Conversation view");
+    thread_row.set_model(Some(&gtk::StringList::new(&[
+        "Off (flat list)",
+        "Flat (grouped)",
+        "Nested",
+    ])));
+    thread_row.set_subtitle("Group messages by thread");
+    thread_row.set_selected(match config.borrow().ui.thread_mode {
         ThreadMode::Off => 0,
         ThreadMode::Flat => 1,
         ThreadMode::Nested => 2,
     });
-    thread_mode_combo.connect_selected_notify({
+    thread_row.connect_selected_notify({
         let config = Rc::clone(&config);
-        move |combo| {
-            let mode = match combo.selected() {
+        move |row| {
+            let mode = match row.selected() {
                 1 => ThreadMode::Flat,
                 2 => ThreadMode::Nested,
                 _ => ThreadMode::Off,
@@ -112,92 +116,160 @@ pub fn show_preferences(
             config.borrow_mut().ui.thread_mode = mode;
         }
     });
-    let thread_mode_row = adw::ActionRow::builder()
-        .title("Conversation view")
-        .subtitle("Group messages by thread")
+    appearance_group.add(&thread_row);
+
+    let restore_appearance = gtk::Button::builder()
+        .label("Restore defaults")
+        .valign(gtk::Align::Center)
         .build();
-    thread_mode_row.add_suffix(&thread_mode_combo);
-    appearance_group.add(&thread_mode_row);
+    restore_appearance.add_css_class("flat");
+    restore_appearance.connect_clicked({
+        let config = Rc::clone(&config);
+        let theme_row = theme_row.clone();
+        let density_row = density_row.clone();
+        let thread_row = thread_row.clone();
+        move |_| {
+            let defaults = Config::default();
+            {
+                let mut cfg = config.borrow_mut();
+                cfg.ui.theme = defaults.ui.theme;
+                cfg.ui.message_list_density = defaults.ui.message_list_density;
+                cfg.ui.thread_mode = defaults.ui.thread_mode;
+            }
+            theme_row.set_selected(0);
+            density_row.set_selected(0);
+            thread_row.set_selected(0);
+            apply_theme(Theme::System);
+        }
+    });
+    appearance_group.set_header_suffix(Some(&restore_appearance));
 
     general_page.add(&appearance_group);
 
     // Messages group
     let messages_group = adw::PreferencesGroup::builder().title("Messages").build();
 
-    let html_switch = gtk::Switch::builder()
-        .active(config.borrow().ui.html_enabled)
-        .build();
-    html_switch.connect_state_set({
+    let html_row = adw::SwitchRow::new();
+    html_row.set_title("Render HTML messages");
+    html_row.set_subtitle("Display HTML formatting when available");
+    html_row.set_active(config.borrow().ui.html_enabled);
+    html_row.connect_active_notify({
         let config = Rc::clone(&config);
-        move |_, state| {
-            config.borrow_mut().ui.html_enabled = state;
-            gtk::glib::Propagation::Stop
-        }
+        move |row| config.borrow_mut().ui.html_enabled = row.is_active()
     });
-    let html_row = adw::ActionRow::builder()
-        .title("Render HTML messages")
-        .subtitle("Display HTML formatting when available")
-        .build();
-    html_row.add_suffix(&html_switch);
     messages_group.add(&html_row);
 
-    let remote_content_switch = gtk::Switch::builder()
-        .active(config.borrow().ui.remote_content_enabled)
-        .build();
-    remote_content_switch.connect_state_set({
+    let remote_row = adw::SwitchRow::new();
+    remote_row.set_title("Load remote content");
+    remote_row
+        .set_subtitle("Allow images and resources from the network (can be overridden per sender)");
+    remote_row.set_active(config.borrow().ui.remote_content_enabled);
+    remote_row.connect_active_notify({
         let config = Rc::clone(&config);
-        move |_, state| {
-            config.borrow_mut().ui.remote_content_enabled = state;
-            gtk::glib::Propagation::Stop
-        }
+        move |row| config.borrow_mut().ui.remote_content_enabled = row.is_active()
     });
-    let remote_content_row = adw::ActionRow::builder()
-        .title("Load remote content")
-        .subtitle("Allow images and resources from the network (can be overridden per-sender)")
-        .build();
-    remote_content_row.add_suffix(&remote_content_switch);
-    messages_group.add(&remote_content_row);
+    messages_group.add(&remote_row);
 
-    let page_size_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().ui.page_size as f64,
-            1.0,
-            1000.0,
-            1.0,
-            10.0,
-            0.0,
-        ))
-        .numeric(true)
-        .build();
-    page_size_spin.connect_value_changed({
+    let page_size_row = adw::SpinRow::with_range(1.0, 1000.0, 1.0);
+    page_size_row.set_title("Messages per page");
+    page_size_row.set_subtitle("Number of messages loaded at once");
+    page_size_row.set_value(config.borrow().ui.page_size as f64);
+    page_size_row.connect_notify_local(Some("value"), {
         let config = Rc::clone(&config);
-        move |spin| {
-            config.borrow_mut().ui.page_size = spin.value() as u32;
-        }
+        move |row, _| config.borrow_mut().ui.page_size = row.value() as u32
     });
-    let page_size_row = adw::ActionRow::builder()
-        .title("Messages per page")
-        .subtitle("Number of messages loaded at once")
-        .build();
-    page_size_row.add_suffix(&page_size_spin);
     messages_group.add(&page_size_row);
 
-    let mark_read_switch = gtk::Switch::builder()
-        .active(config.borrow().ui.mark_read_on_open)
-        .build();
-    mark_read_switch.connect_state_set({
+    let mark_read_row = adw::SwitchRow::new();
+    mark_read_row.set_title("Mark as read on open");
+    mark_read_row.set_subtitle("Automatically mark messages read when opened");
+    mark_read_row.set_active(config.borrow().ui.mark_read_on_open);
+    mark_read_row.connect_active_notify({
         let config = Rc::clone(&config);
-        move |_, state| {
-            config.borrow_mut().ui.mark_read_on_open = state;
-            gtk::glib::Propagation::Stop
+        move |row| config.borrow_mut().ui.mark_read_on_open = row.is_active()
+    });
+    messages_group.add(&mark_read_row);
+
+    let quick_actions_row = adw::SwitchRow::new();
+    quick_actions_row.set_title("Quick actions");
+    quick_actions_row.set_subtitle("Show row actions for archive, delete, flag, and read state");
+    quick_actions_row.set_active(config.borrow().ui.quick_actions);
+    quick_actions_row.connect_active_notify({
+        let config = Rc::clone(&config);
+        move |row| config.borrow_mut().ui.quick_actions = row.is_active()
+    });
+    messages_group.add(&quick_actions_row);
+
+    let quick_item_rows: Rc<RefCell<Vec<(QuickAction, adw::SwitchRow)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
+    let restore_messages = gtk::Button::builder()
+        .label("Restore defaults")
+        .valign(gtk::Align::Center)
+        .build();
+    restore_messages.add_css_class("flat");
+    restore_messages.connect_clicked({
+        let config = Rc::clone(&config);
+        let html_row = html_row.clone();
+        let remote_row = remote_row.clone();
+        let page_size_row = page_size_row.clone();
+        let mark_read_row = mark_read_row.clone();
+        let quick_actions_row = quick_actions_row.clone();
+        let quick_item_rows = Rc::clone(&quick_item_rows);
+        move |_| {
+            let defaults = Config::default();
+            {
+                let mut cfg = config.borrow_mut();
+                cfg.ui.html_enabled = defaults.ui.html_enabled;
+                cfg.ui.remote_content_enabled = defaults.ui.remote_content_enabled;
+                cfg.ui.page_size = defaults.ui.page_size;
+                cfg.ui.mark_read_on_open = defaults.ui.mark_read_on_open;
+                cfg.ui.quick_actions = defaults.ui.quick_actions;
+                cfg.ui.quick_action_items = defaults.ui.quick_action_items.clone();
+            }
+            html_row.set_active(defaults.ui.html_enabled);
+            remote_row.set_active(defaults.ui.remote_content_enabled);
+            page_size_row.set_value(defaults.ui.page_size as f64);
+            mark_read_row.set_active(defaults.ui.mark_read_on_open);
+            quick_actions_row.set_active(defaults.ui.quick_actions);
+            for (action, row) in quick_item_rows.borrow().iter() {
+                row.set_active(defaults.ui.quick_action_items.contains(action));
+            }
         }
     });
-    let mark_read_row = adw::ActionRow::builder()
-        .title("Mark as read on open")
-        .subtitle("Automatically mark messages read when opened")
-        .build();
-    mark_read_row.add_suffix(&mark_read_switch);
-    messages_group.add(&mark_read_row);
+    messages_group.set_header_suffix(Some(&restore_messages));
+
+    // Per-item quick-action toggles (M3a-6).
+    let quick_item_defs = [
+        (QuickAction::Archive, "Quick action: Archive"),
+        (QuickAction::Delete, "Quick action: Delete"),
+        (QuickAction::Flag, "Quick action: Flag"),
+        (QuickAction::MarkRead, "Quick action: Mark read"),
+        (QuickAction::MarkUnread, "Quick action: Mark unread"),
+        (QuickAction::Junk, "Quick action: Mark as junk"),
+    ];
+    let quick_item_rows: Rc<RefCell<Vec<(QuickAction, adw::SwitchRow)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+    for (action, title) in quick_item_defs {
+        let row = adw::SwitchRow::new();
+        row.set_title(title);
+        row.set_active(config.borrow().ui.quick_action_items.contains(&action));
+        row.connect_active_notify({
+            let config = Rc::clone(&config);
+            move |row| {
+                let mut cfg = config.borrow_mut();
+                if row.is_active() {
+                    if !cfg.ui.quick_action_items.contains(&action) {
+                        cfg.ui.quick_action_items.push(action);
+                    }
+                } else {
+                    cfg.ui.quick_action_items.retain(|item| item != &action);
+                }
+            }
+        });
+        messages_group.add(&row);
+        quick_item_rows.borrow_mut().push((action, row));
+    }
 
     general_page.add(&messages_group);
 
@@ -206,22 +278,30 @@ pub fn show_preferences(
         .title("Notifications")
         .build();
 
-    let notifications_switch = gtk::Switch::builder()
-        .active(config.borrow().ui.notifications)
-        .build();
-    notifications_switch.connect_state_set({
+    let notifications_row = adw::SwitchRow::new();
+    notifications_row.set_title("Show new mail notifications");
+    notifications_row.set_subtitle("Display desktop notifications for new messages");
+    notifications_row.set_active(config.borrow().ui.notifications);
+    notifications_row.connect_active_notify({
         let config = Rc::clone(&config);
-        move |_, state| {
-            config.borrow_mut().ui.notifications = state;
-            gtk::glib::Propagation::Stop
+        move |row| config.borrow_mut().ui.notifications = row.is_active()
+    });
+    notifications_group.add(&notifications_row);
+    let restore_notifications = gtk::Button::builder()
+        .label("Restore defaults")
+        .valign(gtk::Align::Center)
+        .build();
+    restore_notifications.add_css_class("flat");
+    restore_notifications.connect_clicked({
+        let config = Rc::clone(&config);
+        let notifications_row = notifications_row.clone();
+        move |_| {
+            let defaults = Config::default();
+            config.borrow_mut().ui.notifications = defaults.ui.notifications;
+            notifications_row.set_active(defaults.ui.notifications);
         }
     });
-    let notifications_row = adw::ActionRow::builder()
-        .title("Show new mail notifications")
-        .subtitle("Display desktop notifications for new messages")
-        .build();
-    notifications_row.add_suffix(&notifications_switch);
-    notifications_group.add(&notifications_row);
+    notifications_group.set_header_suffix(Some(&restore_notifications));
 
     general_page.add(&notifications_group);
 
@@ -235,53 +315,44 @@ pub fn show_preferences(
     // Polling group
     let polling_group = adw::PreferencesGroup::builder().title("Polling").build();
 
-    let poll_interval_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().sync.poll_interval_secs as f64,
-            15.0,
-            1800.0,
-            1.0,
-            60.0,
-            0.0,
-        ))
-        .numeric(true)
-        .build();
-    poll_interval_spin.connect_value_changed({
+    let poll_row = adw::SpinRow::with_range(15.0, 1800.0, 1.0);
+    poll_row.set_title("Poll interval");
+    poll_row.set_subtitle("Seconds between automatic folder checks (when IDLE is unavailable)");
+    poll_row.set_value(config.borrow().sync.poll_interval_secs as f64);
+    poll_row.connect_notify_local(Some("value"), {
         let config = Rc::clone(&config);
-        move |spin| {
-            config.borrow_mut().sync.poll_interval_secs = spin.value() as u64;
-        }
+        move |row, _| config.borrow_mut().sync.poll_interval_secs = row.value() as u64
     });
-    let poll_interval_row = adw::ActionRow::builder()
-        .title("Poll interval")
-        .subtitle("Seconds between automatic folder checks (when IDLE is unavailable)")
-        .build();
-    poll_interval_row.add_suffix(&poll_interval_spin);
-    polling_group.add(&poll_interval_row);
+    polling_group.add(&poll_row);
 
-    let max_parallel_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().sync.max_parallel_accounts as f64,
-            1.0,
-            16.0,
-            1.0,
-            1.0,
-            0.0,
-        ))
-        .numeric(true)
-        .build();
-    max_parallel_spin.connect_value_changed({
+    let parallel_row = adw::SpinRow::with_range(1.0, 16.0, 1.0);
+    parallel_row.set_title("Parallel accounts");
+    parallel_row.set_subtitle("Maximum number of accounts to sync simultaneously");
+    parallel_row.set_value(config.borrow().sync.max_parallel_accounts as f64);
+    parallel_row.connect_notify_local(Some("value"), {
         let config = Rc::clone(&config);
-        move |spin| {
-            config.borrow_mut().sync.max_parallel_accounts = spin.value() as u8;
+        move |row, _| config.borrow_mut().sync.max_parallel_accounts = row.value() as u8
+    });
+    polling_group.add(&parallel_row);
+
+    let restore_polling = gtk::Button::builder()
+        .label("Restore defaults")
+        .valign(gtk::Align::Center)
+        .build();
+    restore_polling.add_css_class("flat");
+    restore_polling.connect_clicked({
+        let config = Rc::clone(&config);
+        let poll_row = poll_row.clone();
+        let parallel_row = parallel_row.clone();
+        move |_| {
+            let defaults = Config::default();
+            config.borrow_mut().sync.poll_interval_secs = defaults.sync.poll_interval_secs;
+            config.borrow_mut().sync.max_parallel_accounts = defaults.sync.max_parallel_accounts;
+            poll_row.set_value(defaults.sync.poll_interval_secs as f64);
+            parallel_row.set_value(defaults.sync.max_parallel_accounts as f64);
         }
     });
-    let max_parallel_row = adw::ActionRow::builder()
-        .title("Parallel accounts")
-        .subtitle("Maximum number of accounts to sync simultaneously")
-        .build();
-    max_parallel_row.add_suffix(&max_parallel_spin);
-    polling_group.add(&max_parallel_row);
+    polling_group.set_header_suffix(Some(&restore_polling));
 
     sync_page.add(&polling_group);
 
@@ -290,80 +361,87 @@ pub fn show_preferences(
         .title("Message Bodies")
         .build();
 
-    let body_sync_combo =
-        gtk::DropDown::from_strings(&["On demand (when opened)", "Eager (background)"]);
-    match config.borrow().sync.body_sync {
-        mailin_core::config::BodySyncPolicy::OnOpen => body_sync_combo.set_selected(0),
-        mailin_core::config::BodySyncPolicy::Eager => body_sync_combo.set_selected(1),
-    }
-    body_sync_combo.connect_selected_notify({
+    let body_row = adw::ComboRow::new();
+    body_row.set_title("Body fetching");
+    body_row.set_model(Some(&gtk::StringList::new(&[
+        "On demand (when opened)",
+        "Eager (background)",
+    ])));
+    body_row.set_subtitle("When to download message bodies");
+    body_row.set_selected(match config.borrow().sync.body_sync {
+        mailin_core::config::BodySyncPolicy::OnOpen => 0,
+        mailin_core::config::BodySyncPolicy::Eager => 1,
+    });
+    body_row.connect_selected_notify({
         let config = Rc::clone(&config);
-        move |combo| {
-            let policy = if combo.selected() == 1 {
+        move |row| {
+            config.borrow_mut().sync.body_sync = if row.selected() == 1 {
                 mailin_core::config::BodySyncPolicy::Eager
             } else {
                 mailin_core::config::BodySyncPolicy::OnOpen
             };
-            config.borrow_mut().sync.body_sync = policy;
         }
     });
-
-    let body_sync_row = adw::ActionRow::builder()
-        .title("Body fetching")
-        .subtitle("When to download message bodies")
+    body_group.add(&body_row);
+    let restore_body = gtk::Button::builder()
+        .label("Restore defaults")
+        .valign(gtk::Align::Center)
         .build();
-    body_sync_row.add_suffix(&body_sync_combo);
-    body_group.add(&body_sync_row);
+    restore_body.add_css_class("flat");
+    restore_body.connect_clicked({
+        let config = Rc::clone(&config);
+        let body_row = body_row.clone();
+        move |_| {
+            let defaults = Config::default();
+            config.borrow_mut().sync.body_sync = defaults.sync.body_sync;
+            body_row.set_selected(0);
+        }
+    });
+    body_group.set_header_suffix(Some(&restore_body));
 
     sync_page.add(&body_group);
 
     // Retention group
     let retention_group = adw::PreferencesGroup::builder().title("Retention").build();
 
-    let retention_spin = gtk::SpinButton::builder()
-        .adjustment(&gtk::Adjustment::new(
-            config.borrow().sync.retention_days as f64,
-            0.0,
-            3650.0,
-            1.0,
-            30.0,
-            0.0,
-        ))
-        .numeric(true)
-        .build();
-    retention_spin.connect_value_changed({
+    let retention_row = adw::SpinRow::with_range(0.0, 3650.0, 1.0);
+    retention_row.set_title("Keep messages for");
+    retention_row.set_subtitle("Days to retain message headers (0 = forever)");
+    retention_row.set_value(config.borrow().sync.retention_days as f64);
+    retention_row.connect_notify_local(Some("value"), {
         let config = Rc::clone(&config);
-        move |spin| {
-            config.borrow_mut().sync.retention_days = spin.value() as u32;
+        move |row, _| config.borrow_mut().sync.retention_days = row.value() as u32
+    });
+    retention_group.add(&retention_row);
+    let restore_retention = gtk::Button::builder()
+        .label("Restore defaults")
+        .valign(gtk::Align::Center)
+        .build();
+    restore_retention.add_css_class("flat");
+    restore_retention.connect_clicked({
+        let config = Rc::clone(&config);
+        let retention_row = retention_row.clone();
+        move |_| {
+            let defaults = Config::default();
+            config.borrow_mut().sync.retention_days = defaults.sync.retention_days;
+            retention_row.set_value(defaults.sync.retention_days as f64);
         }
     });
-    let retention_row = adw::ActionRow::builder()
-        .title("Keep messages for")
-        .subtitle("Days to retain message headers (0 = forever)")
-        .build();
-    retention_row.add_suffix(&retention_spin);
-    retention_group.add(&retention_row);
+    retention_group.set_header_suffix(Some(&restore_retention));
 
     sync_page.add(&retention_group);
 
     dialog.add(&sync_page);
 
-    // Accounts page
+    // Accounts page (M3a-6: removed dead-end row; point to the main window).
     let accounts_page = adw::PreferencesPage::new();
     accounts_page.set_title("Accounts");
     accounts_page.set_icon_name(Some("mail-account-symbolic"));
 
     let account_group = adw::PreferencesGroup::builder()
         .title("Per-Account Settings")
-        .description("Account-specific settings like signatures and remote content trust are managed in the account settings dialog.")
+        .description("Account-specific settings (signatures, trusted senders, templates, contacts) are managed in the main window’s account menu. OpenPGP keys are managed on the Encryption page.")
         .build();
-
-    let account_row = adw::ActionRow::builder()
-        .title("Account settings")
-        .subtitle("Open account settings to configure per-account options")
-        .build();
-    account_group.add(&account_row);
-
     accounts_page.add(&account_group);
     dialog.add(&accounts_page);
 
@@ -437,7 +515,6 @@ pub fn show_preferences(
         )
         .build();
 
-    // Load plugins asynchronously and populate the group
     let app_for_plugins = Rc::clone(app);
     let group_for_plugins = plugins_group.clone();
     gtk::glib::spawn_future_local(async move {
@@ -489,8 +566,6 @@ pub fn show_preferences(
         move |_| match apply_config(&config, &paths, &app) {
             Ok(()) => on_saved(),
             Err(message) => {
-                // Never fail silently: keep the problem visible even though
-                // the preferences dialog is already closed.
                 let alert = gtk::AlertDialog::builder()
                     .message("Couldn't save preferences")
                     .detail(&message)

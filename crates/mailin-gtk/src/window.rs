@@ -204,7 +204,7 @@ pub fn handle_mailto_draft() {
     match window {
         Some(window) => {
             window.present();
-            window.open_compose_with_draft(draft);
+            window.open_compose(draft);
         }
         None => {
             // No window yet; leave it for MainWindow::new to consume.
@@ -414,10 +414,27 @@ impl MainWindow {
         folder_stack.add_named(&folder_empty, Some("empty"));
         folder_stack.set_visible_child_name("empty");
 
+        let folders_label = gtk::Label::builder()
+            .label("Folders")
+            .xalign(0.0)
+            .hexpand(true)
+            .build();
+        folders_label.add_css_class("heading");
+        let new_folder_button = icon_button("list-add-symbolic", "New folder (Ctrl+Shift+N)");
+        new_folder_button.set_action_name(Some("win.new-folder"));
+        let folders_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        folders_header.set_margin_top(8);
+        folders_header.set_margin_bottom(4);
+        folders_header.set_margin_start(12);
+        folders_header.set_margin_end(12);
+        folders_header.append(&folders_label);
+        folders_header.append(&new_folder_button);
+
         let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
         sidebar.set_width_request(250);
         sidebar.append(&account_bar);
         sidebar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        sidebar.append(&folders_header);
         sidebar.append(&folder_stack);
 
         // ------------------------------------------------------ message list
@@ -841,7 +858,7 @@ impl MainWindow {
 
         // Check for a mailto: draft that was set before window creation
         if let Some(draft) = take_mailto_draft() {
-            this.open_compose_with_draft(draft);
+            this.open_compose(draft);
         }
         if take_compose_requested() {
             this.open_compose_new();
@@ -875,8 +892,8 @@ impl MainWindow {
         key_controller.connect_key_pressed({
             let shortcuts = shortcuts.clone();
             move |_, keyval, _, state| {
-                if keyval == Key::F1
-                    || (keyval == Key::question && state.contains(ModifierType::CONTROL_MASK))
+                let ctrl = state.contains(ModifierType::CONTROL_MASK);
+                if keyval == Key::F1 || (ctrl && (keyval == Key::question || keyval == Key::slash))
                 {
                     shortcuts.set_visible(true);
                     shortcuts.present();
@@ -888,10 +905,8 @@ impl MainWindow {
         });
         this.widgets.window.add_controller(key_controller);
 
-        // Responsive layout update. `GtkWindow` has no resize signal, so a
-        // lightweight poll compares the allocated width and only rebuilds
-        // when it actually changed. All breakpoint logic lives in one place
-        // so the initial pass and the poll can never drift apart.
+        // Responsive layout update via AdwBreakpoint (M3a-2): event-driven at
+        // boundary crossings, no polling. Logic is identical for all modes.
         let apply_breakpoints = {
             let this = Rc::clone(this);
             move |width: f64| {
@@ -904,24 +919,18 @@ impl MainWindow {
                 selection.is_mobile = is_mobile;
                 drop(selection);
 
-                // Update hamburger button visibility
                 this.widgets
                     .hamburger_button
                     .set_visible(is_mobile || is_tablet);
 
-                // The overflow menu is the app menu (Preferences, shortcuts,
-                // About); it is always visible, while the search controls
-                // collapse into it below the desktop width.
                 this.widgets.scope_button.set_visible(is_desktop);
                 this.widgets.history_button.set_visible(is_desktop);
                 this.widgets.overflow_button.set_visible(true);
 
                 if is_mobile {
-                    // Mobile: collapse sidebar and use navigation stack
                     this.widgets.split.set_collapsed(true);
                     this.widgets.split.set_show_sidebar(false);
                 } else {
-                    // Tablet: narrow sidebar; Desktop: full layout
                     this.widgets.split.set_collapsed(false);
                     this.widgets.split.set_show_sidebar(true);
                     if is_tablet {
@@ -931,7 +940,6 @@ impl MainWindow {
                         this.widgets.split.set_min_sidebar_width(220.0);
                         this.widgets.split.set_max_sidebar_width(320.0);
                     }
-                    // Desktop widths always show the list side by side.
                     this.reset_mobile_nav();
                 }
             }
@@ -949,20 +957,33 @@ impl MainWindow {
             }
         };
 
-        // Call it once initially, then on width changes.
         apply_breakpoints(current_width());
-        {
-            let last_width = Cell::new(0.0f64);
+        let on_breakpoint = {
             let apply_breakpoints = apply_breakpoints.clone();
             let current_width = current_width.clone();
-            glib::timeout_add_local(Duration::from_millis(200), move || {
-                let width = current_width();
-                if (width - last_width.get()).abs() > 1.0 {
-                    last_width.set(width);
-                    apply_breakpoints(width);
-                }
-                glib::ControlFlow::Continue
-            });
+            Rc::new(move || apply_breakpoints(current_width()))
+        };
+        if let Ok(cond) = adw::BreakpointCondition::parse(&format!(
+            "max-width: {}px",
+            BREAKPOINT_MOBILE as i32 - 1
+        )) {
+            let bp = adw::Breakpoint::new(cond);
+            let f = Rc::clone(&on_breakpoint);
+            bp.connect_apply(move |_| f());
+            let f = Rc::clone(&on_breakpoint);
+            bp.connect_unapply(move |_| f());
+            this.widgets.window.add_breakpoint(bp);
+        }
+        if let Ok(cond) = adw::BreakpointCondition::parse(&format!(
+            "max-width: {}px",
+            BREAKPOINT_TABLET as i32 - 1
+        )) {
+            let bp = adw::Breakpoint::new(cond);
+            let f = Rc::clone(&on_breakpoint);
+            bp.connect_apply(move |_| f());
+            let f = Rc::clone(&on_breakpoint);
+            bp.connect_unapply(move |_| f());
+            this.widgets.window.add_breakpoint(bp);
         }
 
         // Account menu (edit/remove)
@@ -1382,7 +1403,7 @@ impl MainWindow {
         this.widgets.compose_button.connect_clicked({
             let this = Rc::clone(this);
             move |_| {
-                let _ = Self::open_compose(&this, this.new_draft());
+                let _ = this.open_compose(this.new_draft());
             }
         });
 
@@ -1591,7 +1612,6 @@ impl MainWindow {
                         .title(&entry.query)
                         .subtitle(format!("{} ago", format::list_time(now, entry.timestamp)))
                         .build();
-                    row.add_css_class("search-history-row");
                     row.connect_activated({
                         let this = Rc::clone(&this);
                         let query = entry.query.clone();
@@ -1710,28 +1730,16 @@ impl MainWindow {
         this.widgets.window.add_action(&move_action);
 
         if let Some(application) = this.widgets.window.application() {
-            application.set_accels_for_action("win.search", &["<Control>f"]);
-            application.set_accels_for_action("win.find-message", &["F3"]);
-            application.set_accels_for_action("win.sync", &["F5"]);
-            application.set_accels_for_action("win.add-account", &["<Control><Shift>a"]);
-            application.set_accels_for_action("win.compose", &["<Control>n"]);
-            application.set_accels_for_action("win.reply", &["<Control>r"]);
-            application.set_accels_for_action("win.reply-all", &["<Control><Shift>r"]);
-            application.set_accels_for_action("win.forward", &["<Control><Shift>f"]);
-            application.set_accels_for_action("win.preferences", &["<Control>comma"]);
-            application.set_accels_for_action("win.archive", &["<Control><Shift>e"]);
-            application.set_accels_for_action("win.delete", &["Delete"]);
-            application.set_accels_for_action("win.delete-permanent", &["<Control>Delete"]);
-            application.set_accels_for_action("win.junk", &["<Control><Shift>j"]);
-            application.set_accels_for_action("win.not-junk", &["<Control><Shift>k"]);
-            application.set_accels_for_action("win.move", &["<Control>m"]);
+            for (action, accels) in WINDOW_ACTION_ACCELS {
+                application.set_accels_for_action(action, accels);
+            }
         }
 
         let compose_action = gio::SimpleAction::new("compose", None);
         compose_action.connect_activate({
             let this = Rc::clone(this);
             move |_, _| {
-                let _ = Self::open_compose(&this, this.new_draft());
+                let _ = this.open_compose(this.new_draft());
             }
         });
         this.widgets.window.add_action(&compose_action);
@@ -2645,7 +2653,7 @@ impl MainWindow {
                 .flatten()
                 .and_then(|(text, _)| text);
             let draft = mailin_core::compose::draft_from_header(message, body.as_deref());
-            if let Some(window) = Self::open_compose(self, draft) {
+            if let Some(window) = self.open_compose(draft) {
                 *self.last_draft.borrow_mut() = Some((message.id, window));
             }
             return;
@@ -3529,9 +3537,15 @@ impl MainWindow {
         confirm.set_cancel_button(0);
         confirm.set_default_button(0);
         let window = self.widgets.window.clone();
+        let prior_focus = gtk::prelude::RootExt::focus(&window);
         glib::spawn_future_local(async move {
-            if let Ok(1) = confirm.choose_future(Some(&window)).await {
+            let confirmed = matches!(confirm.choose_future(Some(&window)).await, Ok(1));
+            if confirmed {
                 run();
+            }
+            // M3a-5: restore focus to the invoking control when possible.
+            if let Some(focus) = prior_focus {
+                let _ = focus.grab_focus();
             }
         });
     }
@@ -3642,6 +3656,12 @@ impl MainWindow {
     }
 
     fn delete_selected(&self, permanent: bool) {
+        // Bare Delete is scoped away from text entry: avoid trashing mail
+        // while the user is typing in search (M3a-3). Button/menu activation
+        // remains intentional even if focus moved.
+        if !permanent && self.widgets.search.has_focus() {
+            return;
+        }
         let ids = self.selected_message_ids();
         if ids.is_empty() {
             return;
@@ -3787,7 +3807,7 @@ impl MainWindow {
                 }
                 // Need to mark the original entry as cancelled so it doesn't get sent again
                 this.app.engine.cancel_outbox(account_id, id);
-                let _ = Self::open_compose(this, draft);
+                let _ = this.open_compose(draft);
             }
         }
     }
@@ -3898,7 +3918,7 @@ impl MainWindow {
         } else {
             compose::reply(&account, &message, body.as_deref())
         };
-        let _ = Self::open_compose(this, draft);
+        let _ = this.open_compose(draft);
     }
 
     fn compose_forward(this: &Rc<Self>) {
@@ -3920,7 +3940,7 @@ impl MainWindow {
             .and_then(|(text, _)| text)
             .or_else(|| message.snippet.clone());
         let draft = compose::forward(&account, &message, body.as_deref());
-        let _ = Self::open_compose(this, draft);
+        let _ = this.open_compose(draft);
     }
 
     /// Draft for a brand-new message: an empty body that already carries the
@@ -3940,22 +3960,23 @@ impl MainWindow {
     }
 
     pub fn open_compose_new(&self) {
-        let _ = Self::open_compose(self, self.new_draft());
+        let _ = self.open_compose(self.new_draft());
     }
 
-    fn open_compose(this: &Self, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
-        let Some(account_id) = this.selection.borrow().account else {
-            this.widgets
+    /// Open a compose window with `draft` (also used for mailto: links).
+    pub fn open_compose(&self, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
+        let Some(account_id) = self.selection.borrow().account else {
+            self.widgets
                 .toast
                 .add_toast(adw::Toast::new("Add an account before composing mail"));
             return None;
         };
-        let parent = this.widgets.window.clone().upcast::<gtk::Window>();
-        let toast = this.widgets.toast.clone();
-        let toast_for_close = this.widgets.toast.clone();
+        let parent = self.widgets.window.clone().upcast::<gtk::Window>();
+        let toast = self.widgets.toast.clone();
+        let toast_for_close = self.widgets.toast.clone();
         compose::present(
             &parent,
-            Rc::clone(&this.app),
+            Rc::clone(&self.app),
             account_id,
             draft,
             move || {
@@ -3968,11 +3989,6 @@ impl MainWindow {
             },
         )
         .map(|window| window.upcast::<gtk::Window>().downgrade())
-    }
-
-    /// Public method to open a compose window with a draft (for mailto: links).
-    pub fn open_compose_with_draft(&self, draft: OutgoingMessage) {
-        let _ = Self::open_compose(self, draft);
     }
 
     // --------------------------------------------------------------- events
@@ -4331,37 +4347,17 @@ impl MainWindow {
         else {
             return;
         };
-        let confirm = gtk::AlertDialog::builder()
-            .message("Remove account?")
-            .detail(format!(
-                "Are you sure you want to remove '{}' ({})? This will delete all local data for this account.",
-                account.display_name, account.email
-            ))
-            .build();
-        confirm.set_buttons(&["Cancel", "Remove"]);
-        confirm.set_cancel_button(0);
-        confirm.set_default_button(0);
-
         let mailin = this.app.mailin.clone();
-        let this = Rc::clone(this);
-        let account_id = account.id;
-
-        glib::spawn_future_local(async move {
-            let response = confirm.choose_future(Some(&this.widgets.window)).await;
-            match response {
-                Ok(1) => {
-                    // "Remove" button (index 1)
-                    if let Err(e) = mailin.remove_account(&account_id) {
-                        this.show_error(&e.to_string());
-                    } else {
-                        this.refresh_accounts();
-                    }
-                }
-                _ => {
-                    // Cancel or error - do nothing
-                }
-            }
-        });
+        let this_ok = Rc::clone(this);
+        let this_err = Rc::clone(this);
+        let parent = this.widgets.window.clone().upcast::<gtk::Window>();
+        crate::dialogs::confirm_remove_account(
+            Some(&parent),
+            mailin,
+            &account,
+            move || this_ok.refresh_accounts(),
+            move |e| this_err.show_error(&e),
+        );
     }
 
     // Folder management actions
@@ -4419,8 +4415,8 @@ impl MainWindow {
         else {
             return;
         };
-        if folder.id.0 < 0 {
-            this.toast("The outbox cannot be renamed");
+        if folder.id.0 <= 0 || folder.role != FolderRole::Other {
+            this.toast("This folder cannot be renamed");
             return;
         }
 
@@ -4465,8 +4461,8 @@ impl MainWindow {
         let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
             return;
         };
-        if folder_id.0 < 0 {
-            this.toast("The outbox cannot be deleted");
+        if folder_id.0 <= 0 {
+            this.toast("This folder cannot be deleted");
             return;
         }
         let Some(folder) = this
@@ -4478,6 +4474,10 @@ impl MainWindow {
         else {
             return;
         };
+        if folder.role != FolderRole::Other {
+            this.toast("This folder cannot be deleted");
+            return;
+        }
         let confirm = gtk::AlertDialog::builder()
             .modal(true)
             .message(format!("Delete “{}”?", folder.name))
@@ -4502,7 +4502,16 @@ impl MainWindow {
         let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
             return;
         };
-        if folder_id.0 < 0 {
+        if folder_id.0 <= 0 {
+            return;
+        }
+        let is_system = this
+            .folders
+            .borrow()
+            .iter()
+            .find(|f| f.id == folder_id)
+            .is_some_and(|f| f.role != FolderRole::Other);
+        if is_system {
             return;
         }
         let app = this.app.clone();
@@ -4517,6 +4526,10 @@ impl MainWindow {
         let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
             return;
         };
+        if folder_id.0 <= 0 {
+            this.toast("This folder has no server properties");
+            return;
+        }
         let Some(folder) = this
             .folders
             .borrow()
@@ -4756,6 +4769,27 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button
 }
 
+/// Main-window action accelerators. `build_shortcuts_window` renders the
+/// same source of truth so help never drifts from registered shortcuts.
+const WINDOW_ACTION_ACCELS: &[(&str, &[&str])] = &[
+    ("win.search", &["<Control>f"]),
+    ("win.find-message", &["F3"]),
+    ("win.sync", &["F5"]),
+    ("win.add-account", &["<Control><Shift>a"]),
+    ("win.new-folder", &["<Control><Shift>n"]),
+    ("win.compose", &["<Control>n"]),
+    ("win.reply", &["<Control>r"]),
+    ("win.reply-all", &["<Control><Shift>r"]),
+    ("win.forward", &["<Control><Shift>f"]),
+    ("win.preferences", &["<Control>comma"]),
+    ("win.archive", &["<Control><Shift>e"]),
+    ("win.delete", &["Delete"]),
+    ("win.delete-permanent", &["<Control>Delete"]),
+    ("win.junk", &["<Control><Shift>j"]),
+    ("win.not-junk", &["<Control><Shift>k"]),
+    ("win.move", &["<Control>m"]),
+];
+
 /// Build the keyboard shortcuts window for the help overlay.
 fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWindow {
     let shortcuts = gtk::ShortcutsWindow::builder()
@@ -4771,12 +4805,20 @@ fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWind
 
     let shortcuts_data = [
         ("<Control>N", "New message"),
-        ("<Control>F", "Search mail"),
+        ("<Control>R", "Reply"),
+        ("<Control><Shift>R", "Reply all"),
+        ("<Control><Shift>F", "Forward"),
+        ("<Control>F", "Search mail / find in message (HTML)"),
+        ("F3", "Find next in message"),
         ("F5", "Synchronize"),
         ("<Control><Shift>A", "Add account"),
+        ("<Control><Shift>N", "New folder"),
         ("<Control>comma", "Preferences"),
         ("<Control>Return", "Send message (in composer)"),
-        ("Delete", "Move selected messages to Trash"),
+        (
+            "Delete",
+            "Move selected messages to Trash (when message list is active)",
+        ),
         ("<Control>Delete", "Delete selected messages permanently"),
         ("<Control><Shift>E", "Archive selected messages"),
         ("<Control><Shift>J", "Mark selected messages as Junk"),
@@ -4825,7 +4867,7 @@ pub(crate) fn role_icon(role: FolderRole) -> &'static str {
         FolderRole::Drafts => "document-edit-symbolic",
         FolderRole::Trash => "user-trash-symbolic",
         FolderRole::Junk => "dialog-warning-symbolic",
-        FolderRole::Archive => "package-x-generic-symbolic",
+        FolderRole::Archive => "mail-archive-symbolic",
         FolderRole::Snoozed => "alarm-symbolic",
         FolderRole::Other => "folder-symbolic",
     }
@@ -4893,7 +4935,8 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
         row.update_property(&[Property::Label(&name)]);
     }
 
-    // Add right-click context menu for folder operations
+    // Context menu for folder operations. System roles and virtual folders
+    // (Unified Inbox/Outbox) must not offer Rename/Delete/Subscribe.
     let popover = gtk::Popover::new();
     popover.set_has_arrow(true);
     let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -4902,15 +4945,21 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     menu_box.set_margin_start(8);
     menu_box.set_margin_end(8);
 
-    let actions = [
-        ("New Folder", "win.new-folder", false),
-        ("Rename Folder", "win.rename-folder", true),
-        ("Delete Folder", "win.delete-folder", true),
-        ("Subscribe", "win.subscribe-folder", true),
-        ("Unsubscribe", "win.unsubscribe-folder", true),
-        ("Properties", "win.folder-properties", true),
-    ];
+    let is_virtual = folder.id.0 <= 0;
+    let is_system_role = folder.role != FolderRole::Other;
     let target = folder.id.0.to_string();
+    let mut actions: Vec<(&str, &str, bool)> = vec![("New Folder", "win.new-folder", false)];
+    if !is_virtual && !is_system_role {
+        actions.push(("Rename Folder", "win.rename-folder", true));
+        actions.push(("Delete Folder", "win.delete-folder", true));
+    }
+    if !is_virtual {
+        actions.push(("Properties", "win.folder-properties", true));
+        if !is_system_role {
+            actions.push(("Subscribe", "win.subscribe-folder", true));
+            actions.push(("Unsubscribe", "win.unsubscribe-folder", true));
+        }
+    }
     for (label, action, needs_target) in actions {
         let mut builder = gtk::Button::builder().label(label).action_name(action);
         if needs_target {
@@ -4927,17 +4976,28 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
 
     let gesture = gtk::GestureClick::new();
     gesture.set_button(0); // Handle all buttons
-    let row_for_gesture = row.clone();
     let popover_for_gesture = popover.clone();
     gesture.connect_pressed(move |gesture, n_press, _x, _y| {
         if n_press == 1 && gesture.current_button() == gdk::BUTTON_SECONDARY {
-            let popover = popover_for_gesture.clone();
-            popover.set_has_arrow(true);
-            popover.set_parent(&row_for_gesture);
-            popover.present();
+            popover_for_gesture.set_pointing_to(None::<&gdk::Rectangle>);
+            popover_for_gesture.present();
         }
     });
     row.add_controller(gesture);
+
+    let key = gtk::EventControllerKey::new();
+    let popover_for_key = popover.clone();
+    key.connect_key_pressed(move |_, keyval, _, state| {
+        if keyval == gtk::gdk::Key::Menu
+            || (keyval == gtk::gdk::Key::F10 && state.contains(gtk::gdk::ModifierType::SHIFT_MASK))
+        {
+            popover_for_key.present();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    row.add_controller(key);
 
     // Accept messages dragged from the list onto this folder row.
     let drop_target = gtk::DropTarget::new(glib::Type::STRING, gdk::DragAction::MOVE);
@@ -5014,6 +5074,24 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
         dot.update_state(&[State::Hidden(true)]);
     }
     outer.append(&dot);
+
+    // M4-A: sender avatar in list rows (hidden in compact density).
+    if density != MessageListDensity::Compact {
+        let avatar_text = message
+            .from_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(message.from_addr.as_deref())
+            .unwrap_or("?");
+        let avatar = adw::Avatar::builder()
+            .size(32)
+            .text(avatar_text)
+            .show_initials(true)
+            .build();
+        avatar.set_valign(gtk::Align::Start);
+        avatar.set_margin_top(2);
+        outer.append(&avatar);
+    }
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, spacing);
     column.set_hexpand(true);
@@ -5152,7 +5230,6 @@ fn attach_quick_actions(
 
     // Build the actions bar.
     let actions_bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    actions_bar.add_css_class("quick-actions");
     actions_bar.set_halign(gtk::Align::End);
     actions_bar.set_valign(gtk::Align::Fill);
     actions_bar.set_visible(false);

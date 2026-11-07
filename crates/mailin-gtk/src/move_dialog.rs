@@ -156,7 +156,20 @@ pub fn show(
         move |_, _| apply()
     });
 
+    // M3a-5: focus search and restore focus to the main window on close.
+    let prior_focus = gtk::prelude::RootExt::focus(parent);
+    dialog.connect_closed({
+        let parent = parent.clone();
+        move |_| {
+            if let Some(focus) = prior_focus.clone() {
+                let _ = focus.grab_focus();
+            } else {
+                let _ = parent.grab_focus();
+            }
+        }
+    });
     dialog.present(Some(parent));
+    search.grab_focus();
 }
 
 fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
