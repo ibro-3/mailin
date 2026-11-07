@@ -4433,19 +4433,25 @@ impl MainWindow {
         let app = this.app.clone();
         let this = Rc::clone(&this);
         let entry_for_response = entry.clone();
+        let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
+        let win = this.widgets.window.clone();
         dialog.connect_response(None, move |dialog, response| {
             dialog.close();
-            if response != "rename" {
-                return;
+            if response == "rename" {
+                let name = entry_for_response.text().trim().to_owned();
+                if !name.is_empty() && name != folder.name {
+                    app.engine.rename_folder(folder_id, name);
+                    this.refresh_folders();
+                }
             }
-            let name = entry_for_response.text().trim().to_owned();
-            if name.is_empty() || name == folder.name {
-                return;
+            if let Some(focus) = prior_focus.clone() {
+                let _ = focus.grab_focus();
+            } else {
+                let _ = win.grab_focus();
             }
-            app.engine.rename_folder(folder_id, name);
-            this.refresh_folders();
         });
         dialog.present();
+        entry.grab_focus();
     }
 
     fn delete_folder(this: Rc<Self>, folder_id: String) {
@@ -4480,11 +4486,15 @@ impl MainWindow {
 
         let app = this.app.clone();
         let this = Rc::clone(&this);
+        let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
         glib::spawn_future_local(async move {
             let response = confirm.choose_future(Some(&this.widgets.window)).await;
             if response == Ok(1) {
                 app.engine.delete_folder(folder_id);
                 this.refresh_folders();
+            }
+            if let Some(focus) = prior_focus {
+                let _ = focus.grab_focus();
             }
         });
     }
@@ -4543,6 +4553,16 @@ impl MainWindow {
         dialog.add_response("close", "Close");
         dialog.set_default_response(Some("close"));
         dialog.set_close_response("close");
+        let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
+        let win = this.widgets.window.clone();
+        dialog.connect_response(None, move |d, _| {
+            d.close();
+            if let Some(focus) = prior_focus.clone() {
+                let _ = focus.grab_focus();
+            } else {
+                let _ = win.grab_focus();
+            }
+        });
 
         let rows = gtk::ListBox::new();
         rows.set_selection_mode(gtk::SelectionMode::None);
