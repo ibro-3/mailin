@@ -398,7 +398,7 @@ pub fn present(
     templates_add.add_css_class("suggested-action");
     let templates_group = adw::PreferencesGroup::builder()
         .title("Message templates")
-        .description("Reusable message templates with {{variable}} placeholders for quick compose.")
+        .description("Reusable plain-text message templates. Use {{variable}} placeholders in the composer.")
         .build();
     templates_group.add(&templates_scroll);
     templates_group.set_header_suffix(Some(&templates_add));
