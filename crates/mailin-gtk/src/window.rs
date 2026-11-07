@@ -2036,7 +2036,7 @@ impl MainWindow {
             self.clear_folders();
             let unread_total = self.app.mailin.unread_total_all().unwrap_or(0);
             let unified_folder = Folder {
-                id: FolderId(0), // Virtual ID for unified inbox
+                id: FolderId::UNIFIED_INBOX, // UI virtual: Unified Inbox
                 account_id: AccountId::default(),
                 name: "Unified Inbox".to_owned(),
                 delimiter: "/".to_owned(),
@@ -2084,7 +2084,7 @@ impl MainWindow {
         let outbox_len = self.app.mailin.outbox_len().unwrap_or(0);
         if outbox_len > 0 {
             folders.push(Folder {
-                id: FolderId(-1), // Virtual ID for Outbox
+                id: FolderId::OUTBOX, // UI virtual: Outbox
                 account_id,
                 name: "Outbox".to_owned(),
                 delimiter: "/".to_owned(),
@@ -2149,7 +2149,7 @@ impl MainWindow {
     }
 
     fn select_folder(&self, folder: &Folder) -> mailin_core::Result<()> {
-        let is_outbox = folder.id.0 == -1;
+        let is_outbox = folder.id.is_outbox();
         {
             let mut selection = self.selection.borrow_mut();
             if selection.folder == Some(folder.id)
@@ -4424,7 +4424,7 @@ impl MainWindow {
         else {
             return;
         };
-        if folder.id.0 <= 0 || folder.role != FolderRole::Other {
+        if folder.id.is_virtual_ui() || folder.role != FolderRole::Other {
             this.toast("This folder cannot be renamed");
             return;
         }
@@ -4476,7 +4476,7 @@ impl MainWindow {
         let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
             return;
         };
-        if folder_id.0 <= 0 {
+        if folder_id.is_virtual_ui() {
             this.toast("This folder cannot be deleted");
             return;
         }
@@ -4521,7 +4521,7 @@ impl MainWindow {
         let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
             return;
         };
-        if folder_id.0 <= 0 {
+        if folder_id.is_virtual_ui() {
             return;
         }
         let is_system = this
@@ -4545,7 +4545,7 @@ impl MainWindow {
         let Ok(folder_id) = folder_id.parse::<i64>().map(FolderId) else {
             return;
         };
-        if folder_id.0 <= 0 {
+        if folder_id.is_virtual_ui() {
             this.toast("This folder has no server properties");
             return;
         }
@@ -4968,7 +4968,7 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     // Rename/Delete/Subscribe. Keyboard: Menu key / Shift+F10.
     let menu = gio::Menu::new();
     menu.append(Some("New Folder"), Some("win.new-folder"));
-    let is_virtual = folder.id.0 <= 0;
+    let is_virtual = folder.id.is_virtual_ui();
     let is_system_role = folder.role != FolderRole::Other;
     let target = folder.id.0.to_string().to_variant();
     if !is_virtual && !is_system_role {

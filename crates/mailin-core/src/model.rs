@@ -11,6 +11,27 @@ use crate::compose::OutgoingMessage;
 #[serde(transparent)]
 pub struct FolderId(pub i64);
 
+impl FolderId {
+    /// UI-only virtual folder: Unified Inbox (GTK).
+    pub const UNIFIED_INBOX: Self = Self(0);
+    /// UI-only virtual folder: Outbox (GTK).
+    pub const OUTBOX: Self = Self(-1);
+
+    /// True for UI-virtual folders (Unified Inbox, Outbox) that are not real
+    /// IMAP/mailbox rows. Real folder IDs are positive database IDs.
+    pub fn is_virtual_ui(self) -> bool {
+        self.0 <= 0
+    }
+
+    pub fn is_outbox(self) -> bool {
+        self == Self::OUTBOX
+    }
+
+    pub fn is_unified_inbox(self) -> bool {
+        self == Self::UNIFIED_INBOX
+    }
+}
+
 impl fmt::Display for FolderId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
