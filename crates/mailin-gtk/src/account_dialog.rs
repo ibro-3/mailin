@@ -1509,7 +1509,7 @@ fn provider_at(index: u32) -> OAuthProvider {
 
 /// Dialog to create a new template.
 fn new_template_dialog(
-    _parent: &adw::Dialog,
+    parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     error_label: &gtk::Label,
@@ -1562,11 +1562,16 @@ fn new_template_dialog(
     let app = Rc::clone(app);
     let error_label = error_label.clone();
     let refresh = refresh.clone();
+    let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let name_c = name_entry.clone();
+    let subject_c = subject_entry.clone();
+    let body_c = body_view.clone();
     dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
         if response == "save" {
-            let name = name_entry.text().to_string().trim().to_owned();
-            let subject = subject_entry.text().to_string();
-            let buffer = body_view.buffer();
+            let name = name_c.text().to_string().trim().to_owned();
+            let subject = subject_c.text().to_string();
+            let buffer = body_c.buffer();
             let body = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
                 .to_string();
@@ -1591,14 +1596,18 @@ fn new_template_dialog(
             }
         }
         d.close();
+        if let Some(focus) = prior_focus.clone() {
+            let _ = focus.grab_focus();
+        }
     });
 
     dialog.present();
+    name_entry.grab_focus();
 }
 
 /// Dialog to edit an existing template.
 fn edit_template_dialog(
-    _parent: &adw::Dialog,
+    parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     current_name: &str,
@@ -1656,11 +1665,16 @@ fn edit_template_dialog(
     let app = Rc::clone(app);
     let error_label = error_label.clone();
     let old_name = current_name.to_owned();
+    let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let name_c = name_entry.clone();
+    let subject_c = subject_entry.clone();
+    let body_c = body_view.clone();
     dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
         if response == "save" {
-            let name = name_entry.text().to_string().trim().to_owned();
-            let subject = subject_entry.text().to_string();
-            let buffer = body_view.buffer();
+            let name = name_c.text().to_string().trim().to_owned();
+            let subject = subject_c.text().to_string();
+            let buffer = body_c.buffer();
             let body = buffer
                 .text(&buffer.start_iter(), &buffer.end_iter(), false)
                 .to_string();
@@ -1688,14 +1702,18 @@ fn edit_template_dialog(
             }
         }
         d.close();
+        if let Some(focus) = prior_focus.clone() {
+            let _ = focus.grab_focus();
+        }
     });
 
     dialog.present();
+    name_entry.grab_focus();
 }
 
 /// Dialog to create a new contact.
 fn new_contact_dialog(
-    _parent: &adw::Dialog,
+    parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     error_label: &gtk::Label,
@@ -1732,10 +1750,14 @@ fn new_contact_dialog(
     let app = Rc::clone(app);
     let error_label = error_label.clone();
     let refresh = Rc::clone(&refresh);
+    let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let email_c = email_entry.clone();
+    let name_c = name_entry.clone();
     dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
         if response == "save" {
-            let email = email_entry.text().to_string().trim().to_owned();
-            let display_name = name_entry.text().to_string();
+            let email = email_c.text().to_string().trim().to_owned();
+            let display_name = name_c.text().to_string();
             if !email.is_empty() && email.contains('@') {
                 match app
                     .mailin
@@ -1759,14 +1781,18 @@ fn new_contact_dialog(
             }
         }
         d.close();
+        if let Some(focus) = prior_focus.clone() {
+            let _ = focus.grab_focus();
+        }
     });
 
     dialog.present();
+    email_entry.grab_focus();
 }
 
 /// Dialog to edit an existing contact.
 fn edit_contact_dialog(
-    _parent: &adw::Dialog,
+    parent: &adw::Dialog,
     app: &Rc<AppState>,
     account_id: AccountId,
     current_email: &str,
@@ -1808,10 +1834,14 @@ fn edit_contact_dialog(
     let error_label = error_label.clone();
     let refresh = Rc::clone(&refresh);
     let old_email = current_email.to_owned();
+    let root = parent.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+    let prior_focus = root.as_ref().and_then(|w| gtk::prelude::RootExt::focus(w));
+    let email_c = email_entry.clone();
+    let name_c = name_entry.clone();
     dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
         if response == "save" {
-            let email = email_entry.text().to_string().trim().to_owned();
-            let display_name = name_entry.text().to_string();
+            let email = email_c.text().to_string().trim().to_owned();
+            let display_name = name_c.text().to_string();
             if !email.is_empty() && email.contains('@') {
                 // Delete old if email changed
                 if email != old_email {
@@ -1839,9 +1869,13 @@ fn edit_contact_dialog(
             }
         }
         d.close();
+        if let Some(focus) = prior_focus.clone() {
+            let _ = focus.grab_focus();
+        }
     });
 
     dialog.present();
+    email_entry.grab_focus();
 }
 
 #[cfg(test)]
