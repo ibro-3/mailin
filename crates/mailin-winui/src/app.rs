@@ -26,6 +26,11 @@ use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, 
 use crate::bootstrap::Bootstrap;
 use crate::window;
 
+/// Application User Model ID (M4-J). For packaged builds this should align with
+/// package identity; for unpackaged installs the Start Menu shortcut must
+/// register the same AUMID for toast activation.
+pub const AUMID: &str = "dev.mailin.Mailin";
+
 /// Everything that lives for the whole process. The XAML objects hold an `Arc`
 /// of this, so closing a window cannot drop the store while a callback runs.
 #[derive(Debug)]
@@ -55,8 +60,10 @@ impl AppState {
         let mailin = Arc::new(Mailin::open(&paths)?);
         let engine = Engine::start(Arc::clone(&mailin))?;
 
-        // Initialize toast notifier for Windows notifications
-        let toast_notifier = ToastNotificationManager::CreateToastNotifier().ok();
+        // Initialize toast notifier for Windows notifications (M4-I/J AUMID).
+        let toast_notifier = ToastNotificationManager::CreateToastNotifierWithId(AUMID)
+            .or_else(|_| ToastNotificationManager::CreateToastNotifier())
+            .ok();
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),

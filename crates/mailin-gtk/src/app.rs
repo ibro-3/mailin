@@ -42,7 +42,19 @@ impl AppState {
 }
 
 pub fn run() -> glib::ExitCode {
-    let application = adw::Application::builder().application_id(APP_ID).build();
+    let application = adw::Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+
+    application.add_main_option(
+        "compose",
+        b'c'.into(),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Open a new compose window",
+        None,
+    );
 
     // Notifications use `app.present` as their default action. Registering the
     // action explicitly makes a click bring the window to the foreground.
@@ -98,7 +110,9 @@ pub fn run() -> glib::ExitCode {
 
     // Handle mailto: URI activation (e.g., from browser links)
     application.connect_open({
+        let application = application.clone();
         move |_application, files, _hint| {
+            application.activate();
             for file in files {
                 let uri = file.uri();
                 if let Some(draft) = parse_mailto_uri(&uri) {
@@ -107,6 +121,32 @@ pub fn run() -> glib::ExitCode {
                     return;
                 }
             }
+        }
+    });
+
+    application.connect_command_line({
+        let application = application.clone();
+        move |_app, cmdline| {
+            let options = cmdline.options_dict();
+            if options.contains("compose") {
+                crate::window::set_compose_requested();
+            }
+            let args = cmdline.arguments();
+            for arg in args.iter().skip(1) {
+                let arg = arg.to_string_lossy();
+                if arg == "--compose" || arg == "-c" {
+                    crate::window::set_compose_requested();
+                } else if arg.starts_with("mailto:") {
+                    if let Some(draft) = parse_mailto_uri(arg.as_ref()) {
+                        crate::window::set_mailto_draft(draft);
+                    }
+                }
+            }
+            application.activate();
+            // After activate, the window may handle pending requests; also try directly.
+            crate::window::handle_compose_requested();
+            crate::window::handle_mailto_draft();
+            glib::ExitCode::from(0)
         }
     });
 

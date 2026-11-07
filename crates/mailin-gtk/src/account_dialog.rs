@@ -212,23 +212,86 @@ pub fn present(
     oauth_group.add(&oauth_sign_in);
     oauth_group.add(&oauth_status);
 
-    let incoming = adw::PreferencesGroup::builder()
-        .title("Incoming mail (IMAP)")
-        .description("Folder discovery, synchronization and message bodies.")
+    let server_default_subtitle =
+        "IMAP and SMTP settings — auto-detected when possible. Edit to override.";
+    let server_group = adw::PreferencesGroup::new();
+    let server_expander = adw::ExpanderRow::builder()
+        .title("Server settings")
+        .subtitle(server_default_subtitle)
+        .show_enable_switch(false)
         .build();
-    incoming.add(&imap_host);
-    incoming.add(&imap_port);
-    incoming.add(&imap_security);
-    incoming.add(&imap_user);
+    let autoconfig_reset = gtk::Button::with_label("Reset to suggested");
+    autoconfig_reset.add_css_class("flat");
+    autoconfig_reset.set_visible(false);
+    autoconfig_reset.set_valign(gtk::Align::Center);
+    server_expander.add_suffix(&autoconfig_reset);
+    server_group.add(&server_expander);
 
-    let outgoing = adw::PreferencesGroup::builder()
-        .title("Outgoing mail (SMTP)")
-        .description("Used to submit messages from the outbox.")
+    let imap_header = adw::ActionRow::builder()
+        .title("Incoming mail (IMAP)")
+        .subtitle("Folder sync and message bodies")
+        .activatable(false)
         .build();
-    outgoing.add(&smtp_host);
-    outgoing.add(&smtp_port);
-    outgoing.add(&smtp_security);
-    outgoing.add(&smtp_user);
+    imap_header.add_css_class("heading");
+    let imap_security_warning = adw::ActionRow::builder()
+        .title("Unencrypted connection")
+        .subtitle("Credentials and mail are sent without encryption. Use only on trusted networks.")
+        .build();
+    imap_security_warning.add_css_class("warning");
+    imap_security_warning.set_visible(false);
+    let smtp_header = adw::ActionRow::builder()
+        .title("Outgoing mail (SMTP)")
+        .subtitle("Sends messages from the outbox")
+        .activatable(false)
+        .build();
+    smtp_header.add_css_class("heading");
+    let smtp_security_warning = adw::ActionRow::builder()
+        .title("Unencrypted connection")
+        .subtitle("Credentials and mail are sent without encryption. Use only on trusted networks.")
+        .build();
+    smtp_security_warning.add_css_class("warning");
+    smtp_security_warning.set_visible(false);
+
+    server_expander.add_row(&imap_header);
+    server_expander.add_row(&imap_host);
+    server_expander.add_row(&imap_port);
+    server_expander.add_row(&imap_security);
+    server_expander.add_row(&imap_security_warning);
+    server_expander.add_row(&imap_user);
+    server_expander.add_row(&smtp_header);
+    server_expander.add_row(&smtp_host);
+    server_expander.add_row(&smtp_port);
+    server_expander.add_row(&smtp_security);
+    server_expander.add_row(&smtp_security_warning);
+    server_expander.add_row(&smtp_user);
+
+    // Compatibility aliases for existing code that references the groups/captions.
+    let incoming = server_expander.clone();
+    let outgoing = server_expander.clone();
+    let incoming_default_desc = server_default_subtitle;
+    let outgoing_default_desc = server_default_subtitle;
+
+    let update_security_warnings = {
+        let imap_security = imap_security.clone();
+        let smtp_security = smtp_security.clone();
+        let imap_security_warning = imap_security_warning.clone();
+        let smtp_security_warning = smtp_security_warning.clone();
+        move || {
+            imap_security_warning
+                .set_visible(security_at(imap_security.selected()) == Security::None);
+            smtp_security_warning
+                .set_visible(security_at(smtp_security.selected()) == Security::None);
+        }
+    };
+    update_security_warnings();
+    imap_security.connect_selected_notify({
+        let update = update_security_warnings.clone();
+        move |_| update()
+    });
+    smtp_security.connect_selected_notify({
+        let update = update_security_warnings;
+        move |_| update()
+    });
 
     // Signature: plain text, shown under the composer's `-- ` separator.
     let signature_view = gtk::TextView::builder()
@@ -371,10 +434,19 @@ pub fn present(
     let page = adw::PreferencesPage::new();
     page.add(&identity);
     page.add(&oauth_group);
-    page.add(&incoming);
-    page.add(&outgoing);
+    page.add(&server_group);
     page.add(&signatures);
     page.add(&trust_group);
+    // Templates/contacts are per-account and require a saved account id.
+    if mode == AccountDialogMode::Add {
+        let hint = adw::PreferencesGroup::builder()
+            .title("Templates and contacts")
+            .description("Save the account first to manage message templates and contacts.")
+            .build();
+        page.add(&hint);
+    }
+    templates_group.set_visible(mode == AccountDialogMode::Edit);
+    contacts_group.set_visible(mode == AccountDialogMode::Edit);
     page.add(&templates_group);
     page.add(&contacts_group);
 
@@ -387,9 +459,23 @@ pub fn present(
         .xalign(0.0)
         .hexpand(true)
         .visible(false)
+        .selectable(true)
         .build();
     // Alert role so validation/connection errors are announced.
     error_label.set_accessible_role(gtk::AccessibleRole::Alert);
+
+    let copy_error = gtk::Button::with_label("Copy error details");
+    copy_error.add_css_class("flat");
+    copy_error.set_visible(false);
+    copy_error.connect_clicked({
+        let error_label = error_label.clone();
+        move |_| {
+            let text = error_label.text().to_string();
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&text);
+            }
+        }
+    });
 
     let cancel = gtk::Button::with_label("Cancel");
     let test = gtk::Button::with_label("Test Connection");
@@ -412,6 +498,7 @@ pub fn present(
     actions.set_margin_start(18);
     actions.set_margin_end(18);
     actions.append(&error_label);
+    actions.append(&copy_error);
     actions.append(&test);
     if let Some(remove) = &remove {
         actions.append(remove);
@@ -430,7 +517,6 @@ pub fn present(
     let dialog = adw::Dialog::builder()
         .title(title)
         .content_width(560)
-        .content_height(700)
         .child(&toolbar)
         .build();
 
@@ -517,6 +603,8 @@ pub fn present(
 
     // Sign in with the system browser and wait for the loopback redirect on a
     // background thread. Poll the channel from the GTK main loop.
+    let oauth_waiting = Rc::new(std::cell::Cell::new(false));
+    let oauth_cancelled = Rc::new(std::cell::Cell::new(false));
     oauth_sign_in.connect_clicked({
         let oauth_tokens = Rc::clone(&oauth_tokens);
         let oauth_status = oauth_status.clone();
@@ -524,7 +612,20 @@ pub fn present(
         let provider_row = oauth_provider_row.clone();
         let client_id_row = oauth_client_id_row.clone();
         let email_row = email_row.clone();
+        let oauth_waiting = Rc::clone(&oauth_waiting);
+        let oauth_cancelled = Rc::clone(&oauth_cancelled);
         move |_| {
+            if oauth_waiting.get() {
+                oauth_cancelled.set(true);
+                oauth_waiting.set(false);
+                oauth_sign_in.set_label("Sign in with browser…");
+                oauth_status.set_text("Sign-in cancelled. You can try again.");
+                oauth_status.remove_css_class("error");
+                oauth_status.remove_css_class("success");
+                oauth_status.set_visible(true);
+                return;
+            }
+
             let provider = provider_at(provider_row.selected());
             let client_id = client_id_row.text().to_string();
             let email = email_row.text().to_string();
@@ -548,7 +649,9 @@ pub fn present(
                 oauth_status.set_visible(true);
                 return;
             }
-            oauth_sign_in.set_sensitive(false);
+            oauth_waiting.set(true);
+            oauth_cancelled.set(false);
+            oauth_sign_in.set_label("Cancel sign-in");
             oauth_status.set_text("Waiting for the browser to complete sign-in…");
             oauth_status.remove_css_class("error");
             oauth_status.remove_css_class("success");
@@ -563,30 +666,55 @@ pub fn present(
             let oauth_tokens = Rc::clone(&oauth_tokens);
             let oauth_status = oauth_status.clone();
             let oauth_sign_in = oauth_sign_in.clone();
+            let oauth_waiting = Rc::clone(&oauth_waiting);
+            let oauth_cancelled = Rc::clone(&oauth_cancelled);
+            let started = std::time::Instant::now();
             glib::timeout_add_local(Duration::from_millis(200), move || {
+                if oauth_cancelled.get() {
+                    return glib::ControlFlow::Break;
+                }
+                if started.elapsed() > Duration::from_secs(12)
+                    && oauth_status.text().as_str() == "Waiting for the browser to complete sign-in…"
+                {
+                    oauth_status.set_text(
+                        "Still waiting for the browser to complete sign-in… You can cancel and try again.",
+                    );
+                }
                 match receiver.try_recv() {
                     Ok(Ok(tokens)) => {
+                        if oauth_cancelled.get() {
+                            return glib::ControlFlow::Break;
+                        }
                         *oauth_tokens.borrow_mut() = tokens;
+                        oauth_waiting.set(false);
                         oauth_status.set_text("Signed in successfully.");
                         oauth_status.remove_css_class("error");
                         oauth_status.add_css_class("success");
                         oauth_status.set_visible(true);
-                        oauth_sign_in.set_sensitive(true);
+                        oauth_sign_in.set_label("Sign in with browser…");
                         glib::ControlFlow::Break
                     }
                     Ok(Err(error)) => {
+                        if oauth_cancelled.get() {
+                            return glib::ControlFlow::Break;
+                        }
+                        oauth_waiting.set(false);
                         oauth_status.set_text(&format!("Sign-in failed: {error}"));
                         oauth_status.remove_css_class("success");
                         oauth_status.add_css_class("error");
                         oauth_status.set_visible(true);
-                        oauth_sign_in.set_sensitive(true);
+                        oauth_sign_in.set_label("Sign in with browser…");
                         glib::ControlFlow::Break
                     }
                     Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        if oauth_cancelled.get() {
+                            return glib::ControlFlow::Break;
+                        }
+                        oauth_waiting.set(false);
                         oauth_status.set_text("Sign-in was interrupted.");
                         oauth_status.set_visible(true);
-                        oauth_sign_in.set_sensitive(true);
+                        oauth_sign_in.set_label("Sign in with browser…");
                         glib::ControlFlow::Break
                     }
                 }
@@ -597,6 +725,23 @@ pub fn present(
     // Fill server fields from the address domain while they are still the
     // values we suggested ourselves. Anything the user typed is preserved.
     let last_suggestion: Rc<RefCell<Option<Suggestion>>> = Rc::new(RefCell::new(None));
+    let autoconfig_applying = Rc::new(std::cell::Cell::new(false));
+    let autoconfig_caption_active = Rc::new(std::cell::Cell::new(false));
+    let clear_autoconfig_caption = {
+        let incoming = incoming.clone();
+        let _outgoing = outgoing.clone();
+        let autoconfig_caption_active = Rc::clone(&autoconfig_caption_active);
+        let autoconfig_reset = autoconfig_reset.clone();
+        let incoming_default_desc = incoming_default_desc.to_owned();
+        let _outgoing_default_desc = outgoing_default_desc.to_owned();
+        move || {
+            if autoconfig_caption_active.replace(false) {
+                incoming.set_subtitle(&incoming_default_desc);
+                autoconfig_reset.set_visible(false);
+            }
+        }
+    };
+
     email_row.connect_changed({
         let imap_host = imap_host.clone();
         let imap_port = imap_port.clone();
@@ -605,11 +750,31 @@ pub fn present(
         let smtp_port = smtp_port.clone();
         let smtp_security = smtp_security.clone();
         let last_suggestion = Rc::clone(&last_suggestion);
+        let autoconfig_applying = Rc::clone(&autoconfig_applying);
+        let autoconfig_caption_active = Rc::clone(&autoconfig_caption_active);
+        let autoconfig_reset = autoconfig_reset.clone();
+        let incoming = incoming.clone();
+        let _outgoing = outgoing.clone();
+        let incoming_default_desc = incoming_default_desc.to_owned();
+        let _outgoing_default_desc = outgoing_default_desc.to_owned();
         move |row| {
-            let Some(suggestion) = autoconfig::suggest(&row.text()) else {
+            let email = row.text();
+            let Some(suggestion) = autoconfig::suggest(&email) else {
+                // No suggestion for this address; don't show stale caption.
+                if autoconfig_caption_active.replace(false) {
+                    incoming.set_subtitle(&incoming_default_desc);
+                }
                 return;
             };
             let previous = last_suggestion.borrow().clone();
+            let domain = email
+                .to_string()
+                .split_once('@')
+                .map(|(_, d)| d.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+
+            autoconfig_applying.set(true);
+            let mut applied = false;
 
             // A field is "untouched" while it is empty or still contains the
             // value that the previous suggestion put there.
@@ -622,6 +787,7 @@ pub fn present(
                 imap_host.set_text(&suggestion.imap_host);
                 imap_port.set_text(&suggestion.imap_port.to_string());
                 imap_security.set_selected(security_index(suggestion.imap_security));
+                applied = true;
             }
 
             let smtp_text = smtp_host.text().to_string();
@@ -633,9 +799,93 @@ pub fn present(
                 smtp_host.set_text(&suggestion.smtp_host);
                 smtp_port.set_text(&suggestion.smtp_port.to_string());
                 smtp_security.set_selected(security_index(suggestion.smtp_security));
+                applied = true;
             }
 
             *last_suggestion.borrow_mut() = Some(suggestion);
+            autoconfig_applying.set(false);
+
+            if applied && !domain.is_empty() {
+                let caption = format!("Suggested for {domain} — edit to override");
+                incoming.set_subtitle(&caption);
+                autoconfig_caption_active.set(true);
+                autoconfig_reset.set_visible(true);
+            } else if !applied {
+                // Couldn't auto-apply (user edited fields); don't show a stale suggestion.
+                if autoconfig_caption_active.replace(false) {
+                    incoming.set_subtitle(&incoming_default_desc);
+                    autoconfig_reset.set_visible(false);
+                }
+            }
+        }
+    });
+
+    // Manual edits to server fields clear the autoconfig caption.
+    {
+        let wire_clear = {
+            let autoconfig_applying = Rc::clone(&autoconfig_applying);
+            let clear = clear_autoconfig_caption.clone();
+            move || {
+                if !autoconfig_applying.get() {
+                    clear();
+                }
+            }
+        };
+        for row in [&imap_host, &smtp_host, &imap_user, &smtp_user] {
+            let c = wire_clear.clone();
+            row.connect_changed(move |_| c());
+        }
+        for row in [&imap_port, &smtp_port] {
+            let c = wire_clear.clone();
+            row.connect_changed(move |_| c());
+        }
+        for combo in [&imap_security, &smtp_security] {
+            let c = wire_clear.clone();
+            combo.connect_selected_notify(move |_| c());
+        }
+    }
+
+    autoconfig_reset.connect_clicked({
+        let last_suggestion = Rc::clone(&last_suggestion);
+        let autoconfig_applying = Rc::clone(&autoconfig_applying);
+        let autoconfig_caption_active = Rc::clone(&autoconfig_caption_active);
+        let autoconfig_reset = autoconfig_reset.clone();
+        let incoming = incoming.clone();
+        let _outgoing = outgoing.clone();
+        let incoming_default_desc = incoming_default_desc.to_owned();
+        let _outgoing_default_desc = outgoing_default_desc.to_owned();
+        let imap_host = imap_host.clone();
+        let imap_port = imap_port.clone();
+        let imap_security = imap_security.clone();
+        let smtp_host = smtp_host.clone();
+        let smtp_port = smtp_port.clone();
+        let smtp_security = smtp_security.clone();
+        let email_row = email_row.clone();
+        move |_| {
+            let Some(suggestion) = last_suggestion.borrow().clone() else {
+                return;
+            };
+            autoconfig_applying.set(true);
+            imap_host.set_text(&suggestion.imap_host);
+            imap_port.set_text(&suggestion.imap_port.to_string());
+            imap_security.set_selected(security_index(suggestion.imap_security));
+            smtp_host.set_text(&suggestion.smtp_host);
+            smtp_port.set_text(&suggestion.smtp_port.to_string());
+            smtp_security.set_selected(security_index(suggestion.smtp_security));
+            autoconfig_applying.set(false);
+            if let Some((_, domain)) = email_row.text().as_str().split_once('@') {
+                let domain = domain.trim().to_ascii_lowercase();
+                if !domain.is_empty() {
+                    let caption = format!("Suggested for {domain} — edit to override");
+                    incoming.set_subtitle(&caption);
+                    autoconfig_caption_active.set(true);
+                    autoconfig_reset.set_visible(true);
+                    return;
+                }
+            }
+            autoconfig_caption_active.set(false);
+            autoconfig_reset.set_visible(false);
+            incoming.set_subtitle(&incoming_default_desc);
         }
     });
 
@@ -666,6 +916,8 @@ pub fn present(
             smtp_security: smtp_security.clone(),
         };
         let error_label = error_label.clone();
+        let copy_error = copy_error.clone();
+        let test = test.clone();
         move |_| {
             let draft = rows.draft();
             let password = draft.password.clone();
@@ -674,13 +926,19 @@ pub fn present(
             let account = match draft.build(require_password) {
                 Ok(account) => account,
                 Err(error) => {
+                    copy_error.set_visible(false);
                     set_status_message(&error_label, &error, "error");
                     return;
                 }
             };
-            set_status_message(&error_label, "Testing connection…", "info");
+            test.set_sensitive(false);
+            test.set_label("Testing…");
+            copy_error.set_visible(false);
+            set_status_message(&error_label, "Testing IMAP and SMTP connection…", "info");
             let app = Rc::clone(&app);
             let error_label = error_label.clone();
+            let copy_error = copy_error.clone();
+            let test = test.clone();
             glib::spawn_future_local(async move {
                 match app
                     .mailin
@@ -688,14 +946,28 @@ pub fn present(
                     .await
                 {
                     Ok(()) => {
-                        set_status_message(&error_label, "Connection successful!", "success");
-                    }
-                    Err(error) => {
+                        test.set_sensitive(true);
+                        test.set_label("Test Connection");
+                        copy_error.set_visible(false);
                         set_status_message(
                             &error_label,
-                            &format!("Connection failed: {error}"),
-                            "error",
+                            "IMAP: ✓ · SMTP: ✓  Connection successful.",
+                            "success",
                         );
+                    }
+                    Err(error) => {
+                        test.set_sensitive(true);
+                        test.set_label("Test Connection");
+                        let msg = error.to_string();
+                        let summary = if msg.contains("IMAP connection failed") {
+                            format!("IMAP: failed · SMTP: not tested. {msg}")
+                        } else if msg.contains("SMTP connection failed") {
+                            format!("IMAP: ✓ · SMTP: failed. {msg}")
+                        } else {
+                            format!("Connection failed: {msg}")
+                        };
+                        set_status_message(&error_label, &summary, "error");
+                        copy_error.set_visible(true);
                     }
                 }
             });

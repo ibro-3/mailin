@@ -7,7 +7,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use libadwaita as adw;
 
 use mailin_core::compose::{
@@ -16,6 +16,80 @@ use mailin_core::compose::{
 };
 use mailin_core::html::sanitize_html;
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
+
+fn prune_unresolved_cid_images(html: &str, attachments: &[ComposeAttachment]) -> String {
+    let valid_cids: std::collections::HashSet<&str> = attachments
+        .iter()
+        .filter_map(|a| a.cid.as_deref())
+        .collect();
+    if valid_cids.is_empty() && !html.contains("cid:") {
+        return html.to_owned();
+    }
+    let mut out = String::with_capacity(html.len());
+    let lower = html.to_ascii_lowercase();
+    let mut i = 0;
+    while let Some(img_pos) = lower[i..].find("<img") {
+        let img_start = i + img_pos;
+        out.push_str(&html[i..img_start]);
+        // Find end of tag
+        let rest = &html[img_start..];
+        let tag_end = rest.find('>').map(|p| p + 1).unwrap_or(rest.len());
+        let tag = &rest[..tag_end];
+        let tag_lower = tag.to_ascii_lowercase();
+        let unresolved = if let Some(cid_pos) = tag_lower.find("cid:") {
+            let cid_start = cid_pos + 4;
+            let cid_end = tag[cid_start..]
+                .find(|c: char| c == '"' || c == '\'' || c.is_whitespace() || c == '>')
+                .map(|p| cid_start + p)
+                .unwrap_or(tag.len());
+            let cid = tag[cid_start..cid_end].trim_end_matches('>');
+            !valid_cids.contains(cid)
+        } else {
+            false
+        };
+        if !unresolved {
+            out.push_str(tag);
+        }
+        i = img_start + tag_end;
+        if tag_end == 0 {
+            break;
+        }
+    }
+    out.push_str(&html[i..]);
+    out
+}
+
+fn strip_template_placeholders(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '{' {
+            if let Some(&(_, '{')) = chars.peek() {
+                // consume second '{'
+                chars.next();
+                // skip until '}}'
+                let mut closed = false;
+                while let Some((_, ch)) = chars.next() {
+                    if ch == '}' {
+                        if let Some(&(_, '}')) = chars.peek() {
+                            chars.next();
+                            closed = true;
+                            break;
+                        }
+                    }
+                }
+                if closed {
+                    continue;
+                }
+                // Unclosed placeholder - keep as-is from original
+                out.push_str(&text[i..]);
+                return out;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
 
 use crate::app::AppState;
 use crate::format;
@@ -26,6 +100,8 @@ use webkit6::{UserContentManager, WebView};
 /// Maximum size of a single attached file. Larger files would make the SQLite
 /// outbox and the SMTP submission needlessly fragile.
 const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
+/// Soft warning threshold for total attachment size (raw bytes; wire/base64 is larger).
+const ATTACHMENT_WARN_BYTES: usize = 20 * 1024 * 1024;
 
 /// Collects the composer state and hands a finished message to a one-shot callback.
 type SnapshotFn = Rc<dyn Fn(Box<dyn FnOnce(OutgoingMessage)>)>;
@@ -51,8 +127,10 @@ pub fn present(
     account_id: AccountId,
     draft: OutgoingMessage,
     on_sent: impl Fn() + 'static,
+    on_closed: impl Fn(bool /* draft save attempted */) + 'static,
 ) -> Option<adw::Window> {
     let on_sent: Rc<dyn Fn()> = Rc::new(on_sent);
+    let on_closed: Rc<dyn Fn(bool)> = Rc::new(on_closed);
     let account = app.mailin.account(&account_id).ok().flatten()?;
     let mut draft = OutgoingMessage {
         from_name: account.display_name.clone(),
@@ -82,24 +160,40 @@ pub fn present(
         draft.html_body = Some(html);
     }
 
+    let base_title = if draft.in_reply_to.is_some() || !draft.references.is_empty() {
+        if draft.subject.trim().is_empty() {
+            "New Message".to_owned()
+        } else {
+            draft.subject.trim().to_owned()
+        }
+    } else if draft.subject.trim().is_empty() {
+        "New Message".to_owned()
+    } else {
+        // Forward or edited draft with subject
+        draft.subject.trim().to_owned()
+    };
+    let base_title = Rc::new(base_title);
+
     let window = adw::Window::builder()
-        .title("New Message")
+        .title(base_title.as_str())
         .transient_for(parent)
         .modal(false)
         .default_width(760)
         .default_height(680)
         .build();
 
-    let title = adw::WindowTitle::new("New Message", &account.email);
+    let title = adw::WindowTitle::new(base_title.as_str(), &account.email);
+    let title = Rc::new(title);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&title));
+    header.set_title_widget(Some(title.as_ref()));
 
     let send = gtk::Button::with_label("Send");
     send.add_css_class("suggested-action");
+    send.set_tooltip_text(Some("Send (Ctrl+Enter)"));
     header.pack_end(&send);
 
     let save = gtk::Button::with_label("Save Draft");
-    save.set_tooltip_text(Some("Save Draft (auto-saves every 30 seconds)"));
+    save.set_tooltip_text(Some("Save draft (Ctrl+S, auto-saves every 30 seconds)"));
     save.add_css_class("flat");
     header.pack_end(&save);
 
@@ -427,6 +521,33 @@ pub fn present(
 
     let banner = adw::Banner::new("");
     banner.set_revealed(false);
+    // Banner button action: 0=none, 1=open key manager, 2=send without encryption
+    let banner_action: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+    {
+        let app = Rc::clone(&app);
+        let window = window.clone();
+        let account_id = account.id;
+        let banner_action = Rc::clone(&banner_action);
+        let encrypt_toggle = encrypt_toggle.clone();
+        let pgp_encrypt = Rc::clone(&pgp_encrypt);
+        let banner_for_btn = banner.clone();
+        banner.connect_button_clicked(move |_| match banner_action.get() {
+            1 => crate::pgp_keys::present(
+                window.upcast_ref::<gtk::Window>(),
+                Rc::clone(&app),
+                account_id,
+            ),
+            2 => {
+                encrypt_toggle.set_active(false);
+                pgp_encrypt.set(false);
+                encrypt_toggle.remove_css_class("suggested-action");
+                banner_for_btn.set_revealed(false);
+                banner_for_btn.set_button_label(None);
+                banner_action.set(0);
+            }
+            _ => {}
+        });
+    }
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -437,16 +558,23 @@ pub fn present(
     window.set_content(Some(&toolbar));
 
     // Validate key availability as soon as the user asks for PGP.
-    {
-        let app = app.clone();
+    let update_encrypt_state: Rc<dyn Fn()> = {
+        let app = Rc::clone(&app);
         let state = Rc::clone(&pgp_encrypt);
         let banner = banner.clone();
+        let banner_action = Rc::clone(&banner_action);
+        let encrypt_toggle = encrypt_toggle.clone();
         let to_row = to_row.clone();
         let cc_row = cc_row.clone();
         let bcc_row = bcc_row.clone();
-        encrypt_toggle.connect_toggled(move |button| {
-            state.set(button.is_active());
-            if !button.is_active() {
+        let account_id = account.id;
+        Rc::new(move || {
+            if !encrypt_toggle.is_active() {
+                state.set(false);
+                encrypt_toggle.remove_css_class("suggested-action");
+                banner.set_button_label(None::<&str>);
+                banner_action.set(0);
+                banner.set_revealed(false);
                 return;
             }
             let mut recipients = Vec::new();
@@ -455,22 +583,61 @@ pub fn present(
                     recipients.extend(addresses);
                 }
             }
+            if recipients.is_empty() {
+                encrypt_toggle.set_active(false);
+                state.set(false);
+                encrypt_toggle.remove_css_class("suggested-action");
+                banner.set_button_label(None::<&str>);
+                banner_action.set(0);
+                banner.set_title("Add recipients before enabling encryption.");
+                banner.set_revealed(true);
+                return;
+            }
             match app.mailin.missing_pgp_keys(&account_id, &recipients) {
                 Ok(missing) if !missing.is_empty() => {
-                    button.set_active(false);
+                    encrypt_toggle.set_active(false);
                     state.set(false);
-                    banner.set_title(&format!("No public key for: {}", missing.join(", ")));
+                    encrypt_toggle.remove_css_class("suggested-action");
+                    banner.set_title(&format!(
+                        "Missing public keys for: {}. Add keys or send without encryption.",
+                        missing.join(", ")
+                    ));
+                    banner.set_button_label(Some("Open Key Manager"));
+                    banner_action.set(1);
                     banner.set_revealed(true);
                 }
                 Err(error) => {
-                    button.set_active(false);
+                    encrypt_toggle.set_active(false);
                     state.set(false);
+                    encrypt_toggle.remove_css_class("suggested-action");
+                    banner.set_button_label(None::<&str>);
+                    banner_action.set(0);
                     banner.set_title(&format!("Could not check PGP keys: {error}"));
                     banner.set_revealed(true);
                 }
-                _ => banner.set_revealed(false),
+                Ok(_) => {
+                    state.set(true);
+                    encrypt_toggle.add_css_class("suggested-action");
+                    banner.set_button_label(None::<&str>);
+                    banner_action.set(0);
+                    banner.set_title(&format!(
+                        "This message will be encrypted for {} recipient{}.",
+                        recipients.len(),
+                        if recipients.len() == 1 { "" } else { "s" }
+                    ));
+                    banner.set_revealed(true);
+                }
             }
-        });
+        })
+    };
+    {
+        let update = Rc::clone(&update_encrypt_state);
+        encrypt_toggle.connect_toggled(move |_| update());
+    }
+    // Re-check when recipients change (M4-E).
+    for row in [&to_row, &cc_row, &bcc_row] {
+        let update = Rc::clone(&update_encrypt_state);
+        row.connect_changed(move |_| update());
     }
     {
         let app = app.clone();
@@ -500,6 +667,8 @@ pub fn present(
         &attachments_group,
         &attachments,
         Some(Rc::clone(&dirty)),
+        banner.clone(),
+        Rc::clone(&banner_action),
     );
 
     // Clipboard images become inline attachments referenced from the HTML body
@@ -513,6 +682,10 @@ pub fn present(
         let group = attachments_group.clone();
         let attachments = Rc::clone(&attachments);
         let dirty = Rc::clone(&dirty);
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        let banner = banner.clone();
+        let banner_action = Rc::clone(&banner_action);
         user_content.connect_script_message_received(
             Some("imagePasteHandler"),
             move |_, value: &JSValue| {
@@ -547,7 +720,15 @@ pub fn present(
                 };
                 attachments.borrow_mut().push(attachment);
                 dirty.set(true);
-                rebuild_attachments(&list, &group, &attachments, Some(Rc::clone(&dirty)));
+                title.set_title(&format!("● {}", base_title.as_str()));
+                rebuild_attachments(
+                    &list,
+                    &group,
+                    &attachments,
+                    Some(Rc::clone(&dirty)),
+                    banner.clone(),
+                    Rc::clone(&banner_action),
+                );
                 let html = format!("<img src=\"cid:{cid}\" alt=\"pasted image\">");
                 let script = format!(
                     "__mailinInsert({});",
@@ -567,6 +748,7 @@ pub fn present(
         let attachments = Rc::clone(&attachments);
         let dirty = Rc::clone(&dirty);
         let banner = banner.clone();
+        let banner_action = Rc::clone(&banner_action);
         drop.connect_drop(move |_, value, _, _| {
             let Some(files) = value.get::<gdk::FileList>().ok() else {
                 return false;
@@ -585,7 +767,14 @@ pub fn present(
                 banner.set_title(&message);
                 banner.set_revealed(true);
             }
-            rebuild_attachments(&list, &group, &attachments, Some(Rc::clone(&dirty)));
+            rebuild_attachments(
+                &list,
+                &group,
+                &attachments,
+                Some(Rc::clone(&dirty)),
+                banner.clone(),
+                Rc::clone(&banner_action),
+            );
             true
         });
         webview.add_controller(drop);
@@ -611,6 +800,7 @@ pub fn present(
     let webview_for_populate = webview.clone();
     let window_for_populate = window.clone();
     let banner_for_populate = banner.clone();
+    let banner_action_for_populate = Rc::clone(&banner_action);
     let dirty_for_populate = Rc::clone(&dirty);
 
     // Populate templates list
@@ -619,6 +809,9 @@ pub fn present(
         let account_id = account.id;
         let templates_list = templates_list.clone();
         let templates_popover = templates_popover.clone();
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        let banner_action = Rc::clone(&banner_action_for_populate);
         Rc::new(move || {
             while let Some(child) = templates_list.first_child() {
                 templates_list.remove(&child);
@@ -645,75 +838,132 @@ pub fn present(
                         let bcc_row = bcc_row_for_populate.clone();
                         let subject_row = subject_row_for_populate.clone();
                         let webview = webview_for_populate.clone();
+                        let window = window_for_populate.clone();
                         let dirty = Rc::clone(&dirty_for_populate);
                         let templates_popover = templates_popover.clone();
                         let banner = banner_for_populate.clone();
+                        let banner_action = Rc::clone(&banner_action);
+                        let title = Rc::clone(&title);
+                        let base_title = Rc::clone(&base_title);
                         row.connect_activated(move |_| {
-                            // Only prefill empty fields
                             let vars = std::collections::HashMap::new();
-                            let draft = template_draft(&template_clone, &vars);
-                            if to_row.text().is_empty() {
-                                to_row.set_text(&draft.to);
+                            let base_draft = template_draft(&template_clone, &vars);
+                            let has_placeholders =
+                                base_draft.subject.contains("{{") || base_draft.body.contains("{{");
+
+                            let to_row = to_row.clone();
+                            let cc_row = cc_row.clone();
+                            let bcc_row = bcc_row.clone();
+                            let subject_row = subject_row.clone();
+                            let webview = webview.clone();
+                            let dirty = Rc::clone(&dirty);
+                            let templates_popover = templates_popover.clone();
+                            let banner = banner.clone();
+                            let banner_action = Rc::clone(&banner_action);
+                            let title = Rc::clone(&title);
+                            let base_title = Rc::clone(&base_title);
+
+                            let apply_draft = Rc::new(move |draft: OutgoingMessage, removed: bool| {
+                                // Only prefill empty fields
+                                if to_row.text().is_empty() {
+                                    to_row.set_text(&draft.to);
+                                }
+                                if cc_row.text().is_empty() {
+                                    cc_row.set_text(&draft.cc);
+                                }
+                                if bcc_row.text().is_empty() {
+                                    bcc_row.set_text(&draft.bcc);
+                                }
+                                if subject_row.text().is_empty() {
+                                    subject_row.set_text(&draft.subject);
+                                }
+                                let draft_body = draft.body.clone();
+                                let webview_inner = webview.clone();
+                                webview.evaluate_javascript(
+                                    "document.body.innerText",
+                                    None,
+                                    None,
+                                    None::<&gio::Cancellable>,
+                                    move |result| {
+                                        let current_body = result
+                                            .map(|value| jsc_string(&value))
+                                            .unwrap_or_default();
+                                        if !current_body.trim().is_empty() {
+                                            return;
+                                        }
+                                        let draft_body = draft_body.clone();
+                                        let webview_outer = webview_inner.clone();
+                                        webview_inner.evaluate_javascript(
+                                            "document.body.innerHTML",
+                                            None,
+                                            None,
+                                            None::<&gio::Cancellable>,
+                                            move |result| {
+                                                let current_html = result
+                                                    .map(|value| jsc_string(&value))
+                                                    .unwrap_or_default();
+                                                if current_html.trim().is_empty() {
+                                                    let draft_body = sanitize_html(&draft_body);
+                                                    webview_outer.evaluate_javascript(
+                                                        &format!(
+                                                            "document.body.innerHTML = {}",
+                                                            serde_json::to_string(&draft_body)
+                                                                .unwrap_or_else(|_| "\"\"".to_owned())
+                                                        ),
+                                                        None,
+                                                        None,
+                                                        None::<&gio::Cancellable>,
+                                                        |_| {},
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    },
+                                );
+                                dirty.set(true);
+                                title.set_title(&format!("● {}", base_title.as_str()));
+                                templates_popover.popdown();
+                                banner_action.set(0);
+                                banner.set_button_label(None::<&str>);
+                                banner.set_title(if removed {
+                                    "Template applied (placeholders removed)"
+                                } else if has_placeholders {
+                                    "Template applied — replace {{…}} placeholders before sending"
+                                } else {
+                                    "Template applied"
+                                });
+                                banner.set_revealed(true);
+                            });
+
+                            if !has_placeholders {
+                                apply_draft(base_draft, false);
+                                return;
                             }
-                            if cc_row.text().is_empty() {
-                                cc_row.set_text(&draft.cc);
-                            }
-                            if bcc_row.text().is_empty() {
-                                bcc_row.set_text(&draft.bcc);
-                            }
-                            if subject_row.text().is_empty() {
-                                subject_row.set_text(&draft.subject);
-                            }
-                            // Inspect the current body asynchronously. The result
-                            // callback runs on the GTK main loop, so it must not
-                            // be awaited with a blocking `recv_timeout` here.
-                            let draft_body = draft.body.clone();
-                            let webview_inner = webview.clone();
-                            webview.evaluate_javascript(
-                                "document.body.innerText",
-                                None,
-                                None,
-                                None::<&gio::Cancellable>,
-                                move |result| {
-                                    let current_body =
-                                        result.map(|value| jsc_string(&value)).unwrap_or_default();
-                                    if !current_body.trim().is_empty() {
-                                        return;
+
+                            let dialog = adw::AlertDialog::builder()
+                                .heading("Template placeholders")
+                                .body("This template contains {{…}} placeholders. Insert them as-is and replace them before sending, or remove them now?")
+                                .build();
+                            dialog.add_response("cancel", "Cancel");
+                            dialog.add_response("keep", "Insert as-is");
+                            dialog.add_response("strip", "Remove placeholders");
+                            dialog.set_response_appearance("strip", adw::ResponseAppearance::Suggested);
+                            dialog.set_default_response(Some("strip"));
+                            dialog.set_close_response("cancel");
+                            let apply_keep = Rc::clone(&apply_draft);
+                            let apply_strip = Rc::clone(&apply_draft);
+                            dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
+                                match response.as_str() {
+                                    "keep" => apply_keep(base_draft, false),
+                                    "strip" => {
+                                        let mut draft = base_draft;
+                                        draft.subject = strip_template_placeholders(&draft.subject);
+                                        draft.body = strip_template_placeholders(&draft.body);
+                                        apply_strip(draft, true);
                                     }
-                                    // No plain text; fall back to checking the HTML.
-                                    let draft_body = draft_body.clone();
-                                    let webview_outer = webview_inner.clone();
-                                    webview_inner.evaluate_javascript(
-                                        "document.body.innerHTML",
-                                        None,
-                                        None,
-                                        None::<&gio::Cancellable>,
-                                        move |result| {
-                                            let current_html = result
-                                                .map(|value| jsc_string(&value))
-                                                .unwrap_or_default();
-                                            if current_html.trim().is_empty() {
-                                                let draft_body = sanitize_html(&draft_body);
-                                                webview_outer.evaluate_javascript(
-                                                    &format!(
-                                                        "document.body.innerHTML = {}",
-                                                        serde_json::to_string(&draft_body)
-                                                            .unwrap_or_else(|_| "\"\"".to_owned())
-                                                    ),
-                                                    None,
-                                                    None,
-                                                    None::<&gio::Cancellable>,
-                                                    |_| {},
-                                                );
-                                            }
-                                        },
-                                    );
-                                },
-                            );
-                            dirty.set(true);
-                            templates_popover.popdown();
-                            banner.set_title("Template applied");
-                            banner.set_revealed(true);
+                                    _ => {}
+                                }
+                            });
                         });
                         templates_list.append(&row);
                     }
@@ -928,6 +1178,8 @@ pub fn present(
         &attachments_group,
         &attachments,
         Some(Rc::clone(&dirty)),
+        banner.clone(),
+        Rc::clone(&banner_action),
     );
 
     // Drafts are server-side messages whose Message-ID acts as the identity
@@ -996,6 +1248,12 @@ pub fn present(
                     };
                     let html_body = html_result.borrow().clone();
                     let text_body = text_result.borrow().clone().unwrap_or_default();
+                    let html_body = if html_enabled {
+                        let html = html_body.unwrap_or_default();
+                        Some(prune_unresolved_cid_images(&html, &attachment_list))
+                    } else {
+                        None
+                    };
                     callback(OutgoingMessage {
                         from_name: from_name.clone(),
                         from_addr: from_addr.clone(),
@@ -1004,11 +1262,7 @@ pub fn present(
                         bcc: bcc.clone(),
                         subject: subject.clone(),
                         body: text_body,
-                        html_body: if html_enabled {
-                            Some(html_body.unwrap_or_default())
-                        } else {
-                            None
-                        },
+                        html_body,
                         in_reply_to: in_reply_to.clone(),
                         references: references.clone(),
                         draft_key: Some(draft.clone()),
@@ -1061,6 +1315,9 @@ pub fn present(
         let app = Rc::clone(&app);
         let account_id = account.id;
         let banner = banner.clone();
+        let banner_action = Rc::clone(&banner_action);
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
         Rc::new(move |force: bool| {
             if !force && !dirty.replace(false) {
                 return;
@@ -1068,16 +1325,25 @@ pub fn present(
             let app = Rc::clone(&app);
             let dirty = Rc::clone(&dirty);
             let banner = banner.clone();
+            let banner_action = Rc::clone(&banner_action);
+            let title = Rc::clone(&title);
+            let base_title = Rc::clone(&base_title);
             snapshot(Box::new(move |outgoing| match outgoing.build_draft() {
                 Ok(_) => {
                     app.engine.save_draft(account_id, outgoing);
+                    banner_action.set(0);
+                    banner.set_button_label(None::<&str>);
                     banner.set_title("Draft saved");
                     banner.set_revealed(true);
+                    title.set_title(base_title.as_str());
                 }
                 Err(error) => {
                     dirty.set(true);
+                    banner_action.set(0);
+                    banner.set_button_label(None::<&str>);
                     banner.set_title(&format!("Could not save the draft: {error}"));
                     banner.set_revealed(true);
+                    title.set_title(&format!("● {}", base_title.as_str()));
                 }
             }));
         })
@@ -1085,7 +1351,12 @@ pub fn present(
 
     for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
         let dirty = Rc::clone(&dirty);
-        row.connect_changed(move |_| dirty.set(true));
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        row.connect_changed(move |_| {
+            dirty.set(true);
+            title.set_title(&format!("● {}", base_title.as_str()));
+        });
     }
     {
         let _dirty = Rc::clone(&dirty);
@@ -1099,6 +1370,21 @@ pub fn present(
         let save_draft = Rc::clone(&save_draft);
         move |_| save_draft(true)
     });
+
+    // Ctrl+S saves the draft (M4-E).
+    {
+        let save_draft = Rc::clone(&save_draft);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            if state.contains(gdk::ModifierType::CONTROL_MASK) && key == gdk::Key::s {
+                save_draft(true);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(keys);
+    }
 
     // Auto-save while the composer is open. The timeout is cancelled on close.
     {
@@ -1115,11 +1401,17 @@ pub fn present(
 
     window.connect_close_request({
         let save_draft = Rc::clone(&save_draft);
+        let dirty = Rc::clone(&dirty);
         let closed = Rc::clone(&closed);
         let sent = Rc::clone(&sent);
+        let on_closed = Rc::clone(&on_closed);
         move |_| {
+            let should_save = dirty.get();
             if !closed.get() && !sent.get() {
                 save_draft(false);
+            }
+            if !sent.get() {
+                on_closed(should_save);
             }
             closed.set(true);
             glib::Propagation::Proceed
@@ -1131,6 +1423,7 @@ pub fn present(
     let picker_group = attachments_group.clone();
     let picker_attachments = Rc::clone(&attachments);
     let picker_banner = banner.clone();
+    let picker_banner_action = Rc::clone(&banner_action);
     let picker_dirty = Rc::clone(&dirty);
     attach.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::builder().title("Attach files").build();
@@ -1138,6 +1431,7 @@ pub fn present(
         let group = picker_group.clone();
         let attachments = Rc::clone(&picker_attachments);
         let banner = picker_banner.clone();
+        let banner_action = Rc::clone(&picker_banner_action);
         let dirty = Rc::clone(&picker_dirty);
         dialog.open_multiple(
             Some(&picker_window),
@@ -1164,7 +1458,14 @@ pub fn present(
                     banner.set_title(&message);
                     banner.set_revealed(true);
                 }
-                rebuild_attachments(&list, &group, &attachments, Some(Rc::clone(&dirty)));
+                rebuild_attachments(
+                    &list,
+                    &group,
+                    &attachments,
+                    Some(Rc::clone(&dirty)),
+                    banner.clone(),
+                    Rc::clone(&banner_action),
+                );
             },
         );
     });
@@ -1247,12 +1548,26 @@ fn rebuild_attachments(
     group: &adw::PreferencesGroup,
     attachments: &Rc<RefCell<Vec<ComposeAttachment>>>,
     dirty: Option<Rc<Cell<bool>>>,
+    banner: adw::Banner,
+    banner_action: Rc<Cell<u8>>,
 ) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
     }
     let items = attachments.borrow();
     group.set_visible(!items.is_empty());
+    // M4-E: soft wire-size preflight warning (does not override key-manager actions).
+    let total: usize = items.iter().map(|a| a.data.len()).sum();
+    drop(items);
+    if total >= ATTACHMENT_WARN_BYTES && banner_action.get() != 1 && banner_action.get() != 2 {
+        banner.set_button_label(None::<&str>);
+        banner.set_title(&format!(
+            "Attachments total ~{} (messages over server limits may fail to send).",
+            format::file_size(u32::try_from(total).unwrap_or(u32::MAX))
+        ));
+        banner.set_revealed(true);
+    }
+    let items = attachments.borrow();
     for (index, attachment) in items.iter().enumerate() {
         let row = adw::ActionRow::builder()
             .title(glib::markup_escape_text(&attachment.filename))
@@ -1277,6 +1592,8 @@ fn rebuild_attachments(
         let remove_list = list.clone();
         let remove_group = group.clone();
         let remove_dirty = dirty.clone();
+        let remove_banner = banner.clone();
+        let remove_banner_action = Rc::clone(&banner_action);
         remove.connect_clicked(move |_| {
             if index < attachments.borrow().len() {
                 attachments.borrow_mut().remove(index);
@@ -1289,6 +1606,8 @@ fn rebuild_attachments(
                 &remove_group,
                 &attachments,
                 remove_dirty.clone(),
+                remove_banner.clone(),
+                Rc::clone(&remove_banner_action),
             );
         });
         row.add_suffix(&remove);
@@ -1497,7 +1816,7 @@ fn save_as_template_dialog(
     let _ = parent;
     let dialog = adw::MessageDialog::builder()
         .heading("Save as template")
-        .body("Enter a name for this template:")
+        .body("Enter a name for this template. Templates store plain text; formatting and attachments are not saved.")
         .build();
     dialog.add_response("cancel", "Cancel");
     dialog.add_response("save", "Save");

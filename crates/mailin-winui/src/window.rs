@@ -428,6 +428,14 @@ impl MainWindow {
                         this.notification_mark_read(account_id, ids);
                     } else if let Some((account_id, ids)) = parse_action("archive:", &arg_str) {
                         this.notification_archive(account_id, ids);
+                    } else if let Some((account_id, ids)) = parse_action("open:", &arg_str) {
+                        // M4-I: per-message activation (scaffold). Full window/message
+                        // navigation requires UI-thread dispatch + selection plumbing.
+                        tracing::info!(
+                            %account_id,
+                            ?ids,
+                            "toast open activation received (scaffold)"
+                        );
                     }
                 }
             }
@@ -1370,8 +1378,7 @@ impl MainWindow {
                         || self.state().remote_allowed == Some(message_id)
                         || trusted;
                     let images = self.inline_images(message_id);
-                    let dark = matches!(self.app.config().ui.theme, mailin_core::Theme::Dark);
-                    let document = html::document(html_body, allow_remote, dark, &images);
+                    let document = html::document(html_body, allow_remote, &images);
                     let _ = self.widgets.body_html.NavigateToString(&document);
                     let _ = ui::set_visible(&self.widgets.body_html, true);
                     if !allow_remote && html::has_remote_content(html_body) {
@@ -1459,8 +1466,7 @@ impl MainWindow {
 
                 if want_html {
                     let html_body = html.as_deref().unwrap_or_default();
-                    let dark = matches!(self.app.config().ui.theme, mailin_core::Theme::Dark);
-                    let document = html::document(html_body, false, dark, &[]);
+                    let document = html::document(html_body, false, &[]);
                     let _ = self.widgets.body_html.NavigateToString(&document);
                     let _ = ui::set_visible(&self.widgets.body_html, true);
                 } else if has_text {
@@ -3217,6 +3223,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let body = Grid::new().context("could not create the reader body")?;
     ui::star_row(&body)?;
     let body_text = ui::text("")?;
+    body_text.SetIsTextSelectionEnabled(true)?;
     ui::margin(&body_text, 4.0, 8.0, 4.0, 8.0)?;
     let body_plain = ui::scroll(&body_text)?;
     let body_html = WebView2::new().context("could not create the WebView2 control")?;

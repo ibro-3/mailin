@@ -6,9 +6,19 @@
 //! navigation policy.
 
 use gtk::prelude::*;
+use libadwaita as adw;
 use webkit6::prelude::*;
 
 pub use mailin_core::html::{data_url, document, has_remote_content};
+
+fn webview_background(dark: bool) -> gtk::gdk::RGBA {
+    // Keep in sync with mailin_core::html document() `light-dark()` palette.
+    if dark {
+        gtk::gdk::RGBA::new(0.117647, 0.117647, 0.117647, 1.0) // #1e1e1e
+    } else {
+        gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0) // #ffffff
+    }
+}
 
 /// Create a WebView locked down for email rendering.
 ///
@@ -32,7 +42,16 @@ pub fn new_view() -> webkit6::WebView {
         .hexpand(true)
         .vexpand(true)
         .build();
-    view.set_background_color(&gtk::gdk::RGBA::new(0.0, 0.0, 0.0, 0.0));
+    // Match the document's `light-dark()` palette so the web view does not
+    // flash white behind dark mail (or black behind light mail) before load.
+    let manager = adw::StyleManager::default();
+    view.set_background_color(&webview_background(manager.is_dark()));
+    {
+        let view = view.clone();
+        manager.connect_dark_notify(move |manager| {
+            view.set_background_color(&webview_background(manager.is_dark()));
+        });
+    }
 
     view.connect_decide_policy(|_, decision, kind| {
         if kind != webkit6::PolicyDecisionType::NavigationAction
@@ -77,7 +96,6 @@ mod tests {
         let document = document(
             "<html><head><title>x</title></head><body>hi</body></html>",
             false,
-            false,
             &[],
         );
         assert!(document.contains("Content-Security-Policy"));
@@ -91,16 +109,16 @@ mod tests {
 
     #[test]
     fn remote_content_is_allowed_only_on_request() {
-        let blocked = document("<p>x</p>", false, false, &[]);
+        let blocked = document("<p>x</p>", false, &[]);
         assert!(blocked.contains("img-src data: cid:;"));
-        let allowed = document("<p>x</p>", true, true, &[]);
+        let allowed = document("<p>x</p>", true, &[]);
         assert!(allowed.contains("img-src data: cid: http: https:;"));
         assert!(allowed.contains("#1e1e1e"));
     }
 
     #[test]
     fn fragments_are_wrapped_in_a_complete_document() {
-        let document = document("<p>Hello</p>", false, false, &[]);
+        let document = document("<p>Hello</p>", false, &[]);
         assert!(document.starts_with("<!DOCTYPE html><html><head>"));
         assert!(document.contains("<body><p>Hello</p></body>"));
     }
@@ -109,7 +127,6 @@ mod tests {
     fn cid_images_become_data_urls() {
         let document = document(
             "<img src=\"cid:logo@example.com\"><img src=\"cid:other\">",
-            false,
             false,
             &[(
                 "logo@example.com".into(),

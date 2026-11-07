@@ -7,6 +7,7 @@
 
 use libadwaita as adw;
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -107,6 +108,7 @@ struct Widgets {
     overflow_button: gtk::MenuButton,
     reader_stack: gtk::Stack,
     reader_subject: gtk::Label,
+    reader_avatar: adw::Avatar,
     reader_from: gtk::Label,
     reader_to: gtk::Label,
     reader_cc: gtk::Label,
@@ -116,6 +118,12 @@ struct Widgets {
     remote_trust: gtk::Button,
     remote_dismiss: gtk::Button,
     reader_attachments: gtk::Box,
+    reader_find_revealer: gtk::Revealer,
+    reader_find_entry: gtk::SearchEntry,
+    reader_find_prev: gtk::Button,
+    reader_find_next: gtk::Button,
+    reader_find_close: gtk::Button,
+    reader_find_status: gtk::Label,
     reader_body: gtk::Box,
     read_button: gtk::Button,
     flag_button: gtk::ToggleButton,
@@ -135,15 +143,20 @@ struct Widgets {
 }
 
 /// An attachment whose bytes are needed before the save dialog can open.
+/// `target_dir`, when set, means "save there" instead of prompting (e.g. Download all).
 #[derive(Debug, Clone)]
 struct PendingAttachment {
     message_id: MessageId,
     attachment: AttachmentMeta,
+    target_dir: Option<PathBuf>,
 }
 
 /// Holder for a mailto: draft that should be opened on the next window creation.
 /// Used when the mailto: link activates before the main window exists.
 static MAILTO_DRAFT: std::sync::Mutex<Option<OutgoingMessage>> = std::sync::Mutex::new(None);
+
+/// Request a new compose window (e.g. from `--compose` / desktop action).
+static COMPOSE_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Public API to set a mailto draft for the next window.
 pub fn set_mailto_draft(draft: OutgoingMessage) {
@@ -159,6 +172,15 @@ pub fn take_mailto_draft() -> Option<OutgoingMessage> {
     } else {
         None
     }
+}
+
+/// Request a new compose window on the next activation / when the main window is ready.
+pub fn set_compose_requested() {
+    COMPOSE_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn take_compose_requested() -> bool {
+    COMPOSE_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
 // The live main window, weakly held on the GTK main thread so runtime
@@ -191,6 +213,23 @@ pub fn handle_mailto_draft() {
     }
 }
 
+/// Open a new compose window if one was requested (e.g. `--compose`).
+pub fn handle_compose_requested() {
+    if !take_compose_requested() {
+        return;
+    }
+    let window = MAIN_WINDOW
+        .with(|slot| slot.borrow().clone())
+        .and_then(|weak| weak.upgrade());
+    if let Some(window) = window {
+        window.present();
+        window.open_compose_new();
+    } else {
+        // No window yet; MainWindow::new will consume the flag.
+        set_compose_requested();
+    }
+}
+
 pub struct MainWindow {
     app: Rc<AppState>,
     selection: RefCell<Selection>,
@@ -203,6 +242,8 @@ pub struct MainWindow {
     search_generation: Cell<u64>,
     closed: Rc<Cell<bool>>,
     html_view: RefCell<Option<webkit6::WebView>>,
+    /// HTML view currently targeted by find-in-message (main or decrypted).
+    find_target_view: Rc<RefCell<Option<webkit6::WebView>>>,
     /// Whether the reader prefers HTML; starts from the user preference.
     html_mode: Cell<bool>,
     /// Message for which the user explicitly allowed remote content.
@@ -293,20 +334,23 @@ impl MainWindow {
         let history_button = icon_button("view-history-symbolic", "Search history");
         history_button.add_css_class("flat");
 
-        // Narrow windows collapse the secondary search controls into this
-        // overflow menu so the search entry and sync status stay visible.
+        // Overflow-menu actions. Always visible (GNOME-style app menu); the
+        // search-specific toggles here stay in step with the toolbar via the
+        // `search-all-mail` stateful action.
         let overflow_menu = gio::Menu::new();
         overflow_menu.append(Some("Search in all mail"), Some("win.search-all-mail"));
         overflow_menu.append(Some("Search history"), Some("win.search-history"));
         overflow_menu.append(Some("Synchronize now"), Some("win.sync"));
         overflow_menu.append(Some("New message"), Some("win.compose"));
+        overflow_menu.append(Some("Preferences"), Some("win.preferences"));
+        overflow_menu.append(Some("Keyboard shortcuts"), Some("win.show-help-overlay"));
+        overflow_menu.append(Some("About Mailin"), Some("win.about"));
         let overflow_button = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
             .tooltip_text("More actions")
             .menu_model(&overflow_menu)
             .build();
         overflow_button.add_css_class("flat");
-        overflow_button.set_visible(false);
         {
             use gtk::accessible::Property;
             overflow_button.update_property(&[Property::Label("More actions")]);
@@ -483,6 +527,13 @@ impl MainWindow {
         reader_subject.set_xalign(0.0);
         reader_subject.add_css_class("title-2");
 
+        let reader_avatar = adw::Avatar::builder()
+            .size(40)
+            .show_initials(true)
+            .text("?")
+            .build();
+        reader_avatar.set_valign(gtk::Align::Start);
+
         let reader_from = gtk::Label::new(None);
         reader_from.set_wrap(true);
         reader_from.set_xalign(0.0);
@@ -535,6 +586,29 @@ impl MainWindow {
             .child(&remote_row)
             .build();
 
+        // Find-in-message bar (for HTML reader)
+        let reader_find_entry = gtk::SearchEntry::builder()
+            .placeholder_text("Find in message")
+            .hexpand(true)
+            .build();
+        let reader_find_prev = icon_button("go-up-symbolic", "Previous match");
+        let reader_find_next = icon_button("go-down-symbolic", "Next match");
+        let reader_find_close = icon_button("window-close-symbolic", "Close find");
+        let reader_find_status = gtk::Label::new(None);
+        reader_find_status.add_css_class("dim-label");
+        reader_find_status.add_css_class("caption");
+        let reader_find_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        reader_find_bar.append(&reader_find_entry);
+        reader_find_bar.append(&reader_find_prev);
+        reader_find_bar.append(&reader_find_next);
+        reader_find_bar.append(&reader_find_status);
+        reader_find_bar.append(&reader_find_close);
+        let reader_find_revealer = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .child(&reader_find_bar)
+            .build();
+
         let reader_body = gtk::Box::new(gtk::Orientation::Vertical, 8);
         reader_body.set_margin_top(6);
         reader_body.set_margin_bottom(24);
@@ -576,15 +650,22 @@ impl MainWindow {
         reader_content.set_margin_bottom(18);
         reader_content.set_margin_start(18);
         reader_content.set_margin_end(18);
+        let reader_from_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        reader_from_row.set_valign(gtk::Align::Start);
+        reader_from_row.append(&reader_avatar);
+        reader_from_row.append(&reader_from);
+        reader_from.set_hexpand(true);
+
         reader_content.append(&reader_actions);
         reader_content.append(&reader_subject);
-        reader_content.append(&reader_from);
+        reader_content.append(&reader_from_row);
         reader_content.append(&reader_to);
         reader_content.append(&reader_cc);
         reader_content.append(&reader_date);
         reader_content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         reader_content.append(&remote_panel);
         reader_content.append(&reader_attachments);
+        reader_content.append(&reader_find_revealer);
         reader_content.append(&reader_body);
 
         let clamp = adw::Clamp::builder()
@@ -679,6 +760,7 @@ impl MainWindow {
             search_generation: Cell::new(0),
             closed: Rc::new(Cell::new(false)),
             html_view: RefCell::new(None),
+            find_target_view: Rc::new(RefCell::new(None)),
             html_mode: Cell::new(html_mode),
             remote_allowed: Cell::new(None),
             pending_attachment: Rc::new(RefCell::new(Vec::new())),
@@ -720,6 +802,7 @@ impl MainWindow {
                 overflow_button,
                 reader_stack,
                 reader_subject,
+                reader_avatar,
                 reader_from,
                 reader_to,
                 reader_cc,
@@ -729,6 +812,12 @@ impl MainWindow {
                 remote_trust,
                 remote_dismiss,
                 reader_attachments,
+                reader_find_revealer,
+                reader_find_entry,
+                reader_find_prev,
+                reader_find_next,
+                reader_find_close,
+                reader_find_status,
                 reader_body,
                 read_button,
                 flag_button,
@@ -747,12 +836,15 @@ impl MainWindow {
         Self::connect(&this);
         this.refresh_accounts();
 
-        // Remember the window so runtime "mailto:" activations can find it.
+        // Remember the window so runtime "mailto:"/--compose activations can find it.
         MAIN_WINDOW.with(|slot| *slot.borrow_mut() = Some(Rc::downgrade(&this)));
 
         // Check for a mailto: draft that was set before window creation
         if let Some(draft) = take_mailto_draft() {
             this.open_compose_with_draft(draft);
+        }
+        if take_compose_requested() {
+            this.open_compose_new();
         }
 
         this
@@ -817,10 +909,12 @@ impl MainWindow {
                     .hamburger_button
                     .set_visible(is_mobile || is_tablet);
 
-                // Secondary search controls collapse into the overflow menu.
+                // The overflow menu is the app menu (Preferences, shortcuts,
+                // About); it is always visible, while the search controls
+                // collapse into it below the desktop width.
                 this.widgets.scope_button.set_visible(is_desktop);
                 this.widgets.history_button.set_visible(is_desktop);
-                this.widgets.overflow_button.set_visible(!is_desktop);
+                this.widgets.overflow_button.set_visible(true);
 
                 if is_mobile {
                     // Mobile: collapse sidebar and use navigation stack
@@ -1337,6 +1431,87 @@ impl MainWindow {
             move |_| this.run_search()
         });
 
+        // M4-D: find in message (HTML reader)
+        {
+            let entry = this.widgets.reader_find_entry.clone();
+            let status = this.widgets.reader_find_status.clone();
+            let find_target = Rc::clone(&this.find_target_view);
+            let fallback_view = this.html_view.borrow().clone();
+            let _ = fallback_view; // may be unused if target is set
+            entry.connect_search_changed(move |entry| {
+                let text = entry.text().to_string();
+                let view_opt = find_target.borrow().clone();
+                if let Some(view) = view_opt {
+                    if let Some(fc) = view.find_controller() {
+                        if text.is_empty() {
+                            fc.search_finish();
+                            status.set_text("");
+                        } else {
+                            let opts = webkit6::FindOptions::CASE_INSENSITIVE
+                                | webkit6::FindOptions::WRAP_AROUND;
+                            fc.search(&text, opts.bits(), u32::MAX);
+                            fc.count_matches(&text, opts.bits(), u32::MAX);
+                            status.set_text("");
+                        }
+                    }
+                }
+            });
+            let entry = this.widgets.reader_find_entry.clone();
+            let find_target = Rc::clone(&this.find_target_view);
+            entry.connect_activate(move |_| {
+                if let Some(view) = find_target.borrow().as_ref() {
+                    if let Some(fc) = view.find_controller() {
+                        fc.search_next();
+                    }
+                }
+            });
+            let entry = this.widgets.reader_find_entry.clone();
+            let this_stop = Rc::clone(this);
+            entry.connect_stop_search(move |e| {
+                e.set_text("");
+                this_stop.widgets.reader_find_status.set_text("");
+                this_stop
+                    .widgets
+                    .reader_find_revealer
+                    .set_reveal_child(false);
+                if let Some(view) = this_stop.find_target_view.borrow().as_ref() {
+                    if let Some(fc) = view.find_controller() {
+                        fc.search_finish();
+                    }
+                }
+            });
+            let find_target = Rc::clone(&this.find_target_view);
+            this.widgets.reader_find_next.connect_clicked(move |_| {
+                if let Some(view) = find_target.borrow().as_ref() {
+                    if let Some(fc) = view.find_controller() {
+                        fc.search_next();
+                    }
+                }
+            });
+            let find_target = Rc::clone(&this.find_target_view);
+            this.widgets.reader_find_prev.connect_clicked(move |_| {
+                if let Some(view) = find_target.borrow().as_ref() {
+                    if let Some(fc) = view.find_controller() {
+                        fc.search_previous();
+                    }
+                }
+            });
+            let this_close = Rc::clone(this);
+            this.widgets.reader_find_close.connect_clicked(move |_| {
+                this_close
+                    .widgets
+                    .reader_find_revealer
+                    .set_reveal_child(false);
+                if let Some(view) = this_close.find_target_view.borrow().as_ref() {
+                    if let Some(fc) = view.find_controller() {
+                        fc.search_finish();
+                    }
+                }
+                this_close.widgets.reader_find_entry.set_text("");
+                this_close.widgets.reader_find_status.set_text("");
+            });
+        }
+
         // Overflow-menu counterparts of the secondary search controls. They
         // drive the same widgets, so state never diverges between the toolbar
         // and the narrow-window menu.
@@ -1536,6 +1711,7 @@ impl MainWindow {
 
         if let Some(application) = this.widgets.window.application() {
             application.set_accels_for_action("win.search", &["<Control>f"]);
+            application.set_accels_for_action("win.find-message", &["F3"]);
             application.set_accels_for_action("win.sync", &["F5"]);
             application.set_accels_for_action("win.add-account", &["<Control><Shift>a"]);
             application.set_accels_for_action("win.compose", &["<Control>n"]);
@@ -1583,12 +1759,30 @@ impl MainWindow {
 
         let search_action = gio::SimpleAction::new("search", None);
         search_action.connect_activate({
-            let search = this.widgets.search.clone();
+            let this = Rc::clone(this);
             move |_, _| {
-                search.grab_focus();
+                // M4-D: find in HTML message when available, else focus mail search.
+                if this.widgets.html_button.is_sensitive()
+                    && this.widgets.reader_find_revealer.child().is_some()
+                {
+                    this.widgets.reader_find_revealer.set_reveal_child(true);
+                    this.widgets.reader_find_entry.grab_focus();
+                } else {
+                    this.widgets.search.grab_focus();
+                }
             }
         });
         this.widgets.window.add_action(&search_action);
+
+        let find_message_action = gio::SimpleAction::new("find-message", None);
+        find_message_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| {
+                this.widgets.reader_find_revealer.set_reveal_child(true);
+                this.widgets.reader_find_entry.grab_focus();
+            }
+        });
+        this.widgets.window.add_action(&find_message_action);
 
         let sync_action = gio::SimpleAction::new("sync", None);
         sync_action.connect_activate({
@@ -1654,6 +1848,27 @@ impl MainWindow {
             }
         });
         this.widgets.window.add_action(&preferences_action);
+
+        let about_action = gio::SimpleAction::new("about", None);
+        about_action.connect_activate({
+            let this = Rc::clone(this);
+            move |_, _| {
+                let about = adw::AboutDialog::builder()
+                    .application_name("Mailin")
+                    .application_icon("dev.mailin.Mailin")
+                    .version(env!("CARGO_PKG_VERSION"))
+                    .developer_name("Mailin contributors")
+                    .developers(["Mailin contributors"])
+                    .license_type(gtk::License::MitX11)
+                    .comments("Native desktop email client for IMAP and SMTP.")
+                    .copyright("© 2026 Mailin contributors")
+                    .website("https://github.com/mailin-app/mailin")
+                    .issue_url("https://github.com/mailin-app/mailin/issues")
+                    .build();
+                about.present(Some(&this.widgets.window));
+            }
+        });
+        this.widgets.window.add_action(&about_action);
 
         // Event pump. Polling the tokio broadcast channel keeps every store
         // read on the GTK main thread without an extra bridge thread.
@@ -2476,6 +2691,20 @@ impl MainWindow {
         self.widgets
             .reader_subject
             .set_text(&format::subject_label(message));
+        let from_name = message.from_name.as_deref().unwrap_or("").trim();
+        let from_addr = message.from_addr.as_deref().unwrap_or("").trim();
+        let avatar_text = if from_name.is_empty() {
+            from_addr
+        } else {
+            from_name
+        };
+        self.widgets
+            .reader_avatar
+            .set_text(Some(if avatar_text.is_empty() {
+                "?"
+            } else {
+                avatar_text
+            }));
         self.widgets.reader_from.set_text(&message.from_display());
 
         if message.to_addrs.is_empty() {
@@ -2586,6 +2815,18 @@ impl MainWindow {
                 self.widgets.html_button.set_active(want_html);
                 self.programmatic.set(false);
 
+                if !has_html || !want_html {
+                    self.widgets.reader_find_revealer.set_reveal_child(false);
+                    self.widgets.reader_find_entry.set_text("");
+                    self.widgets.reader_find_status.set_text("");
+                    *self.find_target_view.borrow_mut() = None;
+                    if let Some(view) = self.html_view.borrow().as_ref() {
+                        if let Some(fc) = view.find_controller() {
+                            fc.search_finish();
+                        }
+                    }
+                }
+
                 if want_html {
                     let html_body = html.as_deref().unwrap_or_default();
                     let sender_domain = self
@@ -2598,13 +2839,19 @@ impl MainWindow {
                         || self.remote_allowed.get() == Some(message_id)
                         || trusted;
                     let images = self.inline_images(message_id);
-                    let dark = adw::StyleManager::default().is_dark();
                     let view = self.html_view();
-                    view.load_html(
-                        &html::document(html_body, allow_remote, dark, &images),
-                        None,
-                    );
+                    let rendered = html::document(html_body, allow_remote, &images);
+                    view.load_html(&rendered, None);
+                    *self.find_target_view.borrow_mut() = Some(view.clone());
                     self.widgets.reader_body.append(&view);
+                    // If the source referenced cid: images that couldn't all be
+                    // resolved to inline attachments, show a small notice.
+                    let cid_refs = html_body.matches("cid:").count();
+                    if cid_refs > 0 && images.len() < cid_refs {
+                        self.widgets
+                            .reader_body
+                            .append(&notice_body("Some inline images couldn't be loaded."));
+                    }
                     if !allow_remote && html::has_remote_content(html_body) {
                         match sender_domain {
                             Some(domain) => {
@@ -2655,6 +2902,10 @@ impl MainWindow {
 
     /// Render the placeholder for a PGP-protected message and decrypt/verify on demand.
     fn render_pgp_body(&self, message_id: MessageId, pgp: &mailin_core::PgpMime) {
+        *self.find_target_view.borrow_mut() = None;
+        self.widgets.reader_find_revealer.set_reveal_child(false);
+        self.widgets.reader_find_entry.set_text("");
+        self.widgets.reader_find_status.set_text("");
         let encrypted = pgp.kind == mailin_core::PgpMimeKind::Encrypted;
         let title = if encrypted {
             "This message is encrypted with OpenPGP."
@@ -2684,57 +2935,119 @@ impl MainWindow {
         self.widgets.reader_body.append(&status);
         self.widgets.reader_body.append(&holder);
 
-        let app = Rc::clone(&self.app);
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
         let config = Rc::clone(&self.app.config);
         let actions_for_click = actions.clone();
         let status_for_click = status.clone();
         let holder_for_click = holder.clone();
+        let find_target_for_click = Rc::clone(&self.find_target_view);
+        let find_status_for_click = self.widgets.reader_find_status.clone();
         action.connect_clicked(move |button| {
             button.set_sensitive(false);
-            match app.mailin.decrypted_body(message_id) {
-                Ok((text, html, signature)) => {
-                    actions_for_click.set_visible(false);
-                    status_for_click.set_text(&format!(
-                        "OpenPGP signature: {}",
-                        signature_label(signature)
-                    ));
-                    status_for_click.set_visible(true);
-                    clear_box(&holder_for_click);
-
-                    let has_html = html.as_deref().is_some_and(|html| !html.trim().is_empty());
-                    let has_text = text.as_deref().is_some_and(|text| !text.trim().is_empty());
-                    let want_html = has_html && config.borrow().ui.html_enabled;
-                    if want_html {
-                        let view = html::new_view();
-                        let dark = adw::StyleManager::default().is_dark();
-                        view.load_html(
-                            &html::document(
-                                html.as_deref().unwrap_or_default(),
-                                false,
-                                dark,
-                                &[],
-                            ),
-                            None,
-                        );
-                        holder_for_click.append(&view);
-                    } else if has_text {
-                        holder_for_click
-                            .append(&text_body(text.as_deref().unwrap_or_default()));
-                    } else if has_html {
-                        holder_for_click.append(&notice_body(
-                            "This message only provides an HTML body. Enable HTML in Preferences to show it.",
+            button.set_label("Decrypting…");
+            status_for_click.set_text("");
+            status_for_click.set_visible(false);
+            let mailin = std::sync::Arc::clone(&mailin);
+            let config = Rc::clone(&config);
+            let actions_for_click = actions_for_click.clone();
+            let status_for_click = status_for_click.clone();
+            let holder_for_click = holder_for_click.clone();
+            let find_target_for_click = Rc::clone(&find_target_for_click);
+            let find_status_for_click = find_status_for_click.clone();
+            let button = button.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let result = mailin.decrypted_body(message_id);
+                let _ = tx.send(result);
+            });
+            glib::timeout_add_local(Duration::from_millis(50), move || {
+                match rx.try_recv() {
+                    Ok(Ok((text, html_body, signature))) => {
+                        actions_for_click.set_visible(false);
+                        status_for_click.set_text(&format!(
+                            "OpenPGP signature: {}",
+                            signature_label(signature)
                         ));
-                    } else {
-                        holder_for_click
-                            .append(&notice_body("The decrypted message has no readable body."));
+                        status_for_click.set_visible(true);
+                        clear_box(&holder_for_click);
+                        *find_target_for_click.borrow_mut() = None;
+
+                        let has_html =
+                            html_body.as_deref().is_some_and(|html| !html.trim().is_empty());
+                        let has_text =
+                            text.as_deref().is_some_and(|text| !text.trim().is_empty());
+                        let want_html = has_html && config.borrow().ui.html_enabled;
+                        if want_html {
+                            let view = html::new_view();
+                            view.load_html(
+                                &html::document(
+                                    html_body.as_deref().unwrap_or_default(),
+                                    false,
+                                    &[],
+                                ),
+                                None,
+                            );
+                            if let Some(fc) = view.find_controller() {
+                                let st = find_status_for_click.clone();
+                                fc.connect_found_text(move |_, match_count| {
+                                    if match_count == 0 {
+                                        st.set_text("No matches");
+                                    } else {
+                                        st.set_text(&format!("{match_count} matches"));
+                                    }
+                                });
+                                let st = find_status_for_click.clone();
+                                fc.connect_counted_matches(move |_, match_count| {
+                                    if match_count == 0 {
+                                        st.set_text("No matches");
+                                    } else {
+                                        st.set_text(&format!("{match_count} matches"));
+                                    }
+                                });
+                            }
+                            *find_target_for_click.borrow_mut() = Some(view.clone());
+                            holder_for_click.append(&view);
+                        } else if has_text {
+                            holder_for_click
+                                .append(&text_body(text.as_deref().unwrap_or_default()));
+                        } else if has_html {
+                            holder_for_click.append(&notice_body(
+                                "This message only provides an HTML body. Enable HTML in Preferences to show it.",
+                            ));
+                        } else {
+                            holder_for_click.append(&notice_body(
+                                "The decrypted message has no readable body.",
+                            ));
+                        }
+                        glib::ControlFlow::Break
+                    }
+                    Ok(Err(error)) => {
+                        button.set_sensitive(true);
+                        button.set_label("Decrypt");
+                        let msg = error.to_string();
+                        let friendly = if msg.to_ascii_lowercase().contains("secret key")
+                            || msg.to_ascii_lowercase().contains("no key")
+                            || msg.to_ascii_lowercase().contains("private key")
+                        {
+                            "No matching secret key is available for this message. Import your key in Account Settings → Encryption.".to_owned()
+                        } else {
+                            format!("Couldn't decrypt this message: {msg}")
+                        };
+                        status_for_click.set_text(&friendly);
+                        status_for_click.add_css_class("error");
+                        status_for_click.set_visible(true);
+                        glib::ControlFlow::Break
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        button.set_sensitive(true);
+                        button.set_label("Decrypt");
+                        status_for_click.set_text("Couldn't decrypt this message.");
+                        status_for_click.set_visible(true);
+                        glib::ControlFlow::Break
                     }
                 }
-                Err(error) => {
-                    button.set_sensitive(true);
-                    status_for_click.set_text(&format!("Could not open the message: {error}"));
-                    status_for_click.set_visible(true);
-                }
-            }
+            });
         });
     }
 
@@ -2744,6 +3057,24 @@ impl MainWindow {
             return view.clone();
         }
         let view = html::new_view();
+        if let Some(fc) = view.find_controller() {
+            let status = self.widgets.reader_find_status.clone();
+            fc.connect_found_text(move |_, match_count| {
+                if match_count == 0 {
+                    status.set_text("No matches");
+                } else {
+                    status.set_text(&format!("{match_count} matches"));
+                }
+            });
+            let status = self.widgets.reader_find_status.clone();
+            fc.connect_counted_matches(move |_, match_count| {
+                if match_count == 0 {
+                    status.set_text("No matches");
+                } else {
+                    status.set_text(&format!("{match_count} matches"));
+                }
+            });
+        }
         *slot = Some(view.clone());
         view
     }
@@ -2803,17 +3134,85 @@ impl MainWindow {
             let pending = Rc::clone(&self.pending_attachment);
             let visible_clone = visible.clone();
             download_all.connect_clicked(move |_| {
-                for att in &visible_clone {
-                    request_save_attachment(
-                        Rc::clone(&app),
-                        window.clone(),
-                        toast.clone(),
-                        Rc::clone(&pending),
-                        message_id,
-                        att.clone(),
-                        false,
-                    );
-                }
+                let dialog = gtk::FileDialog::builder().title("Save attachments").build();
+                let app = Rc::clone(&app);
+                let window = window.clone();
+                let toast = toast.clone();
+                let pending = Rc::clone(&pending);
+                let visible_clone = visible_clone.clone();
+                let parent = window.clone();
+                dialog.select_folder(Some(&parent), None::<&gio::Cancellable>, move |result| {
+                    let Ok(folder) = result else {
+                        return;
+                    };
+                    let Some(dir) = folder.path() else {
+                        toast.add_toast(adw::Toast::new("Couldn't access the selected folder."));
+                        return;
+                    };
+                    let total = visible_clone.len();
+                    let mut saved = 0usize;
+                    let mut queued = 0usize;
+                    let mut failed = 0usize;
+                    for (i, att) in visible_clone.iter().enumerate() {
+                        // Update progress for cached saves.
+                        if i > 0 && (saved + failed) > 0 && (saved + failed).is_multiple_of(3) {
+                            toast.add_toast(adw::Toast::new(&format!(
+                                "Saving {} of {}…",
+                                i + 1,
+                                total
+                            )));
+                        }
+                        match app.mailin.attachment(message_id, &att.part_id) {
+                            Ok(Some(data)) if data.data.is_some() => {
+                                match save_attachment_to_dir(
+                                    &dir,
+                                    att,
+                                    data.data.as_deref().unwrap_or_default(),
+                                ) {
+                                    Ok(_) => saved += 1,
+                                    Err(e) => {
+                                        failed += 1;
+                                        toast.add_toast(adw::Toast::new(&format!(
+                                            "Could not save {}: {e}",
+                                            att.display_name()
+                                        )));
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                queued += 1;
+                                request_save_attachment(
+                                    Rc::clone(&app),
+                                    window.clone(),
+                                    toast.clone(),
+                                    Rc::clone(&pending),
+                                    message_id,
+                                    att.clone(),
+                                    false,
+                                    Some(dir.clone()),
+                                );
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                toast.add_toast(adw::Toast::new(&format!(
+                                    "Could not read {}: {e}",
+                                    att.display_name()
+                                )));
+                            }
+                        }
+                    }
+                    let msg = if queued > 0 {
+                        format!("Saved {saved} of {total}; downloading {queued} more…")
+                    } else if failed == 0 {
+                        format!(
+                            "Saved {saved} attachment{}",
+                            if saved == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        format!("Saved {saved}, couldn't save {failed}")
+                    };
+                    toast.add_toast(adw::Toast::new(&msg));
+                });
             });
             download_all_row.append(&download_all);
             self.widgets.reader_attachments.append(&download_all_row);
@@ -2900,6 +3299,7 @@ impl MainWindow {
                 message_id,
                 attachment.clone(),
                 false,
+                None,
             );
         });
         row.append(&save);
@@ -2968,16 +3368,68 @@ impl MainWindow {
             *pending = rest;
             for_message
         };
-        for pending in ready {
-            request_save_attachment(
-                Rc::clone(&self.app),
-                self.widgets.window.clone().upcast::<gtk::Window>(),
-                self.widgets.toast.clone(),
-                Rc::clone(&self.pending_attachment),
-                message_id,
-                pending.attachment,
-                true,
-            );
+        let mut saved = 0usize;
+        let mut failed = 0usize;
+        for pending in &ready {
+            if let Some(dir) = &pending.target_dir {
+                match self
+                    .app
+                    .mailin
+                    .attachment(message_id, &pending.attachment.part_id)
+                {
+                    Ok(Some(data)) if data.data.is_some() => {
+                        match save_attachment_to_dir(
+                            dir,
+                            &pending.attachment,
+                            data.data.as_deref().unwrap_or_default(),
+                        ) {
+                            Ok(_) => saved += 1,
+                            Err(e) => {
+                                failed += 1;
+                                self.widgets.toast.add_toast(adw::Toast::new(&format!(
+                                    "Could not save {}: {e}",
+                                    pending.attachment.display_name()
+                                )));
+                            }
+                        }
+                    }
+                    _ => {
+                        failed += 1;
+                        request_save_attachment(
+                            Rc::clone(&self.app),
+                            self.widgets.window.clone().upcast::<gtk::Window>(),
+                            self.widgets.toast.clone(),
+                            Rc::clone(&self.pending_attachment),
+                            message_id,
+                            pending.attachment.clone(),
+                            true,
+                            pending.target_dir.clone(),
+                        );
+                    }
+                }
+            } else {
+                request_save_attachment(
+                    Rc::clone(&self.app),
+                    self.widgets.window.clone().upcast::<gtk::Window>(),
+                    self.widgets.toast.clone(),
+                    Rc::clone(&self.pending_attachment),
+                    message_id,
+                    pending.attachment.clone(),
+                    true,
+                    None,
+                );
+            }
+        }
+        if saved > 0 || failed > 0 {
+            let msg = if failed == 0 {
+                format!(
+                    "Saved {saved} attachment{}",
+                    if saved == 1 { "" } else { "s" }
+                )
+            } else {
+                format!("Saved {saved}, couldn't save {failed}")
+            };
+            self.widgets.toast.add_toast(adw::Toast::new(&msg));
         }
     }
 
@@ -3487,6 +3939,10 @@ impl MainWindow {
         }
     }
 
+    pub fn open_compose_new(&self) {
+        let _ = Self::open_compose(self, self.new_draft());
+    }
+
     fn open_compose(this: &Self, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
         let Some(account_id) = this.selection.borrow().account else {
             this.widgets
@@ -3496,6 +3952,7 @@ impl MainWindow {
         };
         let parent = this.widgets.window.clone().upcast::<gtk::Window>();
         let toast = this.widgets.toast.clone();
+        let toast_for_close = this.widgets.toast.clone();
         compose::present(
             &parent,
             Rc::clone(&this.app),
@@ -3503,6 +3960,11 @@ impl MainWindow {
             draft,
             move || {
                 toast.add_toast(adw::Toast::new("Message queued in the outbox"));
+            },
+            move |draft_saved| {
+                if draft_saved {
+                    toast_for_close.add_toast(adw::Toast::new("Draft saved"));
+                }
             },
         )
         .map(|window| window.upcast::<gtk::Window>().downgrade())
@@ -4137,7 +4599,9 @@ impl MainWindow {
 }
 
 /// Start saving an attachment, downloading the body first when only metadata
-/// was cached by an older version.
+/// was cached by an older version. If `target_dir` is set, save there instead
+/// of prompting (used by "Download all" and queued completions).
+#[allow(clippy::too_many_arguments)]
 fn request_save_attachment(
     app: Rc<AppState>,
     window: gtk::Window,
@@ -4146,13 +4610,20 @@ fn request_save_attachment(
     message_id: MessageId,
     attachment: AttachmentMeta,
     retry: bool,
+    target_dir: Option<PathBuf>,
 ) {
-    let unavailable = |toast: &adw::ToastOverlay| {
-        toast.add_toast(adw::Toast::new(
-            "Could not load the attachment; it may no longer be available.",
-        ));
+    let unavailable = |toast: &adw::ToastOverlay, target_dir: &Option<PathBuf>| {
+        let msg = if target_dir.is_some() {
+            "Couldn't download an attachment; it may no longer be available."
+        } else {
+            "Could not load the attachment; it may no longer be available."
+        };
+        toast.add_toast(adw::Toast::new(msg));
     };
-    let queue = |app: &Rc<AppState>, toast: &adw::ToastOverlay, attachment: &AttachmentMeta| {
+    let queue = |app: &Rc<AppState>,
+                 toast: &adw::ToastOverlay,
+                 attachment: &AttachmentMeta,
+                 target_dir: &Option<PathBuf>| {
         let mut pending = pending.borrow_mut();
         // Avoid queueing the same attachment twice.
         if !pending
@@ -4162,25 +4633,80 @@ fn request_save_attachment(
             pending.push(PendingAttachment {
                 message_id,
                 attachment: attachment.clone(),
+                target_dir: target_dir.clone(),
             });
+        } else if let Some(dir) = target_dir {
+            // If already queued (e.g. user requested Download all after a
+            // single save started), prefer saving to the chosen folder.
+            if let Some(p) = pending
+                .iter_mut()
+                .find(|p| p.message_id == message_id && p.attachment.part_id == attachment.part_id)
+            {
+                p.target_dir = Some(dir.clone());
+            }
         }
         app.engine.refresh_body(message_id);
-        toast.add_toast(adw::Toast::new("Downloading attachment…"));
+        if target_dir.is_none() {
+            toast.add_toast(adw::Toast::new("Downloading attachment…"));
+        }
     };
     match app.mailin.attachment(message_id, &attachment.part_id) {
         Ok(Some(data)) => match data.data {
-            Some(bytes) => save_attachment_dialog(&window, &toast, &attachment, bytes),
-            None if retry => unavailable(&toast),
-            None => queue(&app, &toast, &attachment),
+            Some(bytes) => {
+                if let Some(dir) = target_dir {
+                    match save_attachment_to_dir(&dir, &attachment, &bytes) {
+                        Ok(_) => { /* progress reported by caller for batch saves */ }
+                        Err(e) => toast.add_toast(adw::Toast::new(&format!(
+                            "Could not save {}: {e}",
+                            attachment.display_name()
+                        ))),
+                    }
+                } else {
+                    save_attachment_dialog(&window, &toast, &attachment, bytes);
+                }
+            }
+            None if retry => unavailable(&toast, &target_dir),
+            None => queue(&app, &toast, &attachment, &target_dir),
         },
-        Ok(None) if retry => unavailable(&toast),
-        Ok(None) => queue(&app, &toast, &attachment),
+        Ok(None) if retry => unavailable(&toast, &target_dir),
+        Ok(None) => queue(&app, &toast, &attachment, &target_dir),
         Err(error) => {
             toast.add_toast(adw::Toast::new(&format!(
                 "Could not read the attachment: {error}"
             )));
         }
     }
+}
+
+fn unique_attachment_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let base = dir.join(name);
+    if !base.exists() {
+        return base;
+    }
+    let path = std::path::Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|s| s.to_str());
+    for i in 1..10_000u32 {
+        let candidate = if let Some(ext) = ext {
+            dir.join(format!("{stem} ({i}).{ext}"))
+        } else {
+            dir.join(format!("{stem} ({i})"))
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
+fn save_attachment_to_dir(
+    dir: &std::path::Path,
+    attachment: &AttachmentMeta,
+    data: &[u8],
+) -> Result<PathBuf, String> {
+    let path = unique_attachment_path(dir, &attachment.display_name());
+    std::fs::write(&path, data).map_err(|e| e.to_string())?;
+    Ok(path)
 }
 
 fn save_attachment_dialog(
@@ -4801,14 +5327,90 @@ fn signature_label(status: mailin_core::SignatureStatus) -> &'static str {
     }
 }
 
+/// Plain-text body with `>`-quoted history collapsed behind a stub. A run of
+/// consecutive quote lines renders as a single line — "N quoted lines" — with
+/// a toggle that expands the quote inline.
 fn text_body(text: &str) -> gtk::Widget {
-    let label = gtk::Label::new(Some(text));
-    label.set_wrap(true);
-    label.set_wrap_mode(pango::WrapMode::WordChar);
-    label.set_selectable(true);
-    label.set_xalign(0.0);
-    label.set_hexpand(true);
-    label.upcast()
+    fn plain_label(text: &str) -> gtk::Label {
+        let label = gtk::Label::new(Some(text.trim_end()));
+        label.set_wrap(true);
+        label.set_wrap_mode(pango::WrapMode::WordChar);
+        label.set_selectable(true);
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label
+    }
+
+    fn quote_stub(quote: &str, count: usize) -> gtk::Widget {
+        let expand_label = format!(
+            "Show {count} quoted line{}",
+            if count == 1 { "" } else { "s" }
+        );
+        let collapse_label = format!(
+            "Hide {count} quoted line{}",
+            if count == 1 { "" } else { "s" }
+        );
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        let button = gtk::Button::with_label(&expand_label);
+        button.add_css_class("flat");
+        button.set_halign(gtk::Align::Start);
+        let revealer = gtk::Revealer::builder()
+            .transition_type(gtk::RevealerTransitionType::SlideDown)
+            .reveal_child(false)
+            .build();
+        let label = gtk::Label::new(Some(quote.trim_end()));
+        label.set_wrap(true);
+        label.set_wrap_mode(pango::WrapMode::WordChar);
+        label.set_selectable(true);
+        label.set_xalign(0.0);
+        label.add_css_class("dim-label");
+        revealer.set_child(Some(&label));
+        let revealer_for_click = revealer.clone();
+        button.connect_clicked(move |button| {
+            let shown = revealer_for_click.reveals_child();
+            revealer_for_click.set_reveal_child(!shown);
+            button.set_label(if shown {
+                &expand_label
+            } else {
+                &collapse_label
+            });
+        });
+        row.append(&button);
+        row.append(&revealer);
+        row.upcast()
+    }
+
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    root.set_hexpand(true);
+    root.set_margin_top(4);
+    root.set_margin_bottom(4);
+
+    let mut plain = String::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim_start().starts_with('>') {
+            if !plain.trim().is_empty() {
+                root.append(&plain_label(&plain));
+            }
+            plain.clear();
+            let start = i;
+            while i < lines.len() && lines[i].trim_start().starts_with('>') {
+                i += 1;
+            }
+            let quote = lines[start..i].join("\n");
+            root.append(&quote_stub(&quote, i - start));
+        } else {
+            plain.push_str(line);
+            plain.push('\n');
+            i += 1;
+        }
+    }
+    if !plain.trim().is_empty() {
+        root.append(&plain_label(&plain));
+    }
+    root.upcast()
 }
 
 fn notice_body(text: &str) -> gtk::Widget {

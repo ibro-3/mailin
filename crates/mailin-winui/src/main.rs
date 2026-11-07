@@ -45,11 +45,18 @@ fn main() -> anyhow::Result<()> {
         // URL as the first argument (e.g. by the system's mailto handler).
         // Packaged protocol activation goes through AppInstance and is not
         // wired yet.
-        if let Some(url) = std::env::args().nth(1) {
-            if url.starts_with("mailto:")
-                && let Some(draft) = mailin_core::mailto::parse_mailto_uri(&url)
+        for arg in std::env::args().skip(1) {
+            if arg.starts_with("mailto:")
+                && let Some(draft) = mailin_core::mailto::parse_mailto_uri(&arg)
             {
                 window::set_mailto_draft(draft);
+                break;
+            }
+            if arg.starts_with("mailin:") {
+                // M4-I/J: deep-link activation payload (message/account open).
+                // Runtime handling is scaffolded; wire to window selection on Windows.
+                tracing::info!(%arg, "received mailin protocol activation");
+                break;
             }
         }
         app::run()

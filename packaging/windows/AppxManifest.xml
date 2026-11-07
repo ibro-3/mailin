@@ -44,6 +44,12 @@
             <uap3:Logo>Assets\Square44x44Logo.png</uap3:Logo>
           </uap3:Protocol>
         </uap3:Extension>
+        <!-- M4-J: deep-link activation (scaffold; handle mailin: in app activation). -->
+        <uap3:Extension Category="windows.protocol">
+          <uap3:Protocol Name="mailin">
+            <uap3:DisplayName>Mailin</uap3:DisplayName>
+          </uap3:Protocol>
+        </uap3:Extension>
       </Extensions>
     </Application>
   </Applications>

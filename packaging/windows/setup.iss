@@ -10,7 +10,7 @@
 #define AppIcon "Assets\Square44x44Logo.ico"
 
 [Setup]
-AppId={{1A2B3C4D-5E6F-7G8H-9I0J-KLMNOPQRSTUV}}
+AppId={{7F2A8B3C-4D1E-4F6A-9B2C-8D4E6F1A3B5C}}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
@@ -30,6 +30,8 @@ SetupLogging=yes
 DisableDirPage=no
 DisableProgramGroupPage=yes
 SetupIconFile={#AppIcon}
+CloseApplications=yes
+RestartApplications=no
 
 ; Architecture
 ArchitecturesInstallIn64BitMode=x64
@@ -57,8 +59,9 @@ Source: "WindowsAppRuntimeInstall-x64.exe"; DestDir: "{app}"; Flags: ignoreversi
 Source: "Assets\*"; DestDir: "{app}\Assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
-Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+; M4-J: AUMID must match app::AUMID for toast activation on unpackaged installs.
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; AppUserModelID: "dev.mailin.Mailin"
+Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; AppUserModelID: "dev.mailin.Mailin"
 
 [Run]
 ; Install Windows App SDK runtime if not present (silent, no restart)

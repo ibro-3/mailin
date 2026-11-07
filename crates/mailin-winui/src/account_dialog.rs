@@ -266,6 +266,10 @@ pub fn present(
     ui::append(&form, &ui::field("Port", &imap_port)?)?;
     ui::append(&form, &ui::field("Username", &imap_user)?)?;
     ui::append(&form, &ui::field("Encryption", &imap_security)?)?;
+    let imap_security_warning =
+        ui::body_text("Warning: no encryption. Passwords and mail may be sent in clear text.")?;
+    ui::set_visible(&imap_security_warning, false)?;
+    ui::append(&form, &imap_security_warning)?;
 
     let outgoing = ui::subheading("Outgoing mail (SMTP)")?;
     ui::append(&form, &outgoing)?;
@@ -277,6 +281,10 @@ pub fn present(
     ui::append(&form, &ui::field("Port", &smtp_port)?)?;
     ui::append(&form, &ui::field("Username", &smtp_user)?)?;
     ui::append(&form, &ui::field("Encryption", &smtp_security)?)?;
+    let smtp_security_warning =
+        ui::body_text("Warning: no encryption. Passwords and mail may be sent in clear text.")?;
+    ui::set_visible(&smtp_security_warning, false)?;
+    ui::append(&form, &smtp_security_warning)?;
 
     // Signature: plain text, shown under the composer's `-- ` separator.
     let signature_heading = ui::subheading("Signature")?;
@@ -334,6 +342,7 @@ pub fn present(
     ui::margin_lg(&footer)?;
     ui::margin_vertical(&footer, 8.0)?;
     let error: TextBlock = ui::text("")?;
+    let _ = error.SetIsTextSelectionEnabled(true);
     // Live region for validation/connection error announcements
     AutomationProperties::SetLiveSetting(
         &error,
@@ -579,11 +588,19 @@ pub fn present(
         let _ = imap_port.SetText(&account.imap.port.to_string());
         let _ = imap_user.SetText(&account.imap.username);
         ui::select_index(&imap_security, security_index(account.imap.security));
+        let _ = ui::set_visible(
+            &imap_security_warning,
+            account.imap.security == Security::None,
+        );
 
         let _ = smtp_host.SetText(&account.smtp.host);
         let _ = smtp_port.SetText(&account.smtp.port.to_string());
         let _ = smtp_user.SetText(&account.smtp.username);
         ui::select_index(&smtp_security, security_index(account.smtp.security));
+        let _ = ui::set_visible(
+            &smtp_security_warning,
+            account.smtp.security == Security::None,
+        );
 
         // Disable email field in edit mode (account identity shouldn't change)
         let _ = ui::set_enabled(&email, false);
@@ -629,6 +646,24 @@ pub fn present(
             if current.trim().is_empty() || current == previous.default_client_id() {
                 let _ = oauth_client_id.SetText(&provider.default_client_id());
             }
+        }
+    })?);
+
+    // M4-F: warn when encryption is disabled.
+    revokers.keep(ui::on_selection_changed(&imap_security, {
+        let imap_security = imap_security.clone();
+        let warning = imap_security_warning.clone();
+        move || {
+            let none = ui::selected_index(&imap_security) == 2;
+            let _ = ui::set_visible(&warning, none);
+        }
+    })?);
+    revokers.keep(ui::on_selection_changed(&smtp_security, {
+        let smtp_security = smtp_security.clone();
+        let warning = smtp_security_warning.clone();
+        move || {
+            let none = ui::selected_index(&smtp_security) == 2;
+            let _ = ui::set_visible(&warning, none);
         }
     })?);
 
@@ -844,12 +879,23 @@ pub fn present(
                         &password,
                     ))
                 });
-                let message = match result {
-                    Ok(Ok(())) => "Connection successful!".to_owned(),
-                    Ok(Err(e)) => format!("Connection failed: {e}"),
-                    Err(runtime_error) => {
-                        format!("Could not start the connection test: {runtime_error}")
+                let (message, _is_error) = match result {
+                    Ok(Ok(())) => ("IMAP: ✓ · SMTP: ✓  Connection successful.".to_owned(), false),
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        let summary = if msg.contains("IMAP connection failed") {
+                            format!("IMAP: failed · SMTP: not tested. {msg}")
+                        } else if msg.contains("SMTP connection failed") {
+                            format!("IMAP: ✓ · SMTP: failed. {msg}")
+                        } else {
+                            format!("Connection failed: {msg}")
+                        };
+                        (summary, true)
                     }
+                    Err(runtime_error) => (
+                        format!("Could not start the connection test: {runtime_error}"),
+                        true,
+                    ),
                 };
                 // XAML objects are thread-affine: hand the result back to the
                 // UI thread via the dispatcher queue.
