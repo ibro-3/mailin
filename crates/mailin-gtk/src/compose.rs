@@ -1412,21 +1412,71 @@ pub fn present(
     }
 
     window.connect_close_request({
+        let window = window.clone();
+        let app = Rc::clone(&app);
+        let account_id = account.id;
         let save_draft = Rc::clone(&save_draft);
         let dirty = Rc::clone(&dirty);
         let closed = Rc::clone(&closed);
         let sent = Rc::clone(&sent);
         let on_closed = Rc::clone(&on_closed);
+        let draft_key = Rc::clone(&draft_key);
+        let confirming = Rc::new(Cell::new(false));
         move |_| {
-            let should_save = dirty.get();
-            if !closed.get() && !sent.get() {
-                save_draft(false);
+            if closed.get() || sent.get() {
+                if !sent.get() {
+                    on_closed(dirty.get());
+                }
+                closed.set(true);
+                return glib::Propagation::Proceed;
             }
-            if !sent.get() {
-                on_closed(should_save);
+            if !dirty.get() {
+                on_closed(false);
+                closed.set(true);
+                return glib::Propagation::Proceed;
             }
-            closed.set(true);
-            glib::Propagation::Proceed
+            if confirming.replace(true) {
+                return glib::Propagation::Stop;
+            }
+            // M4-E: offer discard, save, and cancel for dirty composers.
+            let dialog = adw::AlertDialog::builder()
+                .heading("Save draft?")
+                .body("This message has unsaved changes.")
+                .build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("discard", "Discard");
+            dialog.add_response("save", "Save");
+            dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+            dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+            dialog.set_default_response(Some("save"));
+            dialog.set_close_response("cancel");
+            let window_c = window.clone();
+            let app_c = Rc::clone(&app);
+            let save_draft_c = Rc::clone(&save_draft);
+            let closed_c = Rc::clone(&closed);
+            let on_closed_c = Rc::clone(&on_closed);
+            let draft_key_c = Rc::clone(&draft_key);
+            let confirming_c = Rc::clone(&confirming);
+            dialog.choose(Some(&window), None::<&gio::Cancellable>, move |response| {
+                confirming_c.set(false);
+                match response.as_str() {
+                    "save" => {
+                        save_draft_c(true);
+                        on_closed_c(true);
+                        closed_c.set(true);
+                        window_c.close();
+                    }
+                    "discard" => {
+                        let key = draft_key_c.borrow().clone();
+                        let _ = app_c.engine.discard_draft(account_id, key);
+                        on_closed_c(false);
+                        closed_c.set(true);
+                        window_c.close();
+                    }
+                    _ => {}
+                }
+            });
+            glib::Propagation::Stop
         }
     });
 
