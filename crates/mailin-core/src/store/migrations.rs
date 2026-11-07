@@ -17,9 +17,13 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (11, include_str!("../../migrations/0011_threading.sql")),
     (12, include_str!("../../migrations/0012_pgp_mime.sql")),
     (13, include_str!("../../migrations/0013_references.sql")),
+    (
+        14,
+        include_str!("../../migrations/0014_folder_subscribed.sql"),
+    ),
 ];
 
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 #[cfg(test)]
 mod tests {

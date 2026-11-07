@@ -2628,7 +2628,7 @@ impl MainWindow {
         });
         let info = format!(
             "Name: {}\nRole: {:?}\nSubscribed: {}\nUnread: {}\nTotal messages: {}",
-            folder.name, folder.role, folder.subscribed, folder.unread_count, folder.total_messages
+            folder.name, folder.role, folder.subscribed, folder.unread_count, folder.message_count
         );
         let msg = ui::text(&info).unwrap_or_else(|error| {
             self.show_error(&format!("Could not build dialog text: {error}"));

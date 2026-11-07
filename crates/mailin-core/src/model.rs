@@ -189,6 +189,8 @@ pub struct Folder {
     pub uid_next: Option<u32>,
     pub highest_modseq: Option<u64>,
     pub last_synced_at: Option<i64>,
+    /// IMAP subscription state (best-effort; defaults true for listed folders).
+    pub subscribed: bool,
     pub message_count: u32,
     pub unread_count: u32,
 }

@@ -2231,6 +2231,12 @@ async fn subscribe_folder_imap(
     } else {
         session.unsubscribe_folder(&folder.name).await?;
     }
+    // Persist the user's intent (M3a-4). `upsert_folder` preserves subscribed
+    // on conflict, so refresh_folders will not clobber this.
+    state
+        .mailbox
+        .store()
+        .set_folder_subscribed(folder_id, subscribe)?;
     let remote = session.list_folders().await?;
     sync::refresh_folders(&state.mailbox, folder.account_id, &remote)?;
     Ok(())

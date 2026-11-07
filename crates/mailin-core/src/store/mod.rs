@@ -30,7 +30,7 @@ const MESSAGE_COLUMNS: &str = "m.id, m.folder_id, m.uid, m.message_id, m.thread_
      m.size, m.flags, m.has_attachments, m.body_state";
 
 const FOLDER_COLUMNS: &str = "f.id, f.account_id, f.name, f.delimiter, f.role, f.uid_validity, \
-     f.uid_next, f.highest_modseq, f.last_synced_at, \
+     f.uid_next, f.highest_modseq, f.last_synced_at, f.subscribed, \
      (SELECT COUNT(*) FROM messages m WHERE m.folder_id = f.id), \
      (SELECT COUNT(*) FROM messages m WHERE m.folder_id = f.id \
         AND instr(' ' || m.flags || ' ', ' \\Seen ') = 0)";
@@ -43,6 +43,8 @@ pub struct FolderUpsert {
     pub delimiter: String,
     pub role: FolderRole,
     pub state: FolderSyncState,
+    /// Preserved on conflict by default; set explicitly via `set_folder_subscribed`.
+    pub subscribed: bool,
 }
 
 impl FolderUpsert {
@@ -53,6 +55,7 @@ impl FolderUpsert {
             delimiter: "/".to_owned(),
             role: FolderRole::Other,
             state: FolderSyncState::default(),
+            subscribed: true,
         }
     }
 }
@@ -242,8 +245,8 @@ impl Store {
         let conn = self.lock()?;
         let id = conn.query_row(
             "INSERT INTO folders
-                 (account_id, name, delimiter, role, uid_validity, uid_next, highest_modseq, last_synced_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 (account_id, name, delimiter, role, uid_validity, uid_next, highest_modseq, last_synced_at, subscribed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(account_id, name) DO UPDATE SET
                  delimiter = excluded.delimiter,
                  role = excluded.role,
@@ -261,10 +264,20 @@ impl Store {
                 folder.state.uid_next,
                 modseq_to_sql(folder.state.highest_modseq),
                 folder.state.last_synced_at,
+                folder.subscribed,
             ],
             |row| row.get::<_, i64>(0),
         )?;
         Ok(FolderId(id))
+    }
+
+    pub fn set_folder_subscribed(&self, id: FolderId, subscribed: bool) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE folders SET subscribed = ?2 WHERE id = ?1",
+            params![id.0, subscribed],
+        )?;
+        Ok(())
     }
 
     pub fn list_folders(&self, account: &AccountId) -> Result<Vec<Folder>> {
@@ -2431,8 +2444,9 @@ fn map_folder(row: &Row<'_>) -> rusqlite::Result<Folder> {
         uid_next: row.get(6)?,
         highest_modseq: row.get::<_, Option<i64>>(7)?.map(modseq_from_sql),
         last_synced_at: row.get(8)?,
-        message_count: row.get::<_, i64>(9)? as u32,
-        unread_count: row.get::<_, i64>(10)? as u32,
+        subscribed: row.get::<_, i64>(9)? != 0,
+        message_count: row.get::<_, i64>(10)? as u32,
+        unread_count: row.get::<_, i64>(11)? as u32,
     })
 }
 

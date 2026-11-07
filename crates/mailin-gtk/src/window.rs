@@ -2045,6 +2045,7 @@ impl MainWindow {
                 uid_next: None,
                 highest_modseq: None,
                 last_synced_at: None,
+                subscribed: true,
                 message_count: 0,
                 unread_count: unread_total,
             };
@@ -2092,6 +2093,7 @@ impl MainWindow {
                 uid_next: None,
                 highest_modseq: None,
                 last_synced_at: None,
+                subscribed: true,
                 message_count: outbox_len,
                 unread_count: outbox_len,
             });
@@ -4982,12 +4984,16 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
         item.set_action_and_target_value(Some("win.folder-properties"), Some(&target));
         menu.append_item(&item);
         if !is_system_role {
-            let item = gio::MenuItem::new(Some("Subscribe"), None);
-            item.set_action_and_target_value(Some("win.subscribe-folder"), Some(&target));
-            menu.append_item(&item);
-            let item = gio::MenuItem::new(Some("Unsubscribe"), None);
-            item.set_action_and_target_value(Some("win.unsubscribe-folder"), Some(&target));
-            menu.append_item(&item);
+            // M3a-4: state-aware label (core `subscribed`).
+            if folder.subscribed {
+                let item = gio::MenuItem::new(Some("Unsubscribe"), None);
+                item.set_action_and_target_value(Some("win.unsubscribe-folder"), Some(&target));
+                menu.append_item(&item);
+            } else {
+                let item = gio::MenuItem::new(Some("Subscribe"), None);
+                item.set_action_and_target_value(Some("win.subscribe-folder"), Some(&target));
+                menu.append_item(&item);
+            }
         }
     }
     let popover = gtk::PopoverMenu::from_model(Some(&menu));
