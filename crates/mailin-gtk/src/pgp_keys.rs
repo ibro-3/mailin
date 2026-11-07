@@ -148,6 +148,7 @@ fn populate(
             .valign(gtk::Align::Center)
             .build();
         delete.add_css_class("flat");
+        delete.set_size_request(32, 32);
         {
             use gtk::accessible::Property;
             let label = format!("Delete key {}", key.fingerprint);
@@ -267,6 +268,7 @@ fn import_dialog(
         }
     });
     dialog.present();
+    view.grab_focus();
 }
 
 fn generate_dialog(
@@ -325,4 +327,5 @@ fn generate_dialog(
         }
     });
     dialog.present();
+    entry.grab_focus();
 }
