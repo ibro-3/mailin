@@ -15,6 +15,7 @@ use adw::prelude::*;
 use gdk::{Key, ModifierType};
 use gdk_pixbuf::prelude::*;
 use glib::variant::ToVariant;
+use gtk::accessible::Property;
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use mailin_core::{
@@ -279,7 +280,6 @@ impl MainWindow {
         sidebar_toggle.add_css_class("flat");
         // Icon-only toggle: give screen readers a name.
         {
-            use gtk::accessible::Property;
             sidebar_toggle.update_property(&[Property::Label("Toggle folders")]);
         }
         header.pack_start(&sidebar_toggle);
@@ -319,7 +319,6 @@ impl MainWindow {
         sync_status.add_css_class("sync-status-idle");
         sync_status.set_tooltip_text(Some("Sync status: Idle"));
         {
-            use gtk::accessible::Property;
             sync_status.update_property(&[Property::Label("Sync status: Idle")]);
         }
 
@@ -352,7 +351,6 @@ impl MainWindow {
             .build();
         overflow_button.add_css_class("flat");
         {
-            use gtk::accessible::Property;
             overflow_button.update_property(&[Property::Label("More actions")]);
         }
 
@@ -380,7 +378,6 @@ impl MainWindow {
             .popover(&account_menu)
             .build();
         {
-            use gtk::accessible::Property;
             account_menu_button.update_property(&[Property::Label("Account options")]);
         }
 
@@ -461,7 +458,6 @@ impl MainWindow {
             .tooltip_text("Message actions")
             .build();
         {
-            use gtk::accessible::Property;
             message_menu_button.update_property(&[Property::Label("Message actions")]);
         }
         list_header.append(&archive_button);
@@ -636,7 +632,6 @@ impl MainWindow {
             .build();
         flag_button.add_css_class("flat");
         {
-            use gtk::accessible::Property;
             flag_button.update_property(&[Property::Label("Star message")]);
         }
         let read_button = icon_button("mail-mark-read-symbolic", "Mark as read");
@@ -3279,7 +3274,6 @@ impl MainWindow {
             // Convey the warning text to screen readers (the ⚠ glyph alone is
             // decorative).
             {
-                use gtk::accessible::Property;
                 warning.update_property(&[Property::Label("Large file")]);
             }
             row.append(&warning);
@@ -3290,7 +3284,6 @@ impl MainWindow {
         save.set_margin_end(4);
         // Distinguish this Save button from others by naming the file.
         {
-            use gtk::accessible::Property;
             let save_name = format!("Save {}", attachment.display_name());
             save.update_property(&[Property::Label(&save_name)]);
         }
@@ -3457,7 +3450,6 @@ impl MainWindow {
             "Star message"
         }));
         {
-            use gtk::accessible::Property;
             let name = if flagged {
                 "Remove star"
             } else {
@@ -4060,7 +4052,6 @@ impl MainWindow {
                         sync_status.add_css_class(css_class);
                         sync_status.set_tooltip_text(Some(tooltip));
                         {
-                            use gtk::accessible::Property;
                             sync_status.update_property(&[Property::Label(tooltip)]);
                         }
                         if matches!(status, mailin_core::model::SyncStatus::Error) {
@@ -4763,7 +4754,6 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     // to announce. `Property::Label` is the accessible *name*; the tooltip
     // remains as the accessible *description* (GTK maps tooltip-text to it).
     // The name is the tooltip text without the trailing accelerator hint.
-    use gtk::accessible::Property;
     let name = tooltip.split(" (").next().unwrap_or(tooltip);
     button.update_property(&[Property::Label(name), Property::Description(tooltip)]);
     button
@@ -4925,7 +4915,6 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     // Expose the unread count in words; the bare number badge alone reads as
     // just a digit with no context.
     if folder.unread_count > 0 {
-        use gtk::accessible::Property;
         let name = format!(
             "{}, {} unread message{}",
             folder_title(folder),
@@ -5184,7 +5173,6 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
     // Expose unread/flagged/attachment state to screen readers; the visual
     // indicators (dot, star, clip) are decorative and hidden.
     {
-        use gtk::accessible::Property;
         row.update_property(&[Property::Label(&summary)]);
     }
     row
@@ -5239,7 +5227,6 @@ fn attach_quick_actions(
         button.set_tooltip_text(Some(action.label()));
         button.add_css_class("flat");
         {
-            use gtk::accessible::Property;
             let name = action.label();
             button.update_property(&[Property::Label(name)]);
         }

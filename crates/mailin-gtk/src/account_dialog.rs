@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use gtk::accessible::Property;
 use gtk::glib;
 use mailin_core::{
     Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
@@ -310,7 +311,6 @@ pub fn present(
     let signature_buffer = Rc::new(RefCell::new(signature_view.buffer()));
     // Give the editor an accessible name; the bare PreferencesRow has no title.
     {
-        use gtk::accessible::Property;
         signature_view.update_property(&[Property::Label("Signature")]);
     }
     let signature_row = adw::ActionRow::builder().title("Signature").build();
@@ -344,7 +344,6 @@ pub fn present(
     ));
     let signature_html_buffer = Rc::new(RefCell::new(signature_html_view.buffer()));
     {
-        use gtk::accessible::Property;
         signature_html_view.update_property(&[Property::Label("HTML signature")]);
     }
     let signature_html_row = adw::ActionRow::builder().title("HTML signature").build();
@@ -997,7 +996,6 @@ pub fn present(
             remove.add_css_class("flat");
             remove.set_tooltip_text(Some(&format!("Stop trusting {domain}")));
             {
-                use gtk::accessible::Property;
                 let remove_name = format!("Stop trusting {domain}");
                 remove.update_property(&[Property::Label(&remove_name)]);
             }

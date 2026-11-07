@@ -100,8 +100,8 @@ use webkit6::{UserContentManager, WebView};
 /// Maximum size of a single attached file. Larger files would make the SQLite
 /// outbox and the SMTP submission needlessly fragile.
 const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
-/// Soft warning threshold for total attachment size (raw bytes; wire/base64 is larger).
-const ATTACHMENT_WARN_BYTES: usize = 20 * 1024 * 1024;
+/// Soft warning threshold (raw bytes). Base64 encoding adds ~4/3 on the wire (M3a-6).
+const LARGE_ATTACHMENT_BYTES: usize = 40 * 1024 * 1024;
 
 /// Collects the composer state and hands a finished message to a one-shot callback.
 type SnapshotFn = Rc<dyn Fn(Box<dyn FnOnce(OutgoingMessage)>)>;
@@ -1559,10 +1559,10 @@ fn rebuild_attachments(
     // M4-E: soft wire-size preflight warning (does not override key-manager actions).
     let total: usize = items.iter().map(|a| a.data.len()).sum();
     drop(items);
-    if total >= ATTACHMENT_WARN_BYTES && banner_action.get() != 1 && banner_action.get() != 2 {
+    if total >= LARGE_ATTACHMENT_BYTES && banner_action.get() != 1 && banner_action.get() != 2 {
         banner.set_button_label(None::<&str>);
         banner.set_title(&format!(
-            "Attachments total ~{} (messages over server limits may fail to send).",
+            "Attachments total ~{} (raw). On the wire this can be ~4/3 larger and may exceed server limits.",
             format::file_size(u32::try_from(total).unwrap_or(u32::MAX))
         ));
         banner.set_revealed(true);
