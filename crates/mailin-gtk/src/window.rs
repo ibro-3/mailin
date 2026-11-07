@@ -586,7 +586,11 @@ impl MainWindow {
         remote_trust.add_css_class("flat");
         let remote_dismiss = gtk::Button::from_icon_name("window-close-symbolic");
         remote_dismiss.add_css_class("flat");
+        remote_dismiss.set_size_request(32, 32);
         remote_dismiss.set_tooltip_text(Some("Not now"));
+        remote_dismiss.update_property(&[gtk::accessible::Property::Label(
+            "Dismiss remote content prompt",
+        )]);
         let remote_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         remote_row.add_css_class("remote-banner");
         remote_row.append(&remote_text);
