@@ -4944,47 +4944,40 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
         row.update_property(&[Property::Label(&name)]);
     }
 
-    // Context menu for folder operations. System roles and virtual folders
-    // (Unified Inbox/Outbox) must not offer Rename/Delete/Subscribe.
-    let popover = gtk::Popover::new();
-    popover.set_has_arrow(true);
-    let menu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    menu_box.set_margin_top(6);
-    menu_box.set_margin_bottom(6);
-    menu_box.set_margin_start(8);
-    menu_box.set_margin_end(8);
-
+    // M3a-4: gio::Menu + PopoverMenu. System/virtual folders must not offer
+    // Rename/Delete/Subscribe. Keyboard: Menu key / Shift+F10.
+    let menu = gio::Menu::new();
+    menu.append(Some("New Folder"), Some("win.new-folder"));
     let is_virtual = folder.id.0 <= 0;
     let is_system_role = folder.role != FolderRole::Other;
-    let target = folder.id.0.to_string();
-    let mut actions: Vec<(&str, &str, bool)> = vec![("New Folder", "win.new-folder", false)];
+    let target = folder.id.0.to_string().to_variant();
     if !is_virtual && !is_system_role {
-        actions.push(("Rename Folder", "win.rename-folder", true));
-        actions.push(("Delete Folder", "win.delete-folder", true));
+        let item = gio::MenuItem::new(Some("Rename Folder"), None);
+        item.set_action_and_target_value(Some("win.rename-folder"), Some(&target));
+        menu.append_item(&item);
+        let item = gio::MenuItem::new(Some("Delete Folder"), None);
+        item.set_action_and_target_value(Some("win.delete-folder"), Some(&target));
+        menu.append_item(&item);
     }
     if !is_virtual {
-        actions.push(("Properties", "win.folder-properties", true));
+        let item = gio::MenuItem::new(Some("Properties"), None);
+        item.set_action_and_target_value(Some("win.folder-properties"), Some(&target));
+        menu.append_item(&item);
         if !is_system_role {
-            actions.push(("Subscribe", "win.subscribe-folder", true));
-            actions.push(("Unsubscribe", "win.unsubscribe-folder", true));
+            let item = gio::MenuItem::new(Some("Subscribe"), None);
+            item.set_action_and_target_value(Some("win.subscribe-folder"), Some(&target));
+            menu.append_item(&item);
+            let item = gio::MenuItem::new(Some("Unsubscribe"), None);
+            item.set_action_and_target_value(Some("win.unsubscribe-folder"), Some(&target));
+            menu.append_item(&item);
         }
     }
-    for (label, action, needs_target) in actions {
-        let mut builder = gtk::Button::builder().label(label).action_name(action);
-        if needs_target {
-            builder = builder.action_target(&target.to_variant());
-        }
-        let btn = builder.build();
-        btn.add_css_class("flat");
-        btn.set_halign(gtk::Align::Start);
-        menu_box.append(&btn);
-    }
-
-    popover.set_child(Some(&menu_box));
+    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+    popover.set_has_arrow(true);
     popover.set_parent(&row);
 
     let gesture = gtk::GestureClick::new();
-    gesture.set_button(0); // Handle all buttons
+    gesture.set_button(0);
     let popover_for_gesture = popover.clone();
     gesture.connect_pressed(move |gesture, n_press, _x, _y| {
         if n_press == 1 && gesture.current_button() == gdk::BUTTON_SECONDARY {
