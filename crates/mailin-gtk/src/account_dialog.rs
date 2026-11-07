@@ -987,27 +987,16 @@ pub fn present(
             trust_list.remove(&child);
         }
         for domain in allowlist.borrow().iter() {
-            let label = gtk::Label::builder()
-                .label(domain)
-                .xalign(0.0)
-                .hexpand(true)
-                .build();
-            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+            let row = adw::ActionRow::builder().title(domain).build();
+            row.set_activatable(false);
+            // M2-G/M3a-2: untrust is non-destructive; avoid trash icon.
+            let remove = gtk::Button::from_icon_name("list-remove-symbolic");
             remove.add_css_class("flat");
+            remove.set_valign(gtk::Align::Center);
             remove.set_tooltip_text(Some(&format!("Stop trusting {domain}")));
-            {
-                let remove_name = format!("Stop trusting {domain}");
-                remove.update_property(&[Property::Label(&remove_name)]);
-            }
-            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            row_box.set_margin_top(4);
-            row_box.set_margin_bottom(4);
-            row_box.set_margin_start(8);
-            row_box.set_margin_end(4);
-            row_box.append(&label);
-            row_box.append(&remove);
-            let row = adw::ActionRow::new();
-            row.set_child(Some(&row_box));
+            let remove_name = format!("Stop trusting {domain}");
+            remove.update_property(&[Property::Label(&remove_name)]);
+            row.add_suffix(&remove);
             trust_list.append(&row);
 
             let allowlist = Rc::clone(allowlist);
@@ -1048,30 +1037,27 @@ pub fn present(
                             let row = adw::ActionRow::builder()
                                 .title(&template.name)
                                 .subtitle(&template.subject)
-                                .activatable(true)
                                 .build();
+                            row.set_activatable(false);
                             let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
                             edit_btn.add_css_class("flat");
+                            edit_btn.set_valign(gtk::Align::Center);
                             edit_btn.set_tooltip_text(Some("Edit template"));
+                            edit_btn.update_property(&[Property::Label(&format!(
+                                "Edit template {}",
+                                template.name
+                            ))]);
                             let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
                             delete_btn.add_css_class("flat");
                             delete_btn.add_css_class("destructive-action");
+                            delete_btn.set_valign(gtk::Align::Center);
                             delete_btn.set_tooltip_text(Some("Delete template"));
-                            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                            row_box.set_margin_top(4);
-                            row_box.set_margin_bottom(4);
-                            row_box.set_margin_start(8);
-                            row_box.set_margin_end(4);
-                            row_box.append(
-                                &gtk::Label::builder()
-                                    .label(&template.name)
-                                    .xalign(0.0)
-                                    .hexpand(true)
-                                    .build(),
-                            );
-                            row_box.append(&edit_btn);
-                            row_box.append(&delete_btn);
-                            row.set_child(Some(&row_box));
+                            delete_btn.update_property(&[Property::Label(&format!(
+                                "Delete template {}",
+                                template.name
+                            ))]);
+                            row.add_suffix(&edit_btn);
+                            row.add_suffix(&delete_btn);
 
                             // Clone values for use in both button closures
                             let app_for_edit = Rc::clone(&app);
@@ -1145,37 +1131,35 @@ pub fn present(
                         // Placeholder is shown automatically
                     } else {
                         for contact in contacts {
+                            let subtitle = if contact.display_name.is_empty() {
+                                String::new()
+                            } else {
+                                contact.display_name.clone()
+                            };
                             let row = adw::ActionRow::builder()
                                 .title(&contact.email)
-                                .subtitle(if contact.display_name.is_empty() {
-                                    ""
-                                } else {
-                                    &contact.display_name
-                                })
-                                .activatable(true)
+                                .subtitle(&subtitle)
                                 .build();
+                            row.set_activatable(false);
                             let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
                             edit_btn.add_css_class("flat");
+                            edit_btn.set_valign(gtk::Align::Center);
                             edit_btn.set_tooltip_text(Some("Edit contact"));
+                            edit_btn.update_property(&[Property::Label(&format!(
+                                "Edit contact {}",
+                                contact.email
+                            ))]);
                             let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
                             delete_btn.add_css_class("flat");
                             delete_btn.add_css_class("destructive-action");
+                            delete_btn.set_valign(gtk::Align::Center);
                             delete_btn.set_tooltip_text(Some("Delete contact"));
-                            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                            row_box.set_margin_top(4);
-                            row_box.set_margin_bottom(4);
-                            row_box.set_margin_start(8);
-                            row_box.set_margin_end(4);
-                            row_box.append(
-                                &gtk::Label::builder()
-                                    .label(&contact.email)
-                                    .xalign(0.0)
-                                    .hexpand(true)
-                                    .build(),
-                            );
-                            row_box.append(&edit_btn);
-                            row_box.append(&delete_btn);
-                            row.set_child(Some(&row_box));
+                            delete_btn.update_property(&[Property::Label(&format!(
+                                "Delete contact {}",
+                                contact.email
+                            ))]);
+                            row.add_suffix(&edit_btn);
+                            row.add_suffix(&delete_btn);
 
                             // Clone values for use in both button closures
                             let app_for_edit = Rc::clone(&app);
