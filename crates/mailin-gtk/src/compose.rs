@@ -1348,6 +1348,13 @@ pub fn present(
                     banner.set_title("Draft saved");
                     banner.set_revealed(true);
                     title.set_title(base_title.as_str());
+                    // M4-E: auto-hide transient confirmation.
+                    let banner_hide = banner.clone();
+                    glib::timeout_add_seconds_local_once(3, move || {
+                        if banner_hide.title().as_str() == "Draft saved" {
+                            banner_hide.set_revealed(false);
+                        }
+                    });
                 }
                 Err(error) => {
                     dirty.set(true);
