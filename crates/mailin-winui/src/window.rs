@@ -802,6 +802,28 @@ impl MainWindow {
     fn show_messages(self: &Rc<Self>, messages: Vec<MessageHeader>, title: String, more: bool) {
         let now = format::now_unix();
         let empty = messages.is_empty();
+        // M3b-1 prep: compute structural diff for future incremental reconcile.
+        // Full row reuse requires retaining row/control refs and event revokers
+        // per message ID; runtime behavior must be verified on Windows CI.
+        let _list_diff = {
+            let old = self
+                .state()
+                .messages
+                .iter()
+                .map(|m| m.id)
+                .collect::<Vec<_>>();
+            let new_ids = messages.iter().map(|m| m.id).collect::<Vec<_>>();
+            mailin_core::list_diff::diff_by_id(&old, &new_ids, |id| *id)
+        };
+        let identical_ids = _list_diff.removed_desc.is_empty()
+            && _list_diff.inserted_count() == 0
+            && _list_diff
+                .reuse
+                .iter()
+                .enumerate()
+                .all(|(i, o)| *o == Some(i));
+        let _ = identical_ids; // reserved for incremental fast-path (Windows CI)
+
         self.message_events.clear();
         let _ = ui::clear(&self.widgets.message_list);
         self.checkboxes.borrow_mut().clear();
