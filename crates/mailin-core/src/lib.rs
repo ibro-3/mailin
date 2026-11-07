@@ -23,6 +23,7 @@ pub mod engine;
 pub mod error;
 pub mod html;
 mod imap;
+pub mod list_diff;
 pub mod mailto;
 pub mod model;
 pub mod oauth;

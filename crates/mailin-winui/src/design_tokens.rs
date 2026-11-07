@@ -3,75 +3,116 @@
 //! This module provides semantic design tokens (colors, spacing, typography, radii, shadows)
 //! to replace hardcoded values throughout the UI. Tokens can be swapped for high contrast
 //! mode or custom themes.
+//!
+//! Pure color/contrast helpers compile on all targets (M3b-2) so Linux tests can
+//! enforce WCAG contrast ratios.
 
+#[cfg(windows)]
 use mailin_winui_sys::FontWeight;
+
+/// Parse `#RRGGBB` into linear-ish sRGB components for contrast math.
+pub fn parse_hex(hex: &str) -> Option<(f64, f64, f64)> {
+    let h = hex.trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()? as f64 / 255.0;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()? as f64 / 255.0;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()? as f64 / 255.0;
+    Some((r, g, b))
+}
+
+fn to_linear(c: f64) -> f64 {
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn relative_luminance(hex: &str) -> Option<f64> {
+    let (r, g, b) = parse_hex(hex)?;
+    Some(0.2126 * to_linear(r) + 0.7152 * to_linear(g) + 0.0722 * to_linear(b))
+}
+
+/// WCAG contrast ratio between two colors.
+pub fn contrast_ratio(a: &str, b: &str) -> Option<f64> {
+    let la = relative_luminance(a)?;
+    let lb = relative_luminance(b)?;
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    Some((hi + 0.05) / (lo + 0.05))
+}
 
 /// Color tokens — semantic names that work in light and dark themes.
 #[derive(Debug, Clone, Copy)]
 pub struct Colors {
-    /// Primary destructive action color (e.g., delete, remove account)
     pub destructive: &'static str,
-    /// Subtitle/text secondary opacity (0.0-1.0)
     pub subtitle_opacity: f64,
-    /// Muted text color
     pub text_muted: &'static str,
-    /// Accent/primary color
     pub accent: &'static str,
-    /// Success/positive color
     pub success: &'static str,
-    /// Warning color
     pub warning: &'static str,
-    /// Error/negative color
     pub error: &'static str,
+    pub info: &'static str,
+    pub on_accent: &'static str,
 }
 
 impl Colors {
-    /// Default (light/theme-aware) color palette.
     pub fn default() -> Self {
         Self {
             destructive: "#C42B1C",
-            subtitle_opacity: 0.7,
+            subtitle_opacity: 0.85,
             text_muted: "#6B6B6B",
             accent: "#0067C0",
             success: "#107C10",
-            warning: "#CC7700",
+            // #A05A00 passes ~4.6:1 on white (M3b-2); old #CC7700 failed AA.
+            warning: "#A05A00",
             error: "#C42B1C",
+            info: "#0067C0",
+            on_accent: "#FFFFFF",
         }
     }
 
-    /// High contrast color palette.
+    pub fn dark() -> Self {
+        Self {
+            destructive: "#FF99A4",
+            subtitle_opacity: 0.85,
+            text_muted: "#C8C8C8",
+            accent: "#4CC2FF",
+            success: "#6CCB5F",
+            warning: "#FCE100",
+            error: "#FF99A4",
+            info: "#4CC2FF",
+            on_accent: "#000000",
+        }
+    }
+
     pub fn high_contrast() -> Self {
         Self {
             destructive: "#FF0000",
             subtitle_opacity: 1.0,
-            text_muted: "#808080",
-            accent: "#0066CC",
-            success: "#008000",
-            warning: "#CC6600",
+            text_muted: "#FFFFFF",
+            accent: "#1AEBFF",
+            success: "#3FF23F",
+            warning: "#FFFF00",
             error: "#FF0000",
+            info: "#1AEBFF",
+            on_accent: "#000000",
         }
     }
 }
 
-/// Spacing tokens — consistent spacing scale (multiples of 4).
 #[derive(Debug, Clone, Copy)]
 pub struct Spacing {
-    /// Extra small (4)
     pub xs: f64,
-    /// Small (8)
     pub sm: f64,
-    /// Medium (12)
     pub md: f64,
-    /// Large (16)
     pub lg: f64,
-    /// Extra large (24)
     pub xl: f64,
-    /// 2x large (32)
     pub xxl: f64,
 }
 
 impl Spacing {
-    /// Default spacing scale.
     pub fn default() -> Self {
         Self {
             xs: 4.0,
@@ -84,29 +125,19 @@ impl Spacing {
     }
 }
 
-/// Typography tokens — font sizes and weights.
 #[derive(Debug, Clone, Copy)]
 pub struct Typography {
-    /// Caption / small label (12)
     pub caption_size: f64,
-    /// Body text (14)
     pub body_size: f64,
-    /// Subheading / section title (16)
     pub subheading_size: f64,
-    /// Heading 3 / dialog section (18)
     pub h3_size: f64,
-    /// Heading 2 / page section (20)
     pub h2_size: f64,
-    /// Heading 1 / page title (24)
     pub h1_size: f64,
-    /// Semi-bold weight (600)
     pub weight_semibold: u16,
-    /// Bold weight (700)
     pub weight_bold: u16,
 }
 
 impl Typography {
-    /// Default typography scale.
     pub fn default() -> Self {
         Self {
             caption_size: 12.0,
@@ -121,19 +152,14 @@ impl Typography {
     }
 }
 
-/// Radius tokens — corner radius scale.
 #[derive(Debug, Clone, Copy)]
 pub struct Radii {
-    /// Small radius (4)
     pub sm: f64,
-    /// Medium radius (8)
     pub md: f64,
-    /// Large radius (12)
     pub lg: f64,
 }
 
 impl Radii {
-    /// Default radius scale.
     pub fn default() -> Self {
         Self {
             sm: 4.0,
@@ -143,19 +169,14 @@ impl Radii {
     }
 }
 
-/// Shadow/elevation tokens.
 #[derive(Debug, Clone, Copy)]
 pub struct Shadows {
-    /// Subtle shadow for cards/panels
     pub subtle: &'static str,
-    /// Medium shadow for dialogs
     pub medium: &'static str,
-    /// Strong shadow for tooltips/popovers
     pub strong: &'static str,
 }
 
 impl Shadows {
-    /// Default shadows (using CSS-style box-shadow strings for XAML).
     pub fn default() -> Self {
         Self {
             subtle: "0 1px 2px rgba(0,0,0,0.05)",
@@ -165,7 +186,6 @@ impl Shadows {
     }
 }
 
-/// Complete design token set for a theme.
 #[derive(Debug, Clone)]
 pub struct DesignTokens {
     pub colors: Colors,
@@ -176,7 +196,6 @@ pub struct DesignTokens {
 }
 
 impl DesignTokens {
-    /// Create default (light/theme-aware) tokens.
     pub fn default() -> Self {
         Self {
             colors: Colors::default(),
@@ -187,18 +206,21 @@ impl DesignTokens {
         }
     }
 
-    /// Create high contrast tokens.
-    pub fn high_contrast() -> Self {
+    pub fn dark() -> Self {
         Self {
-            colors: Colors::high_contrast(),
-            spacing: Spacing::default(),
-            typography: Typography::default(),
-            radii: Radii::default(),
-            shadows: Shadows::default(),
+            colors: Colors::dark(),
+            ..Self::default()
         }
     }
 
-    /// Create a solid color brush from a hex string.
+    pub fn high_contrast() -> Self {
+        Self {
+            colors: Colors::high_contrast(),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(windows)]
     pub fn solid_brush(&self, hex: &str) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         use mailin_winui_sys::XamlReader;
         const XMLNS: &str = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
@@ -208,44 +230,41 @@ impl DesignTokens {
         value.cast().map_err(Into::into)
     }
 
-    /// Get the destructive color brush.
+    #[cfg(windows)]
     pub fn destructive_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.destructive)
     }
-
-    /// Get the muted text color brush.
+    #[cfg(windows)]
     pub fn text_muted_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.text_muted)
     }
-
-    /// Get the accent color brush.
+    #[cfg(windows)]
     pub fn accent_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.accent)
     }
-
-    /// Get the success color brush.
+    #[cfg(windows)]
     pub fn success_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.success)
     }
-
-    /// Get the warning color brush.
+    #[cfg(windows)]
     pub fn warning_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.warning)
     }
-
-    /// Get the error color brush.
+    #[cfg(windows)]
     pub fn error_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.error)
     }
-
-    /// Get a FontWeight for semi-bold.
+    #[cfg(windows)]
+    pub fn info_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.info)
+    }
+    #[cfg(windows)]
     pub fn semibold_weight(&self) -> FontWeight {
         FontWeight {
             weight: self.typography.weight_semibold,
         }
     }
-
-    /// Get a FontWeight for bold.
+    #[cfg(windows)]
     pub fn bold_weight(&self) -> FontWeight {
         FontWeight {
             weight: self.typography.weight_bold,
@@ -253,53 +272,86 @@ impl DesignTokens {
     }
 }
 
-/// Global design token instance. Use [`set_tokens`] to switch themes at runtime.
-static mut TOKENS: DesignTokens = DesignTokens {
-    colors: Colors::default(),
-    spacing: Spacing::default(),
-    typography: Typography::default(),
-    radii: Radii::default(),
-    shadows: Shadows::default(),
-};
+#[cfg(windows)]
+static TOKENS: std::sync::LazyLock<std::sync::RwLock<DesignTokens>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(DesignTokens::default()));
 
-/// Get the current design tokens.
-pub fn tokens() -> &'static DesignTokens {
-    // SAFETY: Single-threaded UI access; tokens only change on theme switch.
-    unsafe { &TOKENS }
+/// Current tokens snapshot (M3b-2: no `static mut`; safe to read from UI thread).
+#[cfg(windows)]
+pub fn tokens() -> DesignTokens {
+    TOKENS.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Set the global design tokens (e.g., when theme changes).
+#[cfg(windows)]
 pub fn set_tokens(new_tokens: DesignTokens) {
-    // SAFETY: Single-threaded UI access.
-    unsafe { TOKENS = new_tokens };
+    *TOKENS.write().unwrap_or_else(|e| e.into_inner()) = new_tokens;
 }
 
-/// Theme mode for the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
-    /// Follow system theme
     System,
-    /// Force light theme
     Light,
-    /// Force dark theme
     Dark,
 }
 
-/// Apply a theme mode by updating the global tokens.
+#[cfg(windows)]
 pub fn apply_theme(mode: ThemeMode) {
-    // Check for system high contrast setting
     let high_contrast = mailin_winui_sys::AccessibilitySettings::new()
         .map(|s| s.HighContrast().unwrap_or(false))
         .unwrap_or(false);
 
-    let new_tokens = match mode {
-        ThemeMode::System | ThemeMode::Light | ThemeMode::Dark => {
-            if high_contrast {
-                DesignTokens::high_contrast()
-            } else {
-                DesignTokens::default()
-            }
+    let new_tokens = if high_contrast {
+        DesignTokens::high_contrast()
+    } else {
+        match mode {
+            ThemeMode::Dark => DesignTokens::dark(),
+            ThemeMode::System | ThemeMode::Light => DesignTokens::default(),
         }
     };
     set_tokens(new_tokens);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_contrast(fg: &str, bg: &str, min: f64, label: &str) {
+        let ratio = contrast_ratio(fg, bg).expect(label);
+        assert!(
+            ratio >= min,
+            "{label}: {fg} on {bg} contrast {ratio:.2}:1 < {min}:1"
+        );
+    }
+
+    #[test]
+    fn default_tokens_meet_wcag_aa_for_text() {
+        let c = Colors::default();
+        let bg = "#FFFFFF";
+        // text-like tokens against light background
+        assert_contrast(c.text_muted, bg, 4.5, "muted");
+        assert_contrast(c.accent, bg, 4.5, "accent");
+        assert_contrast(c.destructive, bg, 4.5, "destructive");
+        assert_contrast(c.error, bg, 4.5, "error");
+        assert_contrast(c.success, bg, 3.0, "success (large/icon)");
+        assert_contrast(c.warning, bg, 4.5, "warning");
+    }
+
+    #[test]
+    fn dark_tokens_meet_wcag_aa_for_text() {
+        let c = Colors::dark();
+        let bg = "#202020";
+        assert_contrast(c.text_muted, bg, 4.5, "dark muted");
+        assert_contrast(c.accent, bg, 4.5, "dark accent");
+        assert_contrast(c.destructive, bg, 4.5, "dark destructive");
+        assert_contrast(c.warning, bg, 4.5, "dark warning");
+    }
+}
+
+/// Cross-platform color snapshot for non-Windows compile contexts and tests.
+#[cfg(not(windows))]
+pub fn tokens() -> DesignTokens {
+    DesignTokens::default()
+}
+
+#[cfg(not(windows))]
+pub fn set_tokens(_new_tokens: DesignTokens) {}

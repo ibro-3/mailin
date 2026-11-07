@@ -362,7 +362,9 @@ pub fn present(
     let format_popover = StackPanel::new().context("could not create format popover")?;
     format_popover.SetOrientation(Orientation::Vertical)?;
     format_popover.SetVisibility(Visibility::Collapsed)?;
-    format_popover.SetBackground(&ui::solid_brush("#FFFFFF")?)?;
+    format_popover.SetBackground(&ui::solid_brush(
+        design_tokens::Colors::default().on_accent,
+    )?)?;
     ui::margin_all(&format_popover, 8.0)?;
     ui::append(&root, &format_popover)?;
 

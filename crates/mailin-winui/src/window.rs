@@ -1603,14 +1603,16 @@ impl MainWindow {
             let size_text = format::file_size(size);
             let size_block = ui::text(&size_text)?;
             if is_large {
-                let _ = size_block.SetForeground(&ui::solid_brush("#D13438")?); // error red
+                let _ = size_block
+                    .SetForeground(&ui::solid_brush(design_tokens::Colors::default().error)?);
             }
             ui::append(&row, &size_block)?;
         }
 
         if is_large {
             let warning = ui::text("⚠ Large file")?;
-            let _ = warning.SetForeground(&ui::solid_brush("#D13438")?);
+            let _ =
+                warning.SetForeground(&ui::solid_brush(design_tokens::Colors::default().error)?);
             ui::append(&row, &warning)?;
         }
 
@@ -4124,10 +4126,16 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
     let state_label = ui::text(&state_text)?;
     // Add color based on state
     match entry.state {
-        OutboxState::Queued => state_label.SetForeground(&ui::solid_brush("#0078D4")?)?, // accent blue
-        OutboxState::Sending => state_label.SetForeground(&ui::solid_brush("#FF8C00")?)?, // warning orange
-        OutboxState::Failed => state_label.SetForeground(&ui::solid_brush("#D13438")?)?, // error red
-        OutboxState::Sent => state_label.SetForeground(&ui::solid_brush("#107C10")?)?, // success green
+        OutboxState::Queued => {
+            state_label.SetForeground(&ui::solid_brush(design_tokens::Colors::default().info)?)?
+        }
+        OutboxState::Sending => state_label
+            .SetForeground(&ui::solid_brush(design_tokens::Colors::default().warning)?)?,
+        OutboxState::Failed => {
+            state_label.SetForeground(&ui::solid_brush(design_tokens::Colors::default().error)?)?
+        }
+        OutboxState::Sent => state_label
+            .SetForeground(&ui::solid_brush(design_tokens::Colors::default().success)?)?,
     }
     ui::append(&line, &state_label)?;
 
