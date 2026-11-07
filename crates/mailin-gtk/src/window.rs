@@ -5425,10 +5425,10 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {
 fn signature_label(status: mailin_core::SignatureStatus) -> &'static str {
     use mailin_core::SignatureStatus;
     match status {
-        SignatureStatus::Valid => "valid",
-        SignatureStatus::Invalid => "invalid",
-        SignatureStatus::UnknownKey => "unknown key",
-        SignatureStatus::Error => "error",
+        SignatureStatus::Valid => "Valid",
+        SignatureStatus::Invalid => "Invalid — do not trust this message",
+        SignatureStatus::UnknownKey => "Unknown key — cannot verify",
+        SignatureStatus::Error => "Could not verify signature",
     }
 }
 
