@@ -662,6 +662,18 @@ pub fn present(
     let attachments: Rc<RefCell<Vec<ComposeAttachment>>> =
         Rc::new(RefCell::new(draft.attachments.clone()));
     let dirty = Rc::new(Cell::new(false));
+    // M4-E: mark dirty on header edits.
+    for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
+        let dirty = Rc::clone(&dirty);
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        row.connect_changed(move |_| {
+            if !dirty.get() {
+                dirty.set(true);
+                title.set_title(&format!("● {}", base_title.as_str()));
+            }
+        });
+    }
     rebuild_attachments(
         &attachment_list,
         &attachments_group,

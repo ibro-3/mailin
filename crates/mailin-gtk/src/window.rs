@@ -2850,10 +2850,13 @@ impl MainWindow {
                     view.load_html(&rendered, None);
                     *self.find_target_view.borrow_mut() = Some(view.clone());
                     self.widgets.reader_body.append(&view);
-                    // If the source referenced cid: images that couldn't all be
-                    // resolved to inline attachments, show a small notice.
-                    let cid_refs = html_body.matches("cid:").count();
-                    if cid_refs > 0 && images.len() < cid_refs {
+                    // If cid: image sources remain unresolved after rewriting,
+                    // show a small notice (M4-D).
+                    let rendered_lower = rendered.to_ascii_lowercase();
+                    if rendered_lower.contains("src=\"cid:")
+                        || rendered_lower.contains("src='cid:")
+                        || rendered_lower.contains("srcset=\"cid:")
+                    {
                         self.widgets
                             .reader_body
                             .append(&notice_body("Some inline images couldn't be loaded."));
