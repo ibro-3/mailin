@@ -12,12 +12,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
 /// Build the document handed to the platform web view.
-pub fn document(
-    html: &str,
-    allow_remote: bool,
-    dark: bool,
-    inline_images: &[(String, String)],
-) -> String {
+///
+/// Colors follow the system `color-scheme` through `light-dark()`, so the
+/// document always renders with the palette the reader is also themed with
+/// and no palette values are duplicated in the core.
+pub fn document(html: &str, allow_remote: bool, inline_images: &[(String, String)]) -> String {
     let html = rewrite_cid_images(html, inline_images);
     let image_sources = if allow_remote {
         "data: cid: http: https:"
@@ -30,17 +29,13 @@ pub fn document(
          font-src data:; media-src 'none'; script-src 'nonce-{nonce}'; frame-src 'none'; \
          base-uri 'none'; form-action 'none';"
     );
-    let (background, foreground, link) = if dark {
-        ("#1e1e1e", "#eeeeee", "#78aeed")
-    } else {
-        ("#ffffff", "#1c1c1c", "#1c71d8")
-    };
     let head = format!(
         "<meta charset=\"utf-8\">\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
+         <meta name=\"color-scheme\" content=\"light dark\">\
          <style>\
-           html, body {{ background: {background}; color: {foreground}; }}\
+           html, body {{ background: light-dark(#ffffff, #1e1e1e); color: light-dark(#1c1c1c, #eeeeee); }}\
            body {{ margin: 0; padding: 0; font: 14px/1.5 system-ui, \"Segoe UI\", Cantarell, sans-serif;\
                    overflow-wrap: anywhere; }}\
            img, video {{ max-width: 100%; height: auto; }}\
@@ -48,7 +43,7 @@ pub fn document(
            pre {{ white-space: pre-wrap; }}\
            blockquote {{ margin-left: 1em; padding-left: 1em;\
                          border-left: 3px solid rgba(128, 128, 128, 0.4); }}\
-           a {{ color: {link}; }}\
+           a {{ color: light-dark(#1c71d8, #78aeed); }}\
          </style>"
     );
     // Lock down navigation and form submission even though the policy already
@@ -913,7 +908,6 @@ mod tests {
         let document = document(
             "<html><head><title>x</title></head><body>hi</body></html>",
             false,
-            false,
             &[],
         );
         assert!(document.contains("Content-Security-Policy"));
@@ -927,16 +921,16 @@ mod tests {
 
     #[test]
     fn remote_content_is_allowed_only_on_request() {
-        let blocked = document("<p>x</p>", false, false, &[]);
+        let blocked = document("<p>x</p>", false, &[]);
         assert!(blocked.contains("img-src data: cid:;"));
-        let allowed = document("<p>x</p>", true, true, &[]);
+        let allowed = document("<p>x</p>", true, &[]);
         assert!(allowed.contains("img-src data: cid: http: https:;"));
         assert!(allowed.contains("#1e1e1e"));
     }
 
     #[test]
     fn fragments_are_wrapped_in_a_complete_document() {
-        let document = document("<p>Hello</p>", false, false, &[]);
+        let document = document("<p>Hello</p>", false, &[]);
         assert!(document.starts_with("<!DOCTYPE html><html><head>"));
         assert!(document.contains("<body><p>Hello</p></body>"));
     }
@@ -945,7 +939,6 @@ mod tests {
     fn cid_images_become_data_urls() {
         let document = document(
             "<img src=\"cid:logo@example.com\"><img src=\"cid:other\">",
-            false,
             false,
             &[(
                 "logo@example.com".into(),
@@ -999,7 +992,6 @@ mod tests {
         let document = document(
             "<img src=\"cid:<logo@example.com>\">",
             false,
-            false,
             &[(
                 "logo@example.com".into(),
                 "data:image/png;base64,AAAA".into(),
@@ -1012,7 +1004,6 @@ mod tests {
     fn cid_rewriting_is_case_insensitive() {
         let document = document(
             "<img src=\"CID:logo@example.com\"><img src=\"Cid:other@example.com\">",
-            false,
             false,
             &[(
                 "logo@example.com".into(),
@@ -1029,7 +1020,6 @@ mod tests {
         let document = document(
             "<img src=\"cid:  logo@example.com  \">",
             false,
-            false,
             &[(
                 "logo@example.com".into(),
                 "data:image/png;base64,AAAA".into(),
@@ -1043,7 +1033,6 @@ mod tests {
     fn cid_rewriting_preserves_other_attributes() {
         let document = document(
             "<img src=\"cid:logo@example.com\" alt=\"Logo\" class=\"inline\" width=\"100\">",
-            false,
             false,
             &[(
                 "logo@example.com".into(),
@@ -1167,7 +1156,7 @@ mod tests {
 
     #[test]
     fn csp_policy_blocks_scripts_by_default() {
-        let doc = document("<script>alert(1)</script>", false, false, &[]);
+        let doc = document("<script>alert(1)</script>", false, &[]);
         assert!(doc.contains("script-src 'nonce-"));
         assert!(doc.contains("document.addEventListener('click'"));
         assert!(doc.contains("event.preventDefault()"));
@@ -1175,25 +1164,25 @@ mod tests {
 
     #[test]
     fn csp_policy_blocks_forms_by_default() {
-        let doc = document("<form action=\"/submit\"><input></form>", false, false, &[]);
+        let doc = document("<form action=\"/submit\"><input></form>", false, &[]);
         assert!(doc.contains("form-action 'none'"));
     }
 
     #[test]
     fn csp_policy_blocks_frames_by_default() {
-        let doc = document("<iframe src=\"/frame\"></iframe>", false, false, &[]);
+        let doc = document("<iframe src=\"/frame\"></iframe>", false, &[]);
         assert!(doc.contains("frame-src 'none'"));
     }
 
     #[test]
     fn csp_policy_blocks_base_uri_by_default() {
-        let doc = document("<base href=\"https://example.com/\">", false, false, &[]);
+        let doc = document("<base href=\"https://example.com/\">", false, &[]);
         assert!(doc.contains("base-uri 'none'"));
     }
 
     #[test]
     fn csp_policy_allows_inline_styles_only() {
-        let doc = document("<div style=\"color: red;\"></div>", false, false, &[]);
+        let doc = document("<div style=\"color: red;\"></div>", false, &[]);
         assert!(doc.contains("style-src 'unsafe-inline'"));
     }
 
@@ -1201,7 +1190,6 @@ mod tests {
     fn csp_policy_allows_data_fonts() {
         let doc = document(
             "<style>@font-face { src: url(data:font/woff2;base64,AAAA); }</style>",
-            false,
             false,
             &[],
         );
@@ -1278,8 +1266,8 @@ mod tests {
 
     #[test]
     fn csp_nonce_is_unique_per_document() {
-        let doc1 = document("<p>test</p>", false, false, &[]);
-        let doc2 = document("<p>test</p>", false, false, &[]);
+        let doc1 = document("<p>test</p>", false, &[]);
+        let doc2 = document("<p>test</p>", false, &[]);
         let nonce1 = extract_nonce(&doc1);
         let nonce2 = extract_nonce(&doc2);
         assert_ne!(nonce1, nonce2);
@@ -1288,31 +1276,30 @@ mod tests {
     }
 
     #[test]
-    fn dark_mode_colors_are_applied() {
-        let light = document("<p>test</p>", false, false, &[]);
-        let dark = document("<p>test</p>", true, true, &[]);
-        assert!(light.contains("#ffffff")); // light background
-        assert!(light.contains("#1c1c1c")); // light foreground
-        assert!(dark.contains("#1e1e1e")); // dark background
-        assert!(dark.contains("#eeeeee")); // dark foreground
+    fn document_follows_the_system_color_scheme() {
+        let doc = document("<p>test</p>", false, &[]);
+        assert!(doc.contains("<meta name=\"color-scheme\" content=\"light dark\">"));
+        assert!(doc.contains("light-dark(#ffffff, #1e1e1e)")); // background
+        assert!(doc.contains("light-dark(#1c1c1c, #eeeeee)")); // foreground
+        assert!(doc.contains("light-dark(#1c71d8, #78aeed)")); // link
     }
 
     #[test]
     fn document_always_has_doctype_and_html() {
-        let doc = document("<p>Hello</p>", false, false, &[]);
+        let doc = document("<p>Hello</p>", false, &[]);
         assert!(doc.starts_with("<!DOCTYPE html><html><head>"));
         assert!(doc.ends_with("</body></html>"));
     }
 
     #[test]
     fn document_head_contains_charset_meta() {
-        let doc = document("<p>test</p>", false, false, &[]);
+        let doc = document("<p>test</p>", false, &[]);
         assert!(doc.contains("<meta charset=\"utf-8\">"));
     }
 
     #[test]
     fn document_head_contains_referrer_policy() {
-        let doc = document("<p>test</p>", false, false, &[]);
+        let doc = document("<p>test</p>", false, &[]);
         assert!(doc.contains("<meta name=\"referrer\" content=\"no-referrer\">"));
     }
 
@@ -1331,12 +1318,7 @@ mod tests {
 
     #[test]
     fn inject_head_ignores_head_inside_a_comment() {
-        let doc = document(
-            "<body><!-- <head> decoy --><p>hello</p></body>",
-            false,
-            false,
-            &[],
-        );
+        let doc = document("<body><!-- <head> decoy --><p>hello</p></body>", false, &[]);
         let csp = csp_position(&doc);
         let body = doc.find("<p>hello</p>").expect("body text");
         assert!(csp < body, "CSP must be injected before body content");
@@ -1346,7 +1328,6 @@ mod tests {
     fn inject_head_ignores_head_inside_a_script() {
         let doc = document(
             "<html><body><script>var s = \"<head>\";</script><img src=\"https://tracker.example/x\"></body></html>",
-            false,
             false,
             &[],
         );
@@ -1359,7 +1340,6 @@ mod tests {
     fn inject_head_does_not_treat_header_as_head() {
         let doc = document(
             "<html><body><img src=\"https://tracker.example/p.png\"><header>Hi</header></body></html>",
-            false,
             false,
             &[],
         );
@@ -1376,7 +1356,6 @@ mod tests {
         let doc = document(
             "<div data-x=\"<head>\"><img src=\"https://tracker.example/x\"></div>",
             false,
-            false,
             &[],
         );
         let csp = csp_position(&doc);
@@ -1389,7 +1368,6 @@ mod tests {
         let doc = document(
             "<html><body><textarea><head></textarea><title><head></title></body></html>",
             false,
-            false,
             &[],
         );
         let csp = csp_position(&doc);
@@ -1401,7 +1379,6 @@ mod tests {
     fn inject_head_still_injects_after_real_head_with_attributes() {
         let doc = document(
             "<html><head profile=\"https://x.test\"><title>t</title></head><body>hi</body></html>",
-            false,
             false,
             &[],
         );

@@ -4,6 +4,7 @@
 //! `unzip`/`tar`). The WinUI projection generator uses `windows-bindgen` so the
 //! committed bindings can be regenerated from the pinned metadata packages.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -53,6 +54,7 @@ fn run() -> Result<()> {
         }
         "it-down-tls" => compose_file(&["down", "-v"], "docker-compose.it-tls.yml"),
         "it-certs" => it_certs(),
+        "winui-deref" => winui_deref(),
         "winui-bindgen" => winui_bindgen(),
         "winui-runtime" => winui_runtime(),
         "package-win" => package_win(),
@@ -76,6 +78,7 @@ fn usage() {
            it-up-tls       generate local test CA and start TLS-enabled GreenMail\n\
            it-down-tls     stop the TLS test server and drop its volumes\n\
            it-certs        generate the test CA and GreenMail PKCS12 keystore\n\
+           winui-deref     generate interface Deref chains for the projection\n\
            winui-bindgen   regenerate the WinUI 3 projection from pinned metadata\n\
            winui-runtime   download the Windows App SDK bootstrapper for local builds\n\
            package-win     build self-contained Windows zip, MSIX and Inno Setup installer"
@@ -383,6 +386,10 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
         "pub struct TypedEventHandlerBox<",
     );
     fs::write(&bindings_path, content)?;
+
+    // The projection has no interface-to-interface `Deref`, so regenerate the
+    // chains from the same metadata.
+    winui_deref()?;
 
     Ok(())
 }
@@ -840,4 +847,203 @@ fn copy_winmds(source: &Path, destination: &Path) -> Result<usize> {
         }
     }
     Ok(copied)
+}
+
+/// Generate the `Deref` chain for projected interfaces from the pinned
+/// metadata.
+///
+/// The `--minimal` bindings emit a `Deref` from a class to its primary
+/// interface, but never from one interface to its parent. The WinUI front-end
+/// calls parent-interface members (`SetHeight`, `SetContent`, `ShowAsync`, ...)
+/// straight on control values, which needs those chains.
+///
+/// The interfaces are read from `bindings.rs` (every `define_interface!`
+/// entry) and the parent relations come from the `InterfaceImpl` rows of the
+/// pinned metadata. The result is written to
+/// `crates/mailin-winui-sys/src/deref.rs` and included by that crate.
+///
+/// Run `cargo xtask winui-bindgen && cargo xtask winui-deref` after changing
+/// the projection; `winui-bindgen` calls this command itself.
+fn winui_deref() -> Result<()> {
+    use windows_metadata::reader::{File, Index, Item, TypeCategory};
+    use windows_metadata::{Type, TypeName};
+
+    let root = repo_root()?;
+    let metadata = root.join("target/winui-bindgen/metadata");
+    if !metadata.is_dir() {
+        bail!("no metadata in {}: run `cargo xtask winui-bindgen` first", metadata.display());
+    }
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&metadata).context("could not read the metadata directory")? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "winmd") {
+            if let Some(file) = File::read(&path) {
+                files.push(file);
+            }
+        }
+    }
+    if files.is_empty() {
+        bail!("no .winmd files in {}", metadata.display());
+    }
+    let index = Index::new(files).leak();
+
+    // Parent interfaces of every interface in the metadata.
+    let mut parents: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
+    for (namespace, name, item) in index.iter_items() {
+        let Item::Type(def) = item else { continue };
+        if def.category() != TypeCategory::Interface {
+            continue;
+        }
+        // Generic interfaces reference their own parameters in the parent
+        // signature, so the type arguments have to be supplied.
+        let generic_args: Vec<Type> = def
+            .generic_params()
+            .map(|parameter| Type::Generic(parameter.name().to_string(), parameter.sequence()))
+            .collect();
+        let implemented = def
+            .interface_impls()
+            .filter_map(|interface| match interface.interface(&generic_args) {
+                Type::ClassName(TypeName {
+                    namespace,
+                    name,
+                    generics,
+                }) if generics.is_empty() => Some((namespace, name)),
+                _ => None,
+            })
+            .filter(|(namespace, name)| {
+                !(*namespace == "Windows" && (*name == "Foundation" || *name == "Win32"))
+                    && *name != "IUnknown"
+                    && *name != "IInspectable"
+            })
+            .collect();
+        parents.insert((namespace.to_string(), name.to_string()), implemented);
+    }
+
+    // Interfaces that the projection actually emits.
+    let bindings = fs::read_to_string(root.join("crates/mailin-winui-sys/src/bindings.rs"))?;
+    let projected = projected_interfaces(&bindings);
+
+    if std::env::var_os("WINUI_DEREF_DEBUG").is_some() {
+        for (namespace, name, item) in index.iter_items() {
+            let Item::Type(def) = item else { continue };
+            if !matches!(name, "IControl" | "ITextBox" | "IFrameworkElement" | "IUIElement" | "Control" | "Button") {
+                continue;
+            }
+            println!(
+                "{namespace}.{name}: category={:?} extends={:?} impls={:?}",
+                def.category(),
+                def.extends().map(|e| (e.namespace().to_string(), e.name().to_string())),
+                def.interface_impls()
+                    .map(|i| i.interface(&[]))
+                    .map(|t| format!("{t:?}"))
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    // Map every projected (flat) name back to its metadata entry. The flat
+    // projection cannot express two types with the same name from different
+    // namespaces, so an ambiguous name is dropped rather than guessed.
+    let mut by_name: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for key in parents.keys() {
+        by_name.entry(key.1.clone()).or_default().push(key.clone());
+    }
+    let mut full_of: HashMap<String, (String, String)> = HashMap::new();
+    for name in &projected {
+        let candidates = by_name.get(name).map(Vec::as_slice).unwrap_or_default();
+        if let [only] = candidates {
+            full_of.insert(name.clone(), only.clone());
+        }
+    }
+
+    // Walk the parent chain of every projected interface and emit one `Deref`
+    // per edge whose parent is projected too.
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut emitted: HashSet<(String, String)> = HashSet::new();
+    for name in &projected {
+        let mut current = match full_of.get(name) {
+            Some(full) => full.clone(),
+            None => continue,
+        };
+        let mut visited: HashSet<(String, String)> = HashSet::new();
+        while visited.insert(current.clone()) {
+            let parents = match parents.get(&current) {
+                Some(parents) => parents,
+                None => break,
+            };
+            for parent in parents {
+                let short = &parent.1;
+                if !projected.contains(short) || !full_of.contains_key(short) {
+                    continue;
+                }
+                if emitted.insert((name.clone(), short.clone())) {
+                    edges.push((name.clone(), short.clone()));
+                }
+            }
+            // WinUI interfaces form a single chain, but guard against a
+            // metadata cycle by following the first projected parent only.
+            match parents
+                .iter()
+                .find(|parent| projected.contains(&parent.1) && full_of.contains_key(&parent.1))
+            {
+                Some(next) => current = next.clone(),
+                None => break,
+            }
+        }
+    }
+    edges.sort();
+
+    let out = root.join("crates/mailin-winui-sys/src/deref.rs");
+    let mut text = String::from(
+        "//! `Deref` chains between projected interfaces.\n\
+         //!\n\
+         //! Generated by `cargo xtask winui-deref` from the pinned WinUI\n\
+         //! metadata; see [`winui_ext`] for the hand-written helpers.\n\
+         //!\n\
+         //! The `Deref` target is the parent interface, so a value of a\n\
+         //! derived interface exposes the members of every ancestor.\n\n",
+    );
+    for (from, to) in &edges {
+        text.push_str(&format!(
+            "impl core::ops::Deref for {from} {{\n\
+             \x20   type Target = {to};\n\
+             \x20   fn deref(&self) -> &Self::Target {{\n\
+             \x20       unsafe {{ core::mem::transmute(self) }}\n\
+             \x20   }}\n\
+             }}\n\n"
+        ));
+    }
+    fs::write(&out, text)?;
+    println!(
+        "wrote {} interface Deref impls to {}",
+        edges.len(),
+        out.strip_prefix(root).unwrap().display()
+    );
+    Ok(())
+}
+
+/// Names of every interface the projection emits, read from the
+/// `define_interface!` invocations in `bindings.rs`.
+fn projected_interfaces(bindings: &str) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let mut lines = bindings.lines();
+    while let Some(line) = lines.next() {
+        if !line.contains("define_interface!(") {
+            continue;
+        }
+        // The interface name is the first argument on the next line.
+        if let Some(name) = lines.next() {
+            let name = name.trim().trim_end_matches(',');
+            if !name.is_empty()
+                && name
+                    .chars()
+                    .all(|character| character.is_alphanumeric() || character == '_')
+            {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
 }

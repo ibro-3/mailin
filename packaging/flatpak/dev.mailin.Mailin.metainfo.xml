@@ -50,12 +50,7 @@
   <releases>
     <release version="0.1.0" date="2026-10-25">
       <description>
-        <p>Milestone 7: Windows packaging (self-contained zip, MSIX, Inno Setup installer), supply-chain hardening (cargo-deny), HTML policy edge-case tests, secrets as SecretString end-to-end, accessibility (GTK: a11y labels, keyboard nav, shortcuts overlay; WinUI: keyboard accelerators), CONDSTORE CHANGEDSINCE flag-delta sync with fallback.</p>
-      </description>
-    </release>
-    <release version="0.1.0" date="2026-10-23">
-      <description>
-        <p>First milestone 4 build: HTML mail, attachments, compose, notifications.</p>
+        <p>Milestone 7: HTML mail with a hardened WebKit renderer (remote content blocked by default), attachments, composition, notifications, IMAP/SMTP sync with CONDSTORE CHANGEDSINCE flag-delta sync, full-text search, PGP support, Windows packaging (self-contained zip, MSIX, Inno Setup installer), accessibility (keyboard navigation, shortcuts overlay, screen-reader labels).</p>
       </description>
     </release>
   </releases>
