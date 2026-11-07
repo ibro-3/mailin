@@ -4377,20 +4377,26 @@ impl MainWindow {
         let app = this.app.clone();
         let this = Rc::clone(&this);
         let entry_for_response = entry.clone();
+        let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
+        let win = this.widgets.window.clone();
         dialog.connect_response(None, move |dialog, response| {
             dialog.close();
-            if response != "create" {
-                return;
+            if response == "create" {
+                let name = entry_for_response.text().trim().to_owned();
+                if !name.is_empty() {
+                    app.engine
+                        .create_folder(account_id, name, "/".to_owned(), FolderRole::Other);
+                    this.refresh_folders();
+                }
             }
-            let name = entry_for_response.text().trim().to_owned();
-            if name.is_empty() {
-                return;
+            if let Some(focus) = prior_focus.clone() {
+                let _ = focus.grab_focus();
+            } else {
+                let _ = win.grab_focus();
             }
-            app.engine
-                .create_folder(account_id, name, "/".to_owned(), FolderRole::Other);
-            this.refresh_folders();
         });
         dialog.present();
+        entry.grab_focus();
     }
 
     fn rename_folder(this: Rc<Self>, folder_id: String) {
