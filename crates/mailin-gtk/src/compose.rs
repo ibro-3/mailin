@@ -609,7 +609,7 @@ pub fn present(
                     state.set(false);
                     encrypt_toggle.remove_css_class("suggested-action");
                     banner.set_title(&format!(
-                        "Missing public keys for: {}. Add keys or send without encryption.",
+                        "Missing public keys for: {}. Encryption turned off — add keys in Key Manager or send without encryption.",
                         missing.join(", ")
                     ));
                     banner.set_button_label(Some("Open Key Manager"));
