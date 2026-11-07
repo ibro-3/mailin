@@ -1020,93 +1020,98 @@ pub fn present(
     refresh_trust();
 
     // Templates manager: populate list and handle add/edit/delete
-    let refresh_templates = {
+    let refresh_templates: RefreshFn = Rc::new(RefCell::new(None));
+    {
         let app = Rc::clone(&app);
         let account_id = existing_account.as_ref().map(|a| a.id);
         let templates_list = templates_list.clone();
         let dialog = dialog.clone();
         let error_label = error_label.clone();
-        move || {
+        let refresh_templates_main = Rc::clone(&refresh_templates);
+        let refresh_templates_for_edit = Rc::clone(&refresh_templates);
+        let refresh_templates_for_delete = Rc::clone(&refresh_templates);
+        *refresh_templates_main.borrow_mut() = Some(Box::new(move || {
             if let Some(account_id) = account_id {
                 while let Some(child) = templates_list.first_child() {
                     templates_list.remove(&child);
                 }
                 if let Ok(templates) = app.mailin.store().list_templates(&account_id) {
-                    if templates.is_empty() {
-                        // Placeholder is shown automatically
-                    } else {
-                        for template in templates {
-                            let row = adw::ActionRow::builder()
-                                .title(&template.name)
-                                .subtitle(&template.subject)
-                                .build();
-                            row.set_activatable(false);
-                            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
-                            edit_btn.add_css_class("flat");
-                            edit_btn.set_valign(gtk::Align::Center);
-                            edit_btn.set_tooltip_text(Some("Edit template"));
-                            edit_btn.update_property(&[Property::Label(&format!(
-                                "Edit template {}",
-                                template.name
-                            ))]);
-                            let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
-                            delete_btn.add_css_class("flat");
-                            delete_btn.add_css_class("destructive-action");
-                            delete_btn.set_valign(gtk::Align::Center);
-                            delete_btn.set_tooltip_text(Some("Delete template"));
-                            delete_btn.update_property(&[Property::Label(&format!(
-                                "Delete template {}",
-                                template.name
-                            ))]);
-                            row.add_suffix(&edit_btn);
-                            row.add_suffix(&delete_btn);
+                    for template in templates {
+                        let row = adw::ActionRow::builder()
+                            .title(&template.name)
+                            .subtitle(&template.subject)
+                            .build();
+                        row.set_activatable(false);
+                        let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+                        edit_btn.add_css_class("flat");
+                        edit_btn.set_valign(gtk::Align::Center);
+                        edit_btn.set_tooltip_text(Some("Edit template"));
+                        edit_btn.update_property(&[Property::Label(&format!(
+                            "Edit template {}",
+                            template.name
+                        ))]);
+                        let delete_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                        delete_btn.add_css_class("flat");
+                        delete_btn.add_css_class("destructive-action");
+                        delete_btn.set_valign(gtk::Align::Center);
+                        delete_btn.set_tooltip_text(Some("Delete template"));
+                        delete_btn.update_property(&[Property::Label(&format!(
+                            "Delete template {}",
+                            template.name
+                        ))]);
+                        row.add_suffix(&edit_btn);
+                        row.add_suffix(&delete_btn);
 
-                            // Clone values for use in both button closures
-                            let app_for_edit = Rc::clone(&app);
-                            let app_for_delete = Rc::clone(&app);
-                            let _templates_list_for_edit = templates_list.clone();
-                            let _templates_list_for_delete = templates_list.clone();
-                            let error_label_for_edit = error_label.clone();
-                            let error_label_for_delete = error_label.clone();
-                            let template_name_for_edit = template.name.clone();
-                            let template_name_for_delete = template.name.clone();
-                            let template_subject = template.subject.clone();
-                            let template_body = template.body.clone();
-                            edit_btn.connect_clicked({
-                                let dialog = dialog.clone();
-                                move |_| {
-                                    edit_template_dialog(
-                                        &dialog,
-                                        &app_for_edit,
-                                        account_id,
-                                        &template_name_for_edit,
-                                        &template_subject,
-                                        &template_body,
-                                        &error_label_for_edit,
-                                    );
+                        let app_for_edit = Rc::clone(&app);
+                        let app_for_delete = Rc::clone(&app);
+                        let error_label_for_edit = error_label.clone();
+                        let error_label_for_delete = error_label.clone();
+                        let template_name_for_edit = template.name.clone();
+                        let template_name_for_delete = template.name.clone();
+                        let template_subject = template.subject.clone();
+                        let template_body = template.body.clone();
+                        let refresh_for_edit = Rc::clone(&refresh_templates_for_edit);
+                        let refresh_for_delete = Rc::clone(&refresh_templates_for_delete);
+                        edit_btn.connect_clicked({
+                            let dialog = dialog.clone();
+                            move |_| {
+                                edit_template_dialog(
+                                    &dialog,
+                                    &app_for_edit,
+                                    account_id,
+                                    &template_name_for_edit,
+                                    &template_subject,
+                                    &template_body,
+                                    &error_label_for_edit,
+                                    Rc::clone(&refresh_for_edit),
+                                );
+                            }
+                        });
+                        delete_btn.connect_clicked(move |_| {
+                            if let Err(e) = app_for_delete
+                                .mailin
+                                .store()
+                                .delete_template(&account_id, &template_name_for_delete)
+                            {
+                                error_label_for_delete
+                                    .set_text(&format!("Could not delete template: {e}"));
+                                error_label_for_delete.set_visible(true);
+                            } else {
+                                error_label_for_delete.set_visible(false);
+                                if let Some(refresh) = refresh_for_delete.borrow().as_ref() {
+                                    refresh();
                                 }
-                            });
-                            delete_btn.connect_clicked(move |_| {
-                                if let Err(e) = app_for_delete
-                                    .mailin
-                                    .store()
-                                    .delete_template(&account_id, &template_name_for_delete)
-                                {
-                                    error_label_for_delete
-                                        .set_text(&format!("Could not delete template: {e}"));
-                                    error_label_for_delete.set_visible(true);
-                                } else {
-                                    error_label_for_delete.set_visible(false);
-                                }
-                            });
-                            templates_list.append(&row);
-                        }
+                            }
+                        });
+                        templates_list.append(&row);
                     }
                 }
             }
-        }
-    };
-    refresh_templates();
+        }));
+    }
+    if let Some(refresh) = refresh_templates.borrow().as_ref() {
+        refresh();
+    }
 
     // Contacts manager: populate list and handle add/edit/delete
     // Use Rc<RefCell> to allow the closure to be called from within itself
@@ -1249,7 +1254,7 @@ pub fn present(
         let _templates_list = templates_list.clone();
         let dialog = dialog.clone();
         let error_label = error_label.clone();
-        let refresh: Rc<dyn Fn()> = Rc::new(refresh_templates.clone());
+        let refresh = Rc::clone(&refresh_templates);
         move |_| {
             if let Some(account_id) = account_id {
                 new_template_dialog(&dialog, &app, account_id, &error_label, Rc::clone(&refresh));
@@ -1515,7 +1520,7 @@ fn new_template_dialog(
     app: &Rc<AppState>,
     account_id: AccountId,
     error_label: &gtk::Label,
-    refresh: Rc<dyn Fn()>,
+    refresh: RefreshFn,
 ) {
     let dialog = adw::MessageDialog::builder()
         .heading("New Template")
@@ -1585,7 +1590,9 @@ fn new_template_dialog(
                 {
                     Ok(_) => {
                         error_label.set_visible(false);
-                        refresh();
+                        if let Some(r) = refresh.borrow().as_ref() {
+                            r();
+                        }
                     }
                     Err(e) => {
                         set_status_message(
@@ -1616,6 +1623,7 @@ fn edit_template_dialog(
     current_subject: &str,
     current_body: &str,
     error_label: &gtk::Label,
+    refresh: RefreshFn,
 ) {
     let dialog = adw::MessageDialog::builder()
         .heading("Edit Template")
@@ -1692,6 +1700,9 @@ fn edit_template_dialog(
                 {
                     Ok(_) => {
                         error_label.set_visible(false);
+                        if let Some(r) = refresh.borrow().as_ref() {
+                            r();
+                        }
                     }
                     Err(e) => {
                         set_status_message(
