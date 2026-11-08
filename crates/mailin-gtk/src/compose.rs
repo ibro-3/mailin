@@ -275,6 +275,12 @@ pub fn present(
             }}
             document.execCommand('insertHTML', false, html);
         }}
+        // M4-E: report body edits so the draft can be marked dirty.
+        document.addEventListener('input', function() {{
+            if (window.webkit && window.webkit.messageHandlers.inputHandler) {{
+                window.webkit.messageHandlers.inputHandler.postMessage('input');
+            }}
+        }});
         document.addEventListener('paste', function(e) {{
             var data = e.clipboardData || window.clipboardData;
             if (!data) {{
@@ -672,6 +678,25 @@ pub fn present(
     let attachments: Rc<RefCell<Vec<ComposeAttachment>>> =
         Rc::new(RefCell::new(draft.attachments.clone()));
     let dirty = Rc::new(Cell::new(false));
+
+    // M4-E: typing in the body marks the draft dirty, so the title marker
+    // and the close warning stay accurate.
+    {
+        let user_content = user_content.clone();
+        user_content.register_script_message_handler("inputHandler", None);
+        let dirty = Rc::clone(&dirty);
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        user_content.connect_script_message_received(
+            Some("inputHandler"),
+            move |_, _value: &JSValue| {
+                if !dirty.get() {
+                    dirty.set(true);
+                    title.set_title(&format!("● {}", base_title.as_str()));
+                }
+            },
+        );
+    }
     // M4-E: mark dirty on header edits.
     for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
         let dirty = Rc::clone(&dirty);

@@ -86,6 +86,41 @@ pub fn present(
     let sent = Arc::new(AtomicBool::new(false));
     let is_html_mode = Arc::new(AtomicBool::new(draft.html_body.is_some()));
 
+    // M4-E: the window title carries the dirty marker. The window is created
+    // after the editor, so it is kept in a slot that the dirty helper can
+    // reach once it exists.
+    let window_slot: Rc<RefCell<Option<Window>>> = Rc::new(RefCell::new(None));
+    let update_title: Rc<dyn Fn(bool)> = {
+        let window_slot = Rc::clone(&window_slot);
+        Rc::new(move |is_dirty: bool| {
+            let title = if is_dirty {
+                "● New Message"
+            } else {
+                "New Message"
+            };
+            if let Some(window) = window_slot.borrow().as_ref() {
+                let _ = window.SetTitle(title);
+            }
+        })
+    };
+    let mark_dirty: Rc<dyn Fn()> = {
+        let dirty = Arc::clone(&dirty);
+        let update_title = Rc::clone(&update_title);
+        Rc::new(move || {
+            dirty.store(true, Ordering::Relaxed);
+            update_title(true);
+        })
+    };
+    // Mark the draft clean again (used after a successful save).
+    let mark_clean: Rc<dyn Fn()> = {
+        let dirty = Arc::clone(&dirty);
+        let update_title = Rc::clone(&update_title);
+        Rc::new(move || {
+            dirty.store(false, Ordering::Relaxed);
+            update_title(false);
+        })
+    };
+
     // Shared state for one in-flight content capture (send or draft save).
     #[derive(Default)]
     struct PendingCapture {
@@ -110,7 +145,7 @@ pub fn present(
     let webview_for_messages = webview.clone();
     let pending_capture_clone = pending_capture.clone();
     let attachments_for_paste = attachments.clone();
-    let dirty_for_paste = dirty.clone();
+    let mark_dirty_for_paste = Rc::clone(&mark_dirty);
 
     let message_token = webview.WebMessageReceived(&TypedEventHandler::new(move |_sender, args| {
         if let Ok(args) = args {
@@ -120,6 +155,10 @@ pub fn present(
                 if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&message) {
                     if let Some(msg_type) = payload.get("type").and_then(|v| v.as_str()) {
                         match msg_type {
+                            // M4-E: body edits mark the draft dirty.
+                            "input" => {
+                                mark_dirty_for_paste();
+                            }
                             "pasteHtml" => {
                                 if let Some(html) = payload.get("html").and_then(|v| v.as_str()) {
                                     let sanitized = sanitize_html(html);
@@ -148,7 +187,7 @@ pub fn present(
                                                     if let Ok(mut items) = attachments_for_paste.lock() {
                                                         items.push(attachment);
                                                     }
-                                                    dirty_for_paste.store(true, Ordering::Relaxed);
+                                                    mark_dirty_for_paste();
                                                     // Note: attachment list rebuild will be triggered by UI setup
                                                     let script = format!(
                                                         "__mailinInsert({});",
@@ -255,6 +294,10 @@ pub fn present(
                 content: content
             }}));
         }}
+        // M4-E: report body edits so the draft can be marked dirty.
+        document.addEventListener('input', function() {{
+            window.chrome.webview.postMessage(JSON.stringify({{ type: 'input' }}));
+        }});
         document.addEventListener('paste', function(e) {{
             var data = e.clipboardData || window.clipboardData;
             if (!data) {{
@@ -312,17 +355,26 @@ pub fn present(
     let root = Grid::new().context("could not create the compose layout")?;
     ui::auto_row(&root)?;
     ui::auto_row(&root)?;
+    ui::auto_row(&root)?;
     ui::star_row(&root)?;
+    // M4-E: the composer needs room for the recipient fields; below this
+    // width the header controls would clip.
+    root.SetMinWidth(720.0)?;
+
+    // M4-E: the title gets its own row so the action bar can stay compact.
+    let title = ui::heading2(&format!("New Message — {}", account.email))?;
+    ui::stretch_horizontal(&title)?;
+    ui::margin_horizontal(&title, 16.0)?;
+    ui::margin_vertical(&title, 8.0)?;
+    ui::set_row(&title, 0)?;
+    ui::append(&root, &title)?;
 
     let header = ui::stack_sm(Orientation::Horizontal)?;
     ui::margin_horizontal(&header, 16.0)?;
     ui::margin_vertical(&header, 8.0)?;
-    let title = ui::heading2(&format!("New Message — {}", account.email))?;
-    ui::stretch_horizontal(&title)?;
-    ui::append(&header, &title)?;
 
-    // Place WebView2 in row 2 (will be added after header setup)
-    ui::set_row(&webview, 2)?;
+    // Place WebView2 in the last (star) row.
+    ui::set_row(&webview, 3)?;
     ui::append(&root, &webview)?;
 
     let error: TextBlock = ui::text("")?;
@@ -461,7 +513,7 @@ pub fn present(
     ui::append(&header, &encrypt_row)?;
     ui::append(&header, &sign_row)?;
 
-    ui::set_row(&header, 0)?;
+    ui::set_row(&header, 2)?;
     ui::append(&root, &header)?;
 
     let form = ui::stack_md(Orientation::Vertical)?;
@@ -510,6 +562,9 @@ pub fn present(
     let window = Window::new().context("could not create the compose window")?;
     window.SetTitle("New Message")?;
     window.SetContent(&root)?;
+    // Publish the window so the dirty-title helper can reach it.
+    *window_slot.borrow_mut() = Some(window.clone());
+    update_title(dirty.load(Ordering::Relaxed));
 
     // Rebuild attachments now that UI is ready
     rebuild_attachments(
@@ -571,6 +626,8 @@ pub fn present(
         let app = Arc::clone(&app);
         let dirty = Arc::clone(&dirty);
         let sent = Arc::clone(&sent);
+        let mark_clean = Rc::clone(&mark_clean);
+        let mark_dirty = Rc::clone(&mark_dirty);
         let banner = error.clone();
         let account_id = account.id;
         let draft_key = Arc::clone(&draft_key);
@@ -596,6 +653,8 @@ pub fn present(
             let app = Arc::clone(&app);
             let banner = banner.clone();
             let dirty = Arc::clone(&dirty);
+            let mark_clean = Rc::clone(&mark_clean);
+            let mark_dirty = Rc::clone(&mark_dirty);
             let to = to.clone();
             let cc = cc.clone();
             let bcc = bcc.clone();
@@ -631,9 +690,13 @@ pub fn present(
                             app.engine.save_draft(account_id, outgoing);
                             let _ = banner.SetText("Draft saved");
                             let _ = ui::set_visible(&banner, true);
+                            // M4-E: the title drops the dirty marker once the
+                            // draft is stored.
+                            mark_clean();
                         }
                         Err(failure) => {
                             dirty.store(true, Ordering::Relaxed);
+                            mark_dirty();
                             let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
                             let _ = ui::set_visible(&banner, true);
                         }
@@ -643,14 +706,15 @@ pub fn present(
                 // A capture is already in flight; restore the dirty marker so
                 // the next autosave or close retries this save.
                 dirty.store(true, Ordering::Relaxed);
+                mark_dirty();
             }
         })
     };
 
     for textbox in [&to, &cc, &bcc, &subject] {
-        let dirty = Arc::clone(&dirty);
+        let mark_dirty = Rc::clone(&mark_dirty);
         revokers.keep(ui::on_text_changed(textbox, move || {
-            dirty.store(true, Ordering::Relaxed);
+            mark_dirty();
         })?);
     }
     revokers.keep(ui::on_click(&save, {
@@ -664,7 +728,7 @@ pub fn present(
         let attachments = Arc::clone(&attachments);
         let events = attachment_events.clone();
         let banner = error.clone();
-        let dirty = Arc::clone(&dirty);
+        let mark_dirty = Rc::clone(&mark_dirty);
         move || {
             let paths = platform::pick_files("Attach files");
             let mut failed = None;
@@ -674,7 +738,7 @@ pub fn present(
                         if let Ok(mut items) = attachments.lock() {
                             items.push(attachment);
                         }
-                        dirty.store(true, Ordering::Relaxed);
+                        mark_dirty();
                     }
                     Err(message) => failed = Some(message),
                 }
