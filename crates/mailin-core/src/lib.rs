@@ -15,6 +15,7 @@
 pub mod account;
 pub mod autoconfig;
 mod caldav;
+pub mod cid;
 pub mod client;
 pub mod compose;
 pub mod config;
@@ -34,6 +35,7 @@ pub mod search;
 mod smtp;
 pub mod store;
 mod sync;
+pub mod text;
 mod tls;
 
 pub use account::{
@@ -62,6 +64,7 @@ pub use model::{
 pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use plugins::PluginSystem;
 pub use store::{FolderUpsert, Store};
+pub use text::{plural, plural_noun, plural_suffix};
 
 #[cfg(feature = "keyring")]
 pub use credentials::KeyringCredentials;

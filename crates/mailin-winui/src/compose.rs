@@ -668,6 +668,10 @@ pub fn present(
             let from_addr = account.email.clone();
             let on_done: Box<dyn FnOnce(Option<String>, String)> =
                 Box::new(move |html_body, body_text: String| {
+                    let snapshot = attachments
+                        .lock()
+                        .map(|items| items.clone())
+                        .unwrap_or_default();
                     let outgoing = OutgoingMessage {
                         from_name,
                         from_addr,
@@ -676,14 +680,11 @@ pub fn present(
                         bcc: ui::text_value(&bcc),
                         subject: ui::text_value(&subject),
                         body: body_text,
-                        html_body,
+                        html_body: prune_unresolved_cid_images(html_body, &snapshot),
                         in_reply_to,
                         references,
                         draft_key: draft_key.lock().map(|key| key.clone()).ok(),
-                        attachments: attachments
-                            .lock()
-                            .map(|items| items.clone())
-                            .unwrap_or_default(),
+                        attachments: snapshot,
                     };
 
                     match outgoing.build_draft() {
@@ -840,6 +841,10 @@ pub fn present(
             let references = references.clone();
             let on_done: Box<dyn FnOnce(Option<String>, String)> =
                 Box::new(move |html_body, body_text: String| {
+                    let snapshot = attachments
+                        .lock()
+                        .map(|items| items.clone())
+                        .unwrap_or_default();
                     let outgoing = OutgoingMessage {
                         from_name,
                         from_addr,
@@ -848,14 +853,11 @@ pub fn present(
                         bcc: bcc_value,
                         subject: subject_value,
                         body: body_text,
-                        html_body,
+                        html_body: prune_unresolved_cid_images(html_body, &snapshot),
                         in_reply_to,
                         references,
                         draft_key: draft_key.lock().map(|key| key.clone()).ok(),
-                        attachments: attachments
-                            .lock()
-                            .map(|items| items.clone())
-                            .unwrap_or_default(),
+                        attachments: snapshot,
                     };
 
                     match app.mailin.build_outgoing(&account_id, &outgoing, pgp) {
@@ -1011,6 +1013,17 @@ fn rebuild_attachments(
         }
         let _ = ui::append(list, &row);
     }
+}
+
+/// Drop the `<img>` elements whose `cid:` reference has no matching
+/// attachment, so a broken inline image is never sent (M4-D).
+fn prune_unresolved_cid_images(
+    html: Option<String>,
+    attachments: &[ComposeAttachment],
+) -> Option<String> {
+    let html = html?;
+    let cids: Vec<String> = attachments.iter().filter_map(|a| a.cid.clone()).collect();
+    Some(mailin_core::cid::prune_unresolved_images(&html, &cids))
 }
 
 // ------------------------------------------------------------------ prefill

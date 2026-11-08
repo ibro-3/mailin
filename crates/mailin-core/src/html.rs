@@ -91,7 +91,7 @@ pub fn has_remote_content(html: &str) -> bool {
     false
 }
 
-fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
     let mut i = from;
     while i + needle.len() <= haystack.len() {
         if &haystack[i..i + needle.len()] == needle {
@@ -104,7 +104,7 @@ fn find_bytes(haystack: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
 
 /// Index of the `>` closing the tag starting at `open`, aware of quoted
 /// attribute values. Returns `bytes.len()` when the tag is unterminated.
-fn scan_tag_end(bytes: &[u8], open: usize) -> usize {
+pub(crate) fn scan_tag_end(bytes: &[u8], open: usize) -> usize {
     let mut i = open + 1;
     let mut quote = 0u8;
     while i < bytes.len() {
@@ -186,7 +186,7 @@ fn attr_holds_remote_url(tag: &str, attr: &str) -> bool {
 
 /// After the attribute name, expect optional whitespace, `=`, optional
 /// whitespace, then the attribute value (quoted or unquoted).
-fn attr_value_span(bytes: &[u8], mut i: usize) -> Option<(usize, usize)> {
+pub(crate) fn attr_value_span(bytes: &[u8], mut i: usize) -> Option<(usize, usize)> {
     while i < bytes.len() && bytes[i].is_ascii_whitespace() {
         i += 1;
     }
@@ -346,7 +346,7 @@ fn ensure_document_lang(html: &str) -> String {
 /// `<textarea>`, `<title>`) and quoted attribute values. The returned vector
 /// has the same length as `bytes`; masked bytes become ASCII spaces so byte
 /// offsets line up with the original string.
-fn structural_mask(bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn structural_mask(bytes: &[u8]) -> Vec<u8> {
     let mut mask = bytes.to_vec();
     let mut i = 0usize;
     while i < bytes.len() {

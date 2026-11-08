@@ -124,6 +124,7 @@ struct Widgets {
     body_plain: ScrollViewer,
     body_text: TextBlock,
     body_html: WebView2,
+    body_notice: TextBlock,
     html_button: Button,
     reply_button: Button,
     reply_all_button: Button,
@@ -1353,6 +1354,8 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.body_plain, false);
         let _ = ui::set_visible(&self.widgets.body_html, false);
         let _ = ui::set_visible(&self.widgets.remote_panel, false);
+        // M4-D: the inline-image notice is recomputed for every message.
+        let _ = ui::set_visible(&self.widgets.body_notice, false);
 
         // OpenPGP messages are unwrapped on demand.
         if let Ok(Some(pgp)) = self.app.mailin.pgp_mime(message_id) {
@@ -1415,6 +1418,15 @@ impl MainWindow {
                     let document = html::document(html_body, allow_remote, &images);
                     let _ = self.widgets.body_html.NavigateToString(&document);
                     let _ = ui::set_visible(&self.widgets.body_html, true);
+                    // M4-D: report inline images whose `cid:` part is missing.
+                    let unresolved = mailin_core::cid::references(&document);
+                    if !unresolved.is_empty() {
+                        let _ = self.widgets.body_notice.SetText(&format!(
+                            "{} couldn't be loaded.",
+                            mailin_core::plural(unresolved.len(), "inline image", "inline images")
+                        ));
+                        let _ = ui::set_visible(&self.widgets.body_notice, true);
+                    }
                     if !allow_remote && html::has_remote_content(html_body) {
                         // Show/hide trust button based on whether we have a domain
                         match sender_domain {
@@ -2071,9 +2083,8 @@ impl MainWindow {
         self.app.engine.archive_messages(&ids);
         self.show_undo_banner(
             &format!(
-                "Archived {} message{}",
-                count,
-                if count == 1 { "" } else { "s" }
+                "Archived {}",
+                mailin_core::plural(count, "message", "messages")
             ),
             pairs,
         );
@@ -2089,9 +2100,8 @@ impl MainWindow {
         if self.current_folder_is_trash() {
             self.app.engine.permanently_delete_messages(&ids);
             self.show_banner(&format!(
-                "Deleted {} message{} permanently",
-                count,
-                if count == 1 { "" } else { "s" }
+                "Deleted {} permanently",
+                mailin_core::plural(count, "message", "messages")
             ));
             self.clear_bulk_selection();
             return;
@@ -2100,9 +2110,8 @@ impl MainWindow {
         self.app.engine.delete_messages(&ids);
         self.show_undo_banner(
             &format!(
-                "Moved {} message{} to Trash",
-                count,
-                if count == 1 { "" } else { "s" }
+                "Moved {} to Trash",
+                mailin_core::plural(count, "message", "messages")
             ),
             pairs,
         );
@@ -2134,9 +2143,8 @@ impl MainWindow {
                 let pairs = this.undo_pairs(&ids_clone);
                 this.show_undo_banner(
                     &format!(
-                        "Moved {} message{}",
-                        count,
-                        if count == 1 { "" } else { "s" }
+                        "Moved {}",
+                        mailin_core::plural(count, "message", "messages")
                     ),
                     pairs,
                 );
@@ -2869,8 +2877,10 @@ impl MainWindow {
                 .find(|account| account.id == account_id)
                 .map(|account| account.email.clone())
                 .unwrap_or_else(|| "Mailin".to_owned());
-            let noun = if count == 1 { "message" } else { "messages" };
-            let text = format!("{count} new {noun} in {account}");
+            let text = format!(
+                "{} in {account}",
+                mailin_core::plural(count, "new message", "new messages")
+            );
             self.show_banner(&text);
             self.show_toast_notification(account_id, &text, &message_ids);
         }
@@ -3258,7 +3268,15 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::append(&reader_content, &header)?;
 
     let body = Grid::new().context("could not create the reader body")?;
+    // Row 0 holds the "inline images could not be loaded" notice, row 1 the
+    // body itself.
+    ui::auto_row(&body)?;
     ui::star_row(&body)?;
+    let body_notice = ui::text("")?;
+    ui::margin(&body_notice, 8.0, 4.0, 8.0, 4.0)?;
+    ui::set_visible(&body_notice, false)?;
+    ui::set_row(&body_notice, 0)?;
+    ui::append(&body, &body_notice)?;
     let body_text = ui::text("")?;
     body_text.SetIsTextSelectionEnabled(true)?;
     ui::margin(&body_text, 4.0, 8.0, 4.0, 8.0)?;
@@ -3266,6 +3284,8 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let body_html = WebView2::new().context("could not create the WebView2 control")?;
     ui::set_visible(&body_plain, false)?;
     ui::set_visible(&body_html, false)?;
+    ui::set_row(&body_plain, 1)?;
+    ui::set_row(&body_html, 1)?;
     ui::append(&body, &body_plain)?;
     ui::append(&body, &body_html)?;
     ui::set_row(&body, 1)?;
@@ -3416,6 +3436,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             body_plain,
             body_text,
             body_html,
+            body_notice,
             html_button,
             reply_button,
             reply_all_button,
@@ -3920,10 +3941,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let button = ui::content_button(
         &row,
         Some(&format!(
-            "{}, {} unread message{}",
+            "{}, {}",
             folder_title(folder),
-            folder.unread_count,
-            if folder.unread_count == 1 { "" } else { "s" }
+            mailin_core::plural(folder.unread_count, "unread message", "unread messages")
         )),
         None,
     )?;

@@ -17,46 +17,11 @@ use mailin_core::compose::{
 use mailin_core::html::sanitize_html;
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
 
+/// Drop the `<img>` elements whose `cid:` reference has no matching
+/// attachment, so a broken inline image is never sent (M4-D).
 fn prune_unresolved_cid_images(html: &str, attachments: &[ComposeAttachment]) -> String {
-    let valid_cids: std::collections::HashSet<&str> = attachments
-        .iter()
-        .filter_map(|a| a.cid.as_deref())
-        .collect();
-    if valid_cids.is_empty() && !html.contains("cid:") {
-        return html.to_owned();
-    }
-    let mut out = String::with_capacity(html.len());
-    let lower = html.to_ascii_lowercase();
-    let mut i = 0;
-    while let Some(img_pos) = lower[i..].find("<img") {
-        let img_start = i + img_pos;
-        out.push_str(&html[i..img_start]);
-        // Find end of tag
-        let rest = &html[img_start..];
-        let tag_end = rest.find('>').map(|p| p + 1).unwrap_or(rest.len());
-        let tag = &rest[..tag_end];
-        let tag_lower = tag.to_ascii_lowercase();
-        let unresolved = if let Some(cid_pos) = tag_lower.find("cid:") {
-            let cid_start = cid_pos + 4;
-            let cid_end = tag[cid_start..]
-                .find(|c: char| c == '"' || c == '\'' || c.is_whitespace() || c == '>')
-                .map(|p| cid_start + p)
-                .unwrap_or(tag.len());
-            let cid = tag[cid_start..cid_end].trim_end_matches('>');
-            !valid_cids.contains(cid)
-        } else {
-            false
-        };
-        if !unresolved {
-            out.push_str(tag);
-        }
-        i = img_start + tag_end;
-        if tag_end == 0 {
-            break;
-        }
-    }
-    out.push_str(&html[i..]);
-    out
+    let valid_cids: Vec<String> = attachments.iter().filter_map(|a| a.cid.clone()).collect();
+    mailin_core::cid::prune_unresolved_images(html, &valid_cids)
 }
 
 fn strip_template_placeholders(text: &str) -> String {
@@ -637,9 +602,8 @@ pub fn present(
                     banner.set_button_label(None::<&str>);
                     banner_action.set(0);
                     banner.set_title(&format!(
-                        "This message will be encrypted for {} recipient{}.",
-                        recipients.len(),
-                        if recipients.len() == 1 { "" } else { "s" }
+                        "This message will be encrypted to {}.",
+                        mailin_core::plural(recipients.len(), "recipient", "recipients")
                     ));
                     banner.set_revealed(true);
                 }

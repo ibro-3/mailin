@@ -2857,15 +2857,16 @@ impl MainWindow {
                     *self.find_target_view.borrow_mut() = Some(view.clone());
                     self.widgets.reader_body.append(&view);
                     // If cid: image sources remain unresolved after rewriting,
-                    // show a small notice (M4-D).
-                    let rendered_lower = rendered.to_ascii_lowercase();
-                    if rendered_lower.contains("src=\"cid:")
-                        || rendered_lower.contains("src='cid:")
-                        || rendered_lower.contains("srcset=\"cid:")
-                    {
-                        self.widgets
-                            .reader_body
-                            .append(&notice_body("Some inline images couldn't be loaded."));
+                    // show a small notice (M4-D). The check parses the markup
+                    // instead of grepping for `cid:` so quoted text and
+                    // `data-src` attributes do not raise a false alarm.
+                    let unresolved_cids = mailin_core::cid::references(&rendered);
+                    if !unresolved_cids.is_empty() {
+                        let count = unresolved_cids.len();
+                        self.widgets.reader_body.append(&notice_body(&format!(
+                            "{} couldn't be loaded.",
+                            mailin_core::plural(count, "inline image", "inline images")
+                        )));
                     }
                     if !allow_remote && html::has_remote_content(html_body) {
                         match sender_domain {
@@ -3219,10 +3220,7 @@ impl MainWindow {
                     let msg = if queued > 0 {
                         format!("Saved {saved} of {total}; downloading {queued} more…")
                     } else if failed == 0 {
-                        format!(
-                            "Saved {saved} attachment{}",
-                            if saved == 1 { "" } else { "s" }
-                        )
+                        mailin_core::plural(saved, "attachment", "attachments")
                     } else {
                         format!("Saved {saved}, couldn't save {failed}")
                     };
@@ -3435,10 +3433,7 @@ impl MainWindow {
         }
         if saved > 0 || failed > 0 {
             let msg = if failed == 0 {
-                format!(
-                    "Saved {saved} attachment{}",
-                    if saved == 1 { "" } else { "s" }
-                )
+                mailin_core::plural(saved, "attachment", "attachments")
             } else {
                 format!("Saved {saved}, couldn't save {failed}")
             };
@@ -3580,8 +3575,8 @@ impl MainWindow {
         self.app.engine.archive_messages(&ids);
         self.toast_undo_move(
             &format!(
-                "Archived {count} message{}",
-                if count == 1 { "" } else { "s" }
+                "Archived {}",
+                mailin_core::plural(count, "message", "messages")
             ),
             &pairs,
         );
@@ -3680,7 +3675,7 @@ impl MainWindow {
         // irreversible — ask first, showing how much will be destroyed.
         if permanent || in_trash {
             let count = ids.len();
-            let noun = if count == 1 { "message" } else { "messages" };
+            let noun = mailin_core::plural_noun(count, "message", "messages");
             let app = self.app.clone();
             let toast = self.widgets.toast.clone();
             self.confirm_destructive(
@@ -3689,11 +3684,11 @@ impl MainWindow {
                 "Delete",
                 move || {
                     app.engine.permanently_delete_messages(&ids);
-                    toast.add_toast(adw::Toast::new(if count == 1 {
-                        "Message deleted permanently"
-                    } else {
-                        "Messages deleted permanently"
-                    }));
+                    toast.add_toast(adw::Toast::new(mailin_core::plural_noun(
+                        count,
+                        "Message deleted permanently",
+                        "Messages deleted permanently",
+                    )));
                 },
             );
             return;
@@ -3703,8 +3698,8 @@ impl MainWindow {
         self.app.engine.delete_messages(&ids);
         self.toast_undo_move(
             &format!(
-                "Moved {count} message{} to Trash",
-                if count == 1 { "" } else { "s" }
+                "Moved {} to Trash",
+                mailin_core::plural(count, "message", "messages")
             ),
             &pairs,
         );
@@ -3720,8 +3715,8 @@ impl MainWindow {
         self.app.engine.mark_messages_junk(&ids, junk);
         let text = if junk {
             format!(
-                "Marked {count} message{} as Junk",
-                if count == 1 { "" } else { "s" }
+                "Marked {} as Junk",
+                mailin_core::plural(count, "message", "messages")
             )
         } else {
             "Moved to Inbox".to_owned()
@@ -3889,7 +3884,10 @@ impl MainWindow {
                 let count = ids.len();
                 this.app.engine.move_messages(&ids, folder_id);
                 this.toast_undo_move(
-                    &format!("Moved {count} message{}", if count == 1 { "" } else { "s" }),
+                    &format!(
+                        "Moved {}",
+                        mailin_core::plural(count, "message", "messages")
+                    ),
                     &pairs,
                 );
             }
@@ -4167,14 +4165,14 @@ impl MainWindow {
             )
         };
 
-        let notification = gio::Notification::new(if count == 1 {
-            "New message"
-        } else {
-            "New messages"
-        });
+        let notification = gio::Notification::new(mailin_core::plural_noun(
+            count,
+            "New message",
+            "New messages",
+        ));
         notification.set_body(Some(&format!(
-            "{count} new message{} in {account}",
-            if count == 1 { "" } else { "s" }
+            "{} in {account}",
+            mailin_core::plural(count, "new message", "new messages")
         )));
         notification.set_default_action("app.present");
 
@@ -4956,10 +4954,9 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     // just a digit with no context.
     if folder.unread_count > 0 {
         let name = format!(
-            "{}, {} unread message{}",
+            "{}, {}",
             folder_title(folder),
-            folder.unread_count,
-            if folder.unread_count == 1 { "" } else { "s" }
+            mailin_core::plural(folder.unread_count, "unread message", "unread messages")
         );
         row.update_property(&[Property::Label(&name)]);
     }
@@ -5448,12 +5445,12 @@ fn text_body(text: &str) -> gtk::Widget {
 
     fn quote_stub(quote: &str, count: usize) -> gtk::Widget {
         let expand_label = format!(
-            "Show {count} quoted line{}",
-            if count == 1 { "" } else { "s" }
+            "Show {}",
+            mailin_core::plural(count, "quoted line", "quoted lines")
         );
         let collapse_label = format!(
-            "Hide {count} quoted line{}",
-            if count == 1 { "" } else { "s" }
+            "Hide {}",
+            mailin_core::plural(count, "quoted line", "quoted lines")
         );
         let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
         let button = gtk::Button::with_label(&expand_label);
