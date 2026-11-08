@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn fragments_are_wrapped_in_a_complete_document() {
         let document = document("<p>Hello</p>", false, &[]);
-        assert!(document.starts_with("<!DOCTYPE html><html><head>"));
+        assert!(document.starts_with("<!DOCTYPE html><html lang=\"en\"><head>"));
         assert!(document.contains("<body><p>Hello</p></body>"));
     }
 
