@@ -261,6 +261,17 @@ impl Mailin {
         crate::client::test_connection(imap, smtp, password).await
     }
 
+    /// Test both servers and report each stage independently (M4-F).
+    /// Both stages are probed even if the first one fails.
+    pub async fn test_connection_staged(
+        &self,
+        imap: &crate::account::ServerSettings,
+        smtp: &crate::account::ServerSettings,
+        password: &str,
+    ) -> crate::client::ConnectionTestReport {
+        crate::client::test_connection_staged(imap, smtp, password).await
+    }
+
     // ----------------------------------------------------------------- folders
 
     pub fn list_folders(&self, account: &AccountId) -> Result<Vec<Folder>> {
@@ -860,6 +871,127 @@ pub async fn test_connection(
     Ok(())
 }
 
+/// Which server a connection-test stage refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionStage {
+    Imap,
+    Smtp,
+}
+
+impl ConnectionStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Imap => "IMAP",
+            Self::Smtp => "SMTP",
+        }
+    }
+}
+
+/// Outcome of testing one server stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageTestResult {
+    pub stage: ConnectionStage,
+    pub ok: bool,
+    /// Human-readable failure reason; `None` when the stage succeeded.
+    pub error: Option<String>,
+}
+
+impl StageTestResult {
+    fn ok(stage: ConnectionStage) -> Self {
+        Self {
+            stage,
+            ok: true,
+            error: None,
+        }
+    }
+
+    fn failed(stage: ConnectionStage, error: impl Into<String>) -> Self {
+        Self {
+            stage,
+            ok: false,
+            error: Some(error.into()),
+        }
+    }
+}
+
+/// Per-stage connection-test report.
+///
+/// Unlike [`test_connection`], both servers are probed even when the first one
+/// fails, so a UI can show an independent row per stage (M4-F).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionTestReport {
+    pub imap: StageTestResult,
+    pub smtp: StageTestResult,
+}
+
+impl ConnectionTestReport {
+    pub fn all_ok(&self) -> bool {
+        self.imap.ok && self.smtp.ok
+    }
+
+    pub fn stages(&self) -> [&StageTestResult; 2] {
+        [&self.imap, &self.smtp]
+    }
+
+    /// All failure reasons joined into one message, if any.
+    pub fn error_summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        for stage in self.stages() {
+            if let Some(error) = &stage.error {
+                parts.push(format!("{}: {error}", stage.stage.as_str()));
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+}
+
+/// Test only the IMAP server.
+pub async fn test_imap_connection(
+    imap: &crate::account::ServerSettings,
+    password: &str,
+) -> Result<()> {
+    let tls = crate::tls::client_config()?;
+    let imap_session = crate::imap::ImapSession::connect(imap, password, tls)
+        .await
+        .map_err(|e| crate::Error::Imap(format!("IMAP connection failed: {e}")))?;
+    imap_session.logout().await;
+    Ok(())
+}
+
+/// Test only the SMTP server.
+pub async fn test_smtp_connection(
+    smtp: &crate::account::ServerSettings,
+    password: &str,
+) -> Result<()> {
+    crate::smtp::test_connection(smtp, password)
+        .await
+        .map_err(|e| crate::Error::Smtp(format!("SMTP connection failed: {e}")))
+}
+
+/// Test both servers and report each stage independently.
+pub async fn test_connection_staged(
+    imap: &crate::account::ServerSettings,
+    smtp: &crate::account::ServerSettings,
+    password: &str,
+) -> ConnectionTestReport {
+    let imap_result = match test_imap_connection(imap, password).await {
+        Ok(()) => StageTestResult::ok(ConnectionStage::Imap),
+        Err(error) => StageTestResult::failed(ConnectionStage::Imap, error.to_string()),
+    };
+    let smtp_result = match test_smtp_connection(smtp, password).await {
+        Ok(()) => StageTestResult::ok(ConnectionStage::Smtp),
+        Err(error) => StageTestResult::failed(ConnectionStage::Smtp, error.to_string()),
+    };
+    ConnectionTestReport {
+        imap: imap_result,
+        smtp: smtp_result,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,5 +1337,28 @@ mod tests {
             crate::pgp::verify_detached(entity.as_bytes(), &signature[sig_start..sig_end], &cert)
                 .expect("verify");
         assert_eq!(status, SignatureStatus::Valid);
+    }
+
+    #[test]
+    fn connection_test_report_summarises_stages() {
+        let ok = StageTestResult::ok(ConnectionStage::Imap);
+        assert!(ok.error.is_none());
+        let failed = StageTestResult::failed(ConnectionStage::Smtp, "SMTP connection failed: nope");
+        let report = ConnectionTestReport {
+            imap: ok,
+            smtp: failed,
+        };
+        assert!(!report.all_ok());
+        assert_eq!(report.stages().len(), 2);
+        let summary = report.error_summary().expect("summary");
+        assert!(summary.contains("SMTP: SMTP connection failed: nope"));
+        assert!(!summary.contains("IMAP:"));
+
+        let all_ok = ConnectionTestReport {
+            imap: StageTestResult::ok(ConnectionStage::Imap),
+            smtp: StageTestResult::ok(ConnectionStage::Smtp),
+        };
+        assert!(all_ok.all_ok());
+        assert!(all_ok.error_summary().is_none());
     }
 }

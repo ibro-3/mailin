@@ -465,6 +465,28 @@ pub fn present(
     // Alert role so validation/connection errors are announced.
     error_label.set_accessible_role(gtk::AccessibleRole::Alert);
 
+    // M4-F: one row per connection-test stage (IMAP / SMTP).
+    let stage_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    stage_box.set_margin_top(6);
+    stage_box.set_margin_bottom(6);
+    stage_box.set_margin_start(18);
+    stage_box.set_margin_end(18);
+    stage_box.set_visible(false);
+    let imap_stage_label = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .selectable(true)
+        .build();
+    let smtp_stage_label = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .selectable(true)
+        .build();
+    for label in [&imap_stage_label, &smtp_stage_label] {
+        label.add_css_class("caption");
+        stage_box.append(label);
+    }
+
     let copy_error = gtk::Button::with_label("Copy error details");
     copy_error.add_css_class("flat");
     copy_error.set_visible(false);
@@ -508,6 +530,7 @@ pub fn present(
     actions.append(&save);
 
     let bottom = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    bottom.append(&stage_box);
     bottom.append(&actions);
 
     let toolbar = adw::ToolbarView::new();
@@ -922,6 +945,9 @@ pub fn present(
         let error_label = error_label.clone();
         let copy_error = copy_error.clone();
         let test = test.clone();
+        let stage_box = stage_box.clone();
+        let imap_stage_label = imap_stage_label.clone();
+        let smtp_stage_label = smtp_stage_label.clone();
         move |_| {
             let draft = rows.draft();
             let password = draft.password.clone();
@@ -931,6 +957,7 @@ pub fn present(
                 Ok(account) => account,
                 Err(error) => {
                     copy_error.set_visible(false);
+                    stage_box.set_visible(false);
                     set_status_message(&error_label, &error, "error");
                     return;
                 }
@@ -938,41 +965,55 @@ pub fn present(
             test.set_sensitive(false);
             test.set_label("Testing…");
             copy_error.set_visible(false);
+            stage_box.set_visible(true);
+            imap_stage_label.set_text("IMAP: testing…");
+            smtp_stage_label.set_text("SMTP: waiting…");
             set_status_message(&error_label, "Testing IMAP and SMTP connection…", "info");
             let app = Rc::clone(&app);
             let error_label = error_label.clone();
             let copy_error = copy_error.clone();
             let test = test.clone();
+            let imap_stage_label = imap_stage_label.clone();
+            let smtp_stage_label = smtp_stage_label.clone();
             glib::spawn_future_local(async move {
-                match app
+                // M4-F: both stages are probed independently.
+                let report = app
                     .mailin
-                    .test_connection(&account.imap, &account.smtp, &password)
-                    .await
-                {
-                    Ok(()) => {
-                        test.set_sensitive(true);
-                        test.set_label("Test Connection");
-                        copy_error.set_visible(false);
-                        set_status_message(
-                            &error_label,
-                            "IMAP: ✓ · SMTP: ✓  Connection successful.",
-                            "success",
-                        );
-                    }
-                    Err(error) => {
-                        test.set_sensitive(true);
-                        test.set_label("Test Connection");
-                        let msg = error.to_string();
-                        let summary = if msg.contains("IMAP connection failed") {
-                            format!("IMAP: failed · SMTP: not tested. {msg}")
-                        } else if msg.contains("SMTP connection failed") {
-                            format!("IMAP: ✓ · SMTP: failed. {msg}")
+                    .test_connection_staged(&account.imap, &account.smtp, &password)
+                    .await;
+                test.set_sensitive(true);
+                test.set_label("Test Connection");
+                for stage in report.stages() {
+                    let label = match stage.stage {
+                        mailin_core::ConnectionStage::Imap => &imap_stage_label,
+                        mailin_core::ConnectionStage::Smtp => &smtp_stage_label,
+                    };
+                    label.set_text(&format!(
+                        "{}: {}",
+                        stage.stage.as_str(),
+                        if stage.ok {
+                            "✓ connected".to_owned()
                         } else {
-                            format!("Connection failed: {msg}")
-                        };
-                        set_status_message(&error_label, &summary, "error");
-                        copy_error.set_visible(true);
-                    }
+                            format!("✗ {}", stage.error.clone().unwrap_or_default())
+                        }
+                    ));
+                    label.remove_css_class("success");
+                    label.remove_css_class("error");
+                    label.add_css_class(if stage.ok { "success" } else { "error" });
+                }
+                if report.all_ok() {
+                    copy_error.set_visible(false);
+                    set_status_message(
+                        &error_label,
+                        "IMAP: ✓ · SMTP: ✓  Connection successful.",
+                        "success",
+                    );
+                } else {
+                    let summary = report
+                        .error_summary()
+                        .unwrap_or_else(|| "Connection failed".to_owned());
+                    set_status_message(&error_label, &summary, "error");
+                    copy_error.set_visible(true);
                 }
             });
         }

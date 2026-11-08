@@ -873,24 +873,36 @@ pub fn present(
                 // thread). The button is disabled until this completes, so
                 // the runtime cannot be created concurrently.
                 let result = tokio::runtime::Runtime::new().map(|runtime| {
-                    runtime.block_on(app.mailin.test_connection(
+                    // M4-F: per-stage report; both servers are probed.
+                    runtime.block_on(app.mailin.test_connection_staged(
                         &account.imap,
                         &account.smtp,
                         &password,
                     ))
                 });
                 let (message, _is_error) = match result {
-                    Ok(Ok(())) => ("IMAP: ✓ · SMTP: ✓  Connection successful.".to_owned(), false),
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        let summary = if msg.contains("IMAP connection failed") {
-                            format!("IMAP: failed · SMTP: not tested. {msg}")
-                        } else if msg.contains("SMTP connection failed") {
-                            format!("IMAP: ✓ · SMTP: failed. {msg}")
+                    Ok(report) => {
+                        let summary = report
+                            .stages()
+                            .iter()
+                            .map(|stage| {
+                                format!(
+                                    "{}: {}",
+                                    stage.stage.as_str(),
+                                    if stage.ok {
+                                        "✓".to_owned()
+                                    } else {
+                                        format!("✗ {}", stage.error.clone().unwrap_or_default())
+                                    }
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        if report.all_ok() {
+                            (format!("{summary}  Connection successful."), false)
                         } else {
-                            format!("Connection failed: {msg}")
-                        };
-                        (summary, true)
+                            (summary, true)
+                        }
                     }
                     Err(runtime_error) => (
                         format!("Could not start the connection test: {runtime_error}"),

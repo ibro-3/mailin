@@ -40,7 +40,9 @@ pub use account::{
     Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, OAuthProvider, Security,
     ServerSettings,
 };
-pub use client::{ClientEvent, Event, Mailin};
+pub use client::{
+    ClientEvent, ConnectionStage, ConnectionTestReport, Event, Mailin, StageTestResult,
+};
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{
     Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode,
