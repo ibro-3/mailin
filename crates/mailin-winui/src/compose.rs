@@ -572,6 +572,7 @@ pub fn present(
         &attachments_title,
         &attachments,
         &attachment_events,
+        Some(Rc::clone(&mark_dirty)),
     );
 
     // Ctrl+Enter to send message
@@ -752,7 +753,13 @@ pub fn present(
                     let _ = ui::set_visible(&banner, false);
                 }
             }
-            rebuild_attachments(&list, &title, &attachments, &events);
+            rebuild_attachments(
+                &list,
+                &title,
+                &attachments,
+                &events,
+                Some(Rc::clone(&mark_dirty)),
+            );
         }
     })?);
 
@@ -939,6 +946,7 @@ fn rebuild_attachments(
     title: &TextBlock,
     attachments: &Arc<Mutex<Vec<ComposeAttachment>>>,
     events: &ui::Revokers,
+    mark_dirty: Option<Rc<dyn Fn()>>,
 ) {
     events.clear();
     let _ = ui::set_visible(
@@ -978,13 +986,24 @@ fn rebuild_attachments(
             let title = title.clone();
             let events_for_row = events.clone();
             let events_for_remove = events.clone();
+            let mark_dirty = mark_dirty.clone();
             if let Ok(revoker) = ui::on_click(&remove, move || {
                 if let Ok(mut items) = attachments.lock()
                     && index < items.len()
                 {
                     items.remove(index);
                 }
-                rebuild_attachments(&list, &title, &attachments, &events_for_remove);
+                // M4-E: removing an attachment is an edit.
+                if let Some(mark_dirty) = &mark_dirty {
+                    mark_dirty();
+                }
+                rebuild_attachments(
+                    &list,
+                    &title,
+                    &attachments,
+                    &events_for_remove,
+                    mark_dirty.clone(),
+                );
             }) {
                 events_for_row.keep(revoker);
             }
