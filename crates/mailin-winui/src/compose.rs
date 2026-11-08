@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -103,10 +103,16 @@ pub fn present(
             }
         })
     };
+    // M4-E: every edit bumps the generation. A draft save only clears the
+    // dirty marker when the generation still matches the one it captured, so
+    // edits made while the save was in flight are not lost.
+    let dirty_generation = Arc::new(AtomicU64::new(0));
     let mark_dirty: Rc<dyn Fn()> = {
         let dirty = Arc::clone(&dirty);
         let update_title = Rc::clone(&update_title);
+        let generation = Arc::clone(&dirty_generation);
         Rc::new(move || {
+            generation.fetch_add(1, Ordering::Relaxed);
             dirty.store(true, Ordering::Relaxed);
             update_title(true);
         })
@@ -641,13 +647,16 @@ pub fn present(
         let references = draft.references.clone();
         let is_html_mode = is_html_mode.clone();
         let start_capture = start_capture.clone();
+        let generation = Arc::clone(&dirty_generation);
         Arc::new(move |force: bool| {
             if sent.load(Ordering::Relaxed) {
                 return;
             }
-            if !force && !dirty.swap(false, Ordering::Relaxed) {
+            if !force && !dirty.load(Ordering::Relaxed) {
                 return;
             }
+            // Remember which revision this save captures.
+            let captured = generation.load(Ordering::Relaxed);
 
             let want_html = is_html_mode.load(Ordering::Relaxed);
             // Clone everything the continuation needs.
@@ -656,6 +665,7 @@ pub fn present(
             let dirty = Arc::clone(&dirty);
             let mark_clean = Rc::clone(&mark_clean);
             let mark_dirty = Rc::clone(&mark_dirty);
+            let generation = Arc::clone(&generation);
             let to = to.clone();
             let cc = cc.clone();
             let bcc = bcc.clone();
@@ -693,8 +703,11 @@ pub fn present(
                             let _ = banner.SetText("Draft saved");
                             let _ = ui::set_visible(&banner, true);
                             // M4-E: the title drops the dirty marker once the
-                            // draft is stored.
-                            mark_clean();
+                            // draft is stored — but only when nothing changed
+                            // meanwhile.
+                            if generation.load(Ordering::Relaxed) == captured {
+                                mark_clean();
+                            }
                         }
                         Err(failure) => {
                             dirty.store(true, Ordering::Relaxed);

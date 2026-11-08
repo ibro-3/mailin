@@ -644,15 +644,31 @@ pub fn present(
     let dirty = Rc::new(Cell::new(false));
     // M4-E: one place flips the dirty flag and the title marker so every
     // edit path stays consistent.
+    // M4-E: every edit bumps the generation. A draft save only clears the
+    // dirty marker when the generation still matches the one it captured, so
+    // edits made while the save was in flight are not lost.
+    let dirty_generation = Rc::new(Cell::new(0u64));
     let mark_dirty: Rc<dyn Fn()> = {
         let dirty = Rc::clone(&dirty);
         let title = Rc::clone(&title);
         let base_title = Rc::clone(&base_title);
+        let generation = Rc::clone(&dirty_generation);
         Rc::new(move || {
+            generation.set(generation.get() + 1);
             if !dirty.get() {
                 dirty.set(true);
                 title.set_title(&format!("● {}", base_title.as_str()));
             }
+        })
+    };
+    // M4-E: the mirror of `mark_dirty`, used once a draft is stored.
+    let mark_clean: Rc<dyn Fn()> = {
+        let dirty = Rc::clone(&dirty);
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        Rc::new(move || {
+            dirty.set(false);
+            title.set_title(base_title.as_str());
         })
     };
 
@@ -1326,18 +1342,21 @@ pub fn present(
         let account_id = account.id;
         let banner = banner.clone();
         let banner_action = Rc::clone(&banner_action);
-        let title = Rc::clone(&title);
-        let base_title = Rc::clone(&base_title);
+        let mark_clean = Rc::clone(&mark_clean);
+        let mark_dirty = Rc::clone(&mark_dirty);
+        let generation = Rc::clone(&dirty_generation);
         Rc::new(move |force: bool| {
-            if !force && !dirty.replace(false) {
+            if !force && !dirty.get() {
                 return;
             }
+            // Remember which revision this save captures.
+            let captured = generation.get();
             let app = Rc::clone(&app);
-            let dirty = Rc::clone(&dirty);
             let banner = banner.clone();
             let banner_action = Rc::clone(&banner_action);
-            let title = Rc::clone(&title);
-            let base_title = Rc::clone(&base_title);
+            let mark_clean = Rc::clone(&mark_clean);
+            let mark_dirty = Rc::clone(&mark_dirty);
+            let generation = Rc::clone(&generation);
             snapshot(Box::new(move |outgoing| match outgoing.build_draft() {
                 Ok(_) => {
                     app.engine.save_draft(account_id, outgoing);
@@ -1345,7 +1364,11 @@ pub fn present(
                     banner.set_button_label(None::<&str>);
                     banner.set_title("Draft saved");
                     banner.set_revealed(true);
-                    title.set_title(base_title.as_str());
+                    // M4-E: the title drops the dirty marker once the draft
+                    // is stored — but only when nothing changed meanwhile.
+                    if generation.get() == captured {
+                        mark_clean();
+                    }
                     // M4-E: auto-hide transient confirmation.
                     let banner_hide = banner.clone();
                     glib::timeout_add_seconds_local_once(3, move || {
@@ -1355,24 +1378,20 @@ pub fn present(
                     });
                 }
                 Err(error) => {
-                    dirty.set(true);
                     banner_action.set(0);
                     banner.set_button_label(None::<&str>);
                     banner.set_title(&format!("Could not save the draft: {error}"));
                     banner.set_revealed(true);
-                    title.set_title(&format!("● {}", base_title.as_str()));
+                    mark_dirty();
                 }
             }));
         })
     };
 
     for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
-        let dirty = Rc::clone(&dirty);
-        let title = Rc::clone(&title);
-        let base_title = Rc::clone(&base_title);
+        let mark_dirty = Rc::clone(&mark_dirty);
         row.connect_changed(move |_| {
-            dirty.set(true);
-            title.set_title(&format!("● {}", base_title.as_str()));
+            mark_dirty();
         });
     }
     {

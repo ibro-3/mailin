@@ -35,6 +35,14 @@ fn set_status_message(label: &gtk::Label, text: &str, kind: &str) {
     label.set_visible(true);
 }
 
+/// Hide the status line and drop any styling it carried.
+fn clear_status_message(label: &gtk::Label) {
+    label.remove_css_class("error");
+    label.remove_css_class("success");
+    label.set_text("");
+    label.set_visible(false);
+}
+
 /// A shared, replaceable refresh callback stored behind interior mutability.
 type RefreshFn = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
@@ -432,28 +440,50 @@ pub fn present(
     contacts_group.add(&contacts_scroll);
     contacts_group.set_header_suffix(Some(&contacts_add));
 
-    let page = adw::PreferencesPage::new();
-    page.add(&identity);
-    page.add(&oauth_group);
-    page.add(&server_group);
-    page.add(&signatures);
-    page.add(&trust_group);
+    // M4-F: the wizard is split into two steps — "Account" holds the quick
+    // form (identity and sign-in), "Server" holds the server details plus
+    // the connection test. Editing an account uses the same two steps so
+    // the layout never shifts under the user.
+    let account_page = adw::PreferencesPage::new();
+    account_page.add(&identity);
+    account_page.add(&oauth_group);
+
+    let server_page = adw::PreferencesPage::new();
+    server_page.add(&server_group);
+    server_page.add(&signatures);
+    server_page.add(&trust_group);
     // Templates/contacts are per-account and require a saved account id.
     if mode == AccountDialogMode::Add {
         let hint = adw::PreferencesGroup::builder()
             .title("Templates and contacts")
             .description("Save the account first to manage message templates and contacts.")
             .build();
-        page.add(&hint);
+        server_page.add(&hint);
     }
     templates_group.set_visible(mode == AccountDialogMode::Edit);
     contacts_group.set_visible(mode == AccountDialogMode::Edit);
-    page.add(&templates_group);
-    page.add(&contacts_group);
+    server_page.add(&templates_group);
+    server_page.add(&contacts_group);
+
+    let stack = adw::ViewStack::new();
+    stack.add_titled(&account_page, Some("account"), "Account");
+    stack.add_titled(&server_page, Some("server"), "Server");
+    stack.set_visible_child_name("account");
+    stack.set_vexpand(true);
 
     let header = adw::HeaderBar::new();
     let window_title = adw::WindowTitle::new(title, subtitle);
     header.set_title_widget(Some(&window_title));
+
+    // Step navigation.
+    let back = gtk::Button::from_icon_name("go-previous-symbolic");
+    back.add_css_class("flat");
+    back.set_tooltip_text(Some("Back to the account details"));
+    back.update_property(&[Property::Label("Back to the account details")]);
+    let next = gtk::Button::with_label("Continue");
+    next.add_css_class("suggested-action");
+    header.pack_start(&back);
+    header.pack_end(&next);
 
     let error_label = gtk::Label::builder()
         .wrap(true)
@@ -535,8 +565,79 @@ pub fn present(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&page));
+    toolbar.set_content(Some(&stack));
     toolbar.add_bottom_bar(&bottom);
+
+    // M4-F: the header navigation follows the visible step. In Add mode the
+    // connection test and the save button belong to the "Verify" step, so
+    // the first step stays a quick form.
+    let update_step: Rc<dyn Fn(&str)> = {
+        let back = back.clone();
+        let next = next.clone();
+        let test = test.clone();
+        let save = save.clone();
+        let window_title = window_title.clone();
+        Rc::new(move |page: &str| {
+            let on_account = page == "account";
+            back.set_visible(!on_account);
+            next.set_visible(on_account);
+            if mode == AccountDialogMode::Add {
+                test.set_visible(!on_account);
+                save.set_visible(!on_account);
+            }
+            // The subtitle names the step so the user never loses their
+            // place in the wizard.
+            let step_subtitle = match (mode, on_account) {
+                (AccountDialogMode::Add, true) => "Step 1 of 2 — enter your email address",
+                (AccountDialogMode::Add, false) => {
+                    "Step 2 of 2 — check the server settings and connect"
+                }
+                (AccountDialogMode::Edit, true) => "Update the account details",
+                (AccountDialogMode::Edit, false) => "Server settings, templates and contacts",
+            };
+            window_title.set_subtitle(step_subtitle);
+        })
+    };
+    {
+        let stack_for_notify = stack.clone();
+        let update_step_for_notify = Rc::clone(&update_step);
+        stack.connect_visible_child_name_notify(move |_| {
+            if let Some(name) = stack_for_notify.visible_child_name() {
+                update_step_for_notify(&name);
+            }
+        });
+        update_step("account");
+    }
+    {
+        let stack = stack.clone();
+        let name_row = name_row.clone();
+        back.connect_clicked(move |_| {
+            stack.set_visible_child_name("account");
+            name_row.grab_focus();
+        });
+    }
+    {
+        let stack = stack.clone();
+        let email_row = email_row.clone();
+        let error_label = error_label.clone();
+        let imap_host = imap_host.clone();
+        next.connect_clicked(move |_| {
+            let email = email_row.text().trim().to_owned();
+            if email.is_empty() || !email.contains('@') {
+                set_status_message(
+                    &error_label,
+                    "Enter an email address before continuing.",
+                    "error",
+                );
+                email_row.grab_focus();
+                return;
+            }
+            clear_status_message(&error_label);
+            stack.set_visible_child_name("server");
+            // M3a-5: move the focus into the new step.
+            imap_host.grab_focus();
+        });
+    }
 
     let dialog = adw::Dialog::builder()
         .title(title)
@@ -1033,13 +1134,10 @@ pub fn present(
             let row = adw::ActionRow::builder().title(domain).build();
             row.set_activatable(false);
             // M2-G/M3a-2: untrust is non-destructive; avoid trash icon.
-            let remove = gtk::Button::from_icon_name("list-remove-symbolic");
-            remove.add_css_class("flat");
-            remove.set_valign(gtk::Align::Center);
-            remove.set_size_request(32, 32);
-            remove.set_tooltip_text(Some(&format!("Stop trusting {domain}")));
+            // M4-F: share the row-button helper with the other list managers.
             let remove_name = format!("Stop trusting {domain}");
-            remove.update_property(&[Property::Label(&remove_name)]);
+            let remove =
+                suffix_icon_button("list-remove-symbolic", &remove_name, &remove_name, false);
             row.add_suffix(&remove);
             trust_list.append(&row);
 
@@ -1333,6 +1431,9 @@ pub fn present(
             smtp_security,
         };
         let error_label = error_label.clone();
+        let stack = stack.clone();
+        let password_row = password_row.clone();
+        let email_row = email_row.clone();
         let account_id: Rc<std::cell::Cell<Option<AccountId>>> =
             Rc::new(std::cell::Cell::new(None));
         move |_| {
@@ -1345,6 +1446,16 @@ pub fn present(
                 Ok(account) => account,
                 Err(error) => {
                     set_status_message(&error_label, &error, "error");
+                    // M4-F: send the user back to the step that holds the
+                    // offending field.
+                    if mode == AccountDialogMode::Add {
+                        stack.set_visible_child_name("account");
+                        if error.to_ascii_lowercase().contains("password") {
+                            password_row.grab_focus();
+                        } else {
+                            email_row.grab_focus();
+                        }
+                    }
                     return;
                 }
             };
