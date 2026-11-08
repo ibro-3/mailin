@@ -59,7 +59,8 @@ pub fn document(html: &str, allow_remote: bool, inline_images: &[(String, String
          </script>"
     );
     let head = format!("{head}{navigation_guard}");
-    inject_head(html.as_ref(), &head)
+    let html = ensure_document_lang(html.as_ref());
+    inject_head(&html, &head)
 }
 
 /// Whether the HTML refers to a network resource that the policy would block.
@@ -311,7 +312,33 @@ fn inject_head(html: &str, head: &str) -> String {
         output.push_str(&html[insert..]);
         return output;
     }
-    format!("<!DOCTYPE html><html><head>{head}</head><body>{html}</body></html>")
+    format!("<!DOCTYPE html><html lang=\"en\"><head>{head}</head><body>{html}</body></html>")
+}
+
+/// Ensure the document has an `<html lang="…">` attribute so screen readers
+/// and spellcheckers use a sensible language (M4-E). Documents that already
+/// declare a language are left untouched.
+fn ensure_document_lang(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    debug_assert_eq!(lower.len(), html.len());
+    let mask = structural_mask(lower.as_bytes());
+
+    let Some(start) = find_tag(&mask, b"<html") else {
+        return html.to_owned();
+    };
+    let Some(end) = find_byte_from(&mask, start, b'>') else {
+        return html.to_owned();
+    };
+    // The attribute may sit on the `<html …>` tag itself.
+    if html[start..end].to_ascii_lowercase().contains("lang=") {
+        return html.to_owned();
+    }
+    let insert = start + "<html".len();
+    let mut output = String::with_capacity(html.len() + 10);
+    output.push_str(&html[..insert]);
+    output.push_str(" lang=\"en\"");
+    output.push_str(&html[insert..]);
+    output
 }
 
 /// Mask out the parts of the document where `<head` / `<html` matches would
@@ -931,7 +958,7 @@ mod tests {
     #[test]
     fn fragments_are_wrapped_in_a_complete_document() {
         let document = document("<p>Hello</p>", false, &[]);
-        assert!(document.starts_with("<!DOCTYPE html><html><head>"));
+        assert!(document.starts_with("<!DOCTYPE html><html lang=\"en\"><head>"));
         assert!(document.contains("<body><p>Hello</p></body>"));
     }
 
@@ -1287,8 +1314,28 @@ mod tests {
     #[test]
     fn document_always_has_doctype_and_html() {
         let doc = document("<p>Hello</p>", false, &[]);
-        assert!(doc.starts_with("<!DOCTYPE html><html><head>"));
+        assert!(doc.starts_with("<!DOCTYPE html><html lang=\"en\"><head>"));
         assert!(doc.ends_with("</body></html>"));
+    }
+
+    #[test]
+    fn document_declares_a_document_language() {
+        // Fragments get a language on the generated wrapper.
+        let doc = document("<p>hi</p>", false, &[]);
+        assert!(doc.contains("<html lang=\"en\">"));
+
+        // Existing documents gain the attribute when missing.
+        let doc = document("<html><body>hi</body></html>", false, &[]);
+        assert!(doc.contains("<html lang=\"en\">"));
+
+        // Documents that already declare a language are left alone.
+        let doc = document("<html lang=\"de\"><body>hi</body></html>", false, &[]);
+        assert!(doc.contains("<html lang=\"de\">"));
+        assert!(!doc.contains("lang=\"en\""));
+
+        // Tags with other attributes still get the language.
+        let doc = document("<html class=\"x\"><body>hi</body></html>", false, &[]);
+        assert!(doc.contains("<html lang=\"en\" class=\"x\">"));
     }
 
     #[test]
@@ -1391,7 +1438,7 @@ mod tests {
     #[test]
     fn inject_head_wraps_bare_fragments_in_a_document() {
         let doc = inject_head("<p>hi</p>", "<meta charset=\"utf-8\">");
-        assert!(doc.starts_with("<!DOCTYPE html><html><head>"));
+        assert!(doc.starts_with("<!DOCTYPE html><html lang=\"en\"><head>"));
         assert!(doc.contains("<meta charset=\"utf-8\">"));
     }
 
