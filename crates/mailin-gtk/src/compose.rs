@@ -678,35 +678,38 @@ pub fn present(
     let attachments: Rc<RefCell<Vec<ComposeAttachment>>> =
         Rc::new(RefCell::new(draft.attachments.clone()));
     let dirty = Rc::new(Cell::new(false));
+    // M4-E: one place flips the dirty flag and the title marker so every
+    // edit path stays consistent.
+    let mark_dirty: Rc<dyn Fn()> = {
+        let dirty = Rc::clone(&dirty);
+        let title = Rc::clone(&title);
+        let base_title = Rc::clone(&base_title);
+        Rc::new(move || {
+            if !dirty.get() {
+                dirty.set(true);
+                title.set_title(&format!("● {}", base_title.as_str()));
+            }
+        })
+    };
 
     // M4-E: typing in the body marks the draft dirty, so the title marker
     // and the close warning stay accurate.
     {
         let user_content = user_content.clone();
         user_content.register_script_message_handler("inputHandler", None);
-        let dirty = Rc::clone(&dirty);
-        let title = Rc::clone(&title);
-        let base_title = Rc::clone(&base_title);
+        let mark_dirty = Rc::clone(&mark_dirty);
         user_content.connect_script_message_received(
             Some("inputHandler"),
             move |_, _value: &JSValue| {
-                if !dirty.get() {
-                    dirty.set(true);
-                    title.set_title(&format!("● {}", base_title.as_str()));
-                }
+                mark_dirty();
             },
         );
     }
     // M4-E: mark dirty on header edits.
     for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
-        let dirty = Rc::clone(&dirty);
-        let title = Rc::clone(&title);
-        let base_title = Rc::clone(&base_title);
+        let mark_dirty = Rc::clone(&mark_dirty);
         row.connect_changed(move |_| {
-            if !dirty.get() {
-                dirty.set(true);
-                title.set_title(&format!("● {}", base_title.as_str()));
-            }
+            mark_dirty();
         });
     }
     rebuild_attachments(
@@ -714,6 +717,7 @@ pub fn present(
         &attachments_group,
         &attachments,
         Some(Rc::clone(&dirty)),
+        Some(Rc::clone(&mark_dirty)),
         banner.clone(),
         Rc::clone(&banner_action),
     );
@@ -729,8 +733,7 @@ pub fn present(
         let group = attachments_group.clone();
         let attachments = Rc::clone(&attachments);
         let dirty = Rc::clone(&dirty);
-        let title = Rc::clone(&title);
-        let base_title = Rc::clone(&base_title);
+        let mark_dirty = Rc::clone(&mark_dirty);
         let banner = banner.clone();
         let banner_action = Rc::clone(&banner_action);
         user_content.connect_script_message_received(
@@ -766,13 +769,13 @@ pub fn present(
                     return;
                 };
                 attachments.borrow_mut().push(attachment);
-                dirty.set(true);
-                title.set_title(&format!("● {}", base_title.as_str()));
+                mark_dirty();
                 rebuild_attachments(
                     &list,
                     &group,
                     &attachments,
                     Some(Rc::clone(&dirty)),
+                    Some(Rc::clone(&mark_dirty)),
                     banner.clone(),
                     Rc::clone(&banner_action),
                 );
@@ -790,6 +793,7 @@ pub fn present(
     // the attach button.
     {
         let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        let mark_dirty = Rc::clone(&mark_dirty);
         let list = attachment_list.clone();
         let group = attachments_group.clone();
         let attachments = Rc::clone(&attachments);
@@ -805,7 +809,7 @@ pub fn present(
                 match load_attachment(&file) {
                     Ok(attachment) => {
                         attachments.borrow_mut().push(attachment);
-                        dirty.set(true);
+                        mark_dirty();
                     }
                     Err(message) => failed = Some(message),
                 }
@@ -819,6 +823,7 @@ pub fn present(
                 &group,
                 &attachments,
                 Some(Rc::clone(&dirty)),
+                Some(Rc::clone(&mark_dirty)),
                 banner.clone(),
                 Rc::clone(&banner_action),
             );
@@ -848,7 +853,6 @@ pub fn present(
     let window_for_populate = window.clone();
     let banner_for_populate = banner.clone();
     let banner_action_for_populate = Rc::clone(&banner_action);
-    let dirty_for_populate = Rc::clone(&dirty);
 
     // Populate templates list
     let populate_templates: Rc<dyn Fn()> = {
@@ -856,8 +860,7 @@ pub fn present(
         let account_id = account.id;
         let templates_list = templates_list.clone();
         let templates_popover = templates_popover.clone();
-        let title = Rc::clone(&title);
-        let base_title = Rc::clone(&base_title);
+        let mark_dirty = Rc::clone(&mark_dirty);
         let banner_action = Rc::clone(&banner_action_for_populate);
         Rc::new(move || {
             while let Some(child) = templates_list.first_child() {
@@ -886,12 +889,10 @@ pub fn present(
                         let subject_row = subject_row_for_populate.clone();
                         let webview = webview_for_populate.clone();
                         let window = window_for_populate.clone();
-                        let dirty = Rc::clone(&dirty_for_populate);
                         let templates_popover = templates_popover.clone();
                         let banner = banner_for_populate.clone();
                         let banner_action = Rc::clone(&banner_action);
-                        let title = Rc::clone(&title);
-                        let base_title = Rc::clone(&base_title);
+                        let mark_dirty = Rc::clone(&mark_dirty);
                         row.connect_activated(move |_| {
                             let vars = std::collections::HashMap::new();
                             let base_draft = template_draft(&template_clone, &vars);
@@ -903,12 +904,10 @@ pub fn present(
                             let bcc_row = bcc_row.clone();
                             let subject_row = subject_row.clone();
                             let webview = webview.clone();
-                            let dirty = Rc::clone(&dirty);
                             let templates_popover = templates_popover.clone();
                             let banner = banner.clone();
                             let banner_action = Rc::clone(&banner_action);
-                            let title = Rc::clone(&title);
-                            let base_title = Rc::clone(&base_title);
+                            let mark_dirty = Rc::clone(&mark_dirty);
 
                             let apply_draft = Rc::new(move |draft: OutgoingMessage, removed: bool| {
                                 // Only prefill empty fields
@@ -967,8 +966,7 @@ pub fn present(
                                         );
                                     },
                                 );
-                                dirty.set(true);
-                                title.set_title(&format!("● {}", base_title.as_str()));
+                                mark_dirty();
                                 templates_popover.popdown();
                                 banner_action.set(0);
                                 banner.set_button_label(None::<&str>);
@@ -1225,6 +1223,7 @@ pub fn present(
         &attachments_group,
         &attachments,
         Some(Rc::clone(&dirty)),
+        Some(Rc::clone(&mark_dirty)),
         banner.clone(),
         Rc::clone(&banner_action),
     );
@@ -1529,6 +1528,7 @@ pub fn present(
     let picker_banner = banner.clone();
     let picker_banner_action = Rc::clone(&banner_action);
     let picker_dirty = Rc::clone(&dirty);
+    let mark_dirty_for_picker = Rc::clone(&mark_dirty);
     attach.connect_clicked(move |_| {
         let dialog = gtk::FileDialog::builder().title("Attach files").build();
         let list = picker_list.clone();
@@ -1537,6 +1537,7 @@ pub fn present(
         let banner = picker_banner.clone();
         let banner_action = Rc::clone(&picker_banner_action);
         let dirty = Rc::clone(&picker_dirty);
+        let mark_dirty_for_picker = Rc::clone(&mark_dirty_for_picker);
         dialog.open_multiple(
             Some(&picker_window),
             None::<&gio::Cancellable>,
@@ -1553,7 +1554,7 @@ pub fn present(
                     match load_attachment(&file) {
                         Ok(attachment) => {
                             attachments.borrow_mut().push(attachment);
-                            dirty.set(true);
+                            mark_dirty_for_picker();
                         }
                         Err(message) => failed = Some(message),
                     }
@@ -1567,6 +1568,7 @@ pub fn present(
                     &group,
                     &attachments,
                     Some(Rc::clone(&dirty)),
+                    Some(Rc::clone(&mark_dirty_for_picker)),
                     banner.clone(),
                     Rc::clone(&banner_action),
                 );
@@ -1647,11 +1649,13 @@ pub fn present(
     Some(window)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_attachments(
     list: &gtk::ListBox,
     group: &adw::PreferencesGroup,
     attachments: &Rc<RefCell<Vec<ComposeAttachment>>>,
     dirty: Option<Rc<Cell<bool>>>,
+    mark_dirty: Option<Rc<dyn Fn()>>,
     banner: adw::Banner,
     banner_action: Rc<Cell<u8>>,
 ) {
@@ -1699,11 +1703,14 @@ fn rebuild_attachments(
         let remove_dirty = dirty.clone();
         let remove_banner = banner.clone();
         let remove_banner_action = Rc::clone(&banner_action);
+        let remove_mark_dirty = mark_dirty.clone();
         remove.connect_clicked(move |_| {
             if index < attachments.borrow().len() {
                 attachments.borrow_mut().remove(index);
             }
-            if let Some(dirty) = &remove_dirty {
+            if let Some(mark_dirty) = &remove_mark_dirty {
+                mark_dirty();
+            } else if let Some(dirty) = &remove_dirty {
                 dirty.set(true);
             }
             rebuild_attachments(
@@ -1711,6 +1718,7 @@ fn rebuild_attachments(
                 &remove_group,
                 &attachments,
                 remove_dirty.clone(),
+                remove_mark_dirty.clone(),
                 remove_banner.clone(),
                 Rc::clone(&remove_banner_action),
             );
