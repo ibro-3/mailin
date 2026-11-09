@@ -2423,6 +2423,11 @@ impl MainWindow {
         }
     }
 
+    // M3b-3: the plain reply action (not reply-all) for the Ctrl+R accelerator.
+    fn open_reply(self: &Rc<Self>) {
+        self.compose_reply(false);
+    }
+
     // Folder management actions (for context menu)
     fn new_folder_action(self: &Rc<Self>) {
         let Some(account_id) = self.state().selection.account else {
@@ -3503,6 +3508,36 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             }
         },
     )?);
+    // M3b-3: register Ctrl+N (new message) and Ctrl+R (reply) so they
+    // match the advertised tooltips and the help table.
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::N,
+        Some(VirtualKeyModifiers::Control),
+        Some("Create a new message (Ctrl+N)"),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.open_compose(this.new_draft());
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::R,
+        Some(VirtualKeyModifiers::Control),
+        Some("Reply to selected message (Ctrl+R)"),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.open_reply();
+                }
+            }
+        },
+    )?);
     this.events.keep(add_accelerator(
         &root,
         VirtualKey::A,
@@ -3513,6 +3548,35 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             move || {
                 if let Some(this) = this.upgrade() {
                     this.add_account();
+                }
+            }
+        },
+    )?);
+    // M3b-3: register Ctrl+Shift+R (reply-all) and Ctrl+Shift+F (forward).
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::R,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        Some("Reply all (Ctrl+Shift+R)"),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.compose_reply(true);
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::F,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        Some("Forward message (Ctrl+Shift+F)"),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.compose_forward();
                 }
             }
         },
@@ -4248,6 +4312,33 @@ fn build_shortcuts_window(xaml_root: &XamlRoot) -> Result<ContentDialog> {
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Ctrl+N" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
                     <TextBlock Grid.Column="2" Text="New message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+R" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Reply to selected message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+R" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Reply all"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+F" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Forward"/>
                 </Grid>
                 <Grid>
                     <Grid.ColumnDefinitions>
