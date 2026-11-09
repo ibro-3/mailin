@@ -44,6 +44,7 @@ pub use account::{
 };
 pub use client::{
     ClientEvent, ConnectionStage, ConnectionTestReport, Event, Mailin, StageTestResult,
+    test_connection_staged, test_imap_connection, test_smtp_connection,
 };
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{
