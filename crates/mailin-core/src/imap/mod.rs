@@ -223,7 +223,26 @@ impl ImapSession {
                 .map_err(|(e, _)| Error::Imap(format!("login failed: {e}")))?
         };
 
-        let capabilities = session.capabilities().await.ok();
+        // A transient failure must not silently switch off every optional
+        // feature (CONDSTORE, IDLE, MOVE, UIDPLUS): read the capabilities
+        // once more and only fall back to the conservative defaults after a
+        // second failure, with a warning.
+        let capabilities = match session.capabilities().await {
+            Ok(capabilities) => Some(capabilities),
+            Err(error) => {
+                tracing::warn!(%error, "could not read the IMAP capabilities; retrying");
+                match session.capabilities().await {
+                    Ok(capabilities) => Some(capabilities),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "could not read the IMAP capabilities; continuing without the optional features"
+                        );
+                        None
+                    }
+                }
+            }
+        };
         let condstore = capabilities
             .as_ref()
             .is_some_and(|caps| caps.has_str("CONDSTORE"));
