@@ -17,6 +17,7 @@ use mailin_core::{
     Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
     ServerSettings,
 };
+use secrecy::ExposeSecret;
 
 use crate::app::AppState;
 use crate::autoconfig::{self, Suggestion};
@@ -1056,9 +1057,10 @@ pub fn present(
         let stage_box = stage_box.clone();
         let imap_stage_label = imap_stage_label.clone();
         let smtp_stage_label = smtp_stage_label.clone();
+        let existing_account_for_test = existing_account.clone();
         move |_| {
             let draft = rows.draft();
-            let password = draft.password.clone();
+            let typed_password = draft.password.clone();
             // In edit mode, we don't require password for test if it's empty
             let require_password = mode == AccountDialogMode::Add;
             let account = match draft.build(require_password) {
@@ -1077,53 +1079,120 @@ pub fn present(
             imap_stage_label.set_text("IMAP: testing…");
             smtp_stage_label.set_text("SMTP: waiting…");
             set_status_message(&error_label, "Testing IMAP and SMTP connection…", "info");
-            let app = Rc::clone(&app);
-            let error_label = error_label.clone();
-            let copy_error = copy_error.clone();
-            let test = test.clone();
-            let imap_stage_label = imap_stage_label.clone();
-            let smtp_stage_label = smtp_stage_label.clone();
-            glib::spawn_future_local(async move {
-                // M4-F: both stages are probed independently.
-                let report = app
-                    .mailin
-                    .test_connection_staged(&account.imap, &account.smtp, &password)
-                    .await;
-                test.set_sensitive(true);
-                test.set_label("Test Connection");
-                for stage in report.stages() {
-                    let label = match stage.stage {
-                        mailin_core::ConnectionStage::Imap => &imap_stage_label,
-                        mailin_core::ConnectionStage::Smtp => &smtp_stage_label,
-                    };
-                    label.set_text(&format!(
-                        "{}: {}",
-                        stage.stage.as_str(),
-                        if stage.ok {
-                            "✓ connected".to_owned()
-                        } else {
-                            format!("✗ {}", stage.error.clone().unwrap_or_default())
+            // An empty password field in edit mode means "keep the stored
+            // password"; the probe must then use that stored secret, which
+            // lives in the keyring. The lookup is blocking, so it runs on a
+            // worker (see `Mailin::password`).
+            let stored_id = if require_password || !typed_password.is_empty() {
+                None
+            } else {
+                existing_account_for_test.as_ref().map(|account| account.id)
+            };
+            let run_probe = {
+                let app = Rc::clone(&app);
+                let error_label = error_label.clone();
+                let copy_error = copy_error.clone();
+                let test = test.clone();
+                let imap_stage_label = imap_stage_label.clone();
+                let smtp_stage_label = smtp_stage_label.clone();
+                let account = Rc::new(account);
+                Rc::new(move |password: String| {
+                    let app = Rc::clone(&app);
+                    let error_label = error_label.clone();
+                    let copy_error = copy_error.clone();
+                    let test = test.clone();
+                    let imap_stage_label = imap_stage_label.clone();
+                    let smtp_stage_label = smtp_stage_label.clone();
+                    let account = Rc::clone(&account);
+                    glib::spawn_future_local(async move {
+                        // M4-F: both stages are probed independently.
+                        let report = app
+                            .mailin
+                            .test_connection_staged(&account.imap, &account.smtp, &password)
+                            .await;
+                        test.set_sensitive(true);
+                        test.set_label("Test Connection");
+                        for stage in report.stages() {
+                            let label = match stage.stage {
+                                mailin_core::ConnectionStage::Imap => &imap_stage_label,
+                                mailin_core::ConnectionStage::Smtp => &smtp_stage_label,
+                            };
+                            label.set_text(&format!(
+                                "{}: {}",
+                                stage.stage.as_str(),
+                                if stage.ok {
+                                    "✓ connected".to_owned()
+                                } else {
+                                    format!("✗ {}", stage.error.clone().unwrap_or_default())
+                                }
+                            ));
+                            label.remove_css_class("success");
+                            label.remove_css_class("error");
+                            label.add_css_class(if stage.ok { "success" } else { "error" });
                         }
-                    ));
-                    label.remove_css_class("success");
-                    label.remove_css_class("error");
-                    label.add_css_class(if stage.ok { "success" } else { "error" });
-                }
-                if report.all_ok() {
-                    copy_error.set_visible(false);
-                    set_status_message(
-                        &error_label,
-                        "IMAP: ✓ · SMTP: ✓  Connection successful.",
-                        "success",
+                        if report.all_ok() {
+                            copy_error.set_visible(false);
+                            set_status_message(
+                                &error_label,
+                                "IMAP: ✓ · SMTP: ✓  Connection successful.",
+                                "success",
+                            );
+                        } else {
+                            let summary = report
+                                .error_summary()
+                                .unwrap_or_else(|| "Connection failed".to_owned());
+                            set_status_message(&error_label, &summary, "error");
+                            copy_error.set_visible(true);
+                        }
+                    });
+                })
+            };
+            match stored_id {
+                None => run_probe(typed_password),
+                Some(account_id) => {
+                    let mailin = std::sync::Arc::clone(&app.mailin);
+                    let run_probe = Rc::clone(&run_probe);
+                    let test = test.clone();
+                    let stage_box = stage_box.clone();
+                    let error_label = error_label.clone();
+                    let copy_error = copy_error.clone();
+                    crate::background::spawn_result(
+                        move || {
+                            mailin
+                                .password(&account_id)
+                                .map(|secret| secret.expose_secret().to_string())
+                        },
+                        move |result| match result {
+                            Ok(Ok(password)) => run_probe(password),
+                            Ok(Err(error)) => {
+                                copy_error.set_visible(false);
+                                stage_box.set_visible(false);
+                                test.set_sensitive(true);
+                                test.set_label("Test Connection");
+                                set_status_message(
+                                    &error_label,
+                                    &format!("Could not read the stored password: {error}"),
+                                    "error",
+                                );
+                            }
+                            Err(worker) => {
+                                copy_error.set_visible(false);
+                                stage_box.set_visible(false);
+                                test.set_sensitive(true);
+                                test.set_label("Test Connection");
+                                set_status_message(
+                                    &error_label,
+                                    &format!(
+                                        "Could not read the stored password: {}",
+                                        worker.message
+                                    ),
+                                    "error",
+                                );
+                            }
+                        },
                     );
-                } else {
-                    let summary = report
-                        .error_summary()
-                        .unwrap_or_else(|| "Connection failed".to_owned());
-                    set_status_message(&error_label, &summary, "error");
-                    copy_error.set_visible(true);
                 }
-            });
+            }
         }
     });
 
