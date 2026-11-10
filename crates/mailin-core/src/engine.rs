@@ -1333,6 +1333,9 @@ async fn handle_command(
         }
         WorkerCommand::RetryOutbox { entry_id } => {
             state.mailbox.retry_outbox(entry_id)?;
+            // The entry is queued again: wake the sender so it does not sit
+            // out the rest of its 60-second wait.
+            state.outbox.notify_one();
         }
         WorkerCommand::CancelOutbox { entry_id } => {
             state.mailbox.cancel_outbox(entry_id)?;
@@ -2447,7 +2450,12 @@ async fn outbox_sender(state: Arc<EngineState>) {
                         Some(&error.to_string()),
                     );
                     state.mailbox.publish(Event::OutboxChanged);
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    // Back off before the next attempt, but wake up at once
+                    // when the user retries an entry in the meantime.
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(30)) => {}
+                        _ = state.outbox.notified() => {}
+                    }
                 }
             }
             Ok(None) => {
