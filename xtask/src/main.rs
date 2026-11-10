@@ -884,10 +884,9 @@ fn winui_deref() -> Result<()> {
         if path
             .extension()
             .is_some_and(|extension| extension == "winmd")
+            && let Some(file) = File::read(&path)
         {
-            if let Some(file) = File::read(&path) {
-                files.push(file);
-            }
+            files.push(file);
         }
     }
     if files.is_empty() {
