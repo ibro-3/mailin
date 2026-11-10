@@ -2300,43 +2300,73 @@ impl MainWindow {
 
     /// Toggle selection of the currently focused message (Space).
     fn toggle_current_selection(&self) {
-        let state = self.state();
-        if state.show_outbox || state.messages.is_empty() {
-            return;
-        }
-        // Find the currently focused message (the one with checked checkbox)
-        let checkboxes = self.checkboxes.borrow().clone();
-        for (i, checkbox) in checkboxes.iter().enumerate() {
-            if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
-                if let Ok(Some(true)) = toggle.IsChecked() {
-                    if i < state.messages.len() {
-                        let msg = &state.messages[i];
-                        if state.selected.contains(&msg.id) {
-                            state.selected.remove(&msg.id);
-                            let _ = toggle.SetIsChecked(Some(false));
-                        } else {
-                            state.selected.insert(msg.id);
-                            let _ = toggle.SetIsChecked(Some(true));
+        // Resolve the focused row first and drop the state guard before the
+        // mutation below: update_bulk_bar() locks `state` again, which would
+        // deadlock if the guard were still held.
+        let target = {
+            let state = self.state();
+            if state.show_outbox || state.messages.is_empty() {
+                return;
+            }
+            // Find the currently focused message (the one with checked checkbox)
+            let checkboxes = self.checkboxes.borrow().clone();
+            let mut target: Option<(usize, MessageId, bool)> = None;
+            for (i, checkbox) in checkboxes.iter().enumerate() {
+                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                    if let Ok(Some(true)) = toggle.IsChecked() {
+                        if i < state.messages.len() {
+                            let msg = &state.messages[i];
+                            target = Some((i, msg.id, state.selected.contains(&msg.id)));
                         }
-                        self.update_bulk_bar();
+                        break;
                     }
-                    break;
                 }
             }
+            target
+        };
+        let Some((index, id, selected_before)) = target else {
+            return;
+        };
+        {
+            let mut state = self.state();
+            if selected_before {
+                state.selected.remove(&id);
+            } else {
+                state.selected.insert(id);
+            }
         }
+        // Release the borrow before touching the control: `SetIsChecked`
+        // raises an event that can rebuild the rows.
+        let checkbox = {
+            let checkboxes = self.checkboxes.borrow();
+            checkboxes.get(index).cloned()
+        };
+        if let Some(checkbox) = checkbox {
+            if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                let _ = toggle.SetIsChecked(Some(!selected_before));
+            }
+        }
+        self.update_bulk_bar();
     }
 
     /// Open the currently selected message (Enter).
     fn open_selected_message(&self) {
-        let state = self.state();
-        if state.show_outbox {
-            return;
-        }
-        let selected = &state.selected;
-        if let Some(&msg_id) = selected.iter().next() {
-            if let Some(message) = state.messages.iter().find(|m| m.id == msg_id) {
-                self.open_message(message.clone());
+        // Copy the target message out and drop the state guard first:
+        // open_message() locks `state` again, which would deadlock here.
+        let target = {
+            let state = self.state();
+            if state.show_outbox {
+                None
+            } else {
+                state
+                    .selected
+                    .iter()
+                    .next()
+                    .and_then(|msg_id| state.messages.iter().find(|m| m.id == *msg_id).cloned())
             }
+        };
+        if let Some(message) = target {
+            self.open_message(message);
         }
     }
 
@@ -2890,8 +2920,10 @@ impl MainWindow {
             self.show_toast_notification(account_id, &text, &message_ids);
         }
         if outbox_changed {
-            let state = self.state();
-            if state.show_outbox {
+            // Read the flag and drop the guard first: refresh_messages() and
+            // refresh_folders() lock `state` again, which would deadlock here.
+            let show_outbox = self.state().show_outbox;
+            if show_outbox {
                 self.refresh_messages();
             } else {
                 self.refresh_folders();

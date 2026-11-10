@@ -31,10 +31,16 @@ pub fn confirm_remove_account(
     gtk::glib::spawn_future_local(async move {
         let response = dialog.choose_future(parent.as_ref()).await;
         if response.as_str() == "remove" {
-            match mailin.remove_account(&account_id) {
-                Ok(()) => on_success(),
-                Err(e) => on_error(e.to_string()),
-            }
+            // Removing the account deletes every local row and the keyring
+            // entry: run it off the main thread so the window stays alive.
+            crate::background::spawn_result(
+                move || mailin.remove_account(&account_id),
+                move |result| match result {
+                    Ok(Ok(())) => on_success(),
+                    Ok(Err(error)) => on_error(error.to_string()),
+                    Err(failed) => on_error(failed.message),
+                },
+            );
         }
     });
 }

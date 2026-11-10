@@ -3,6 +3,7 @@
 mod account_dialog;
 mod app;
 mod autoconfig;
+mod background;
 mod compose;
 mod dialogs;
 mod format;

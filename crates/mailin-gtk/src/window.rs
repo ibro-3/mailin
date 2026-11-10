@@ -27,6 +27,7 @@ use tokio::sync::broadcast::error::TryRecvError;
 use webkit6::prelude::*;
 
 use crate::app::AppState;
+use crate::background;
 use crate::compose;
 use crate::format;
 use crate::html;
@@ -191,6 +192,22 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
+/// Cached attachment thumbnails, keyed by (message id, MIME part id).
+type PreviewCache = std::collections::HashMap<(MessageId, String), Option<gtk::gdk::Texture>>;
+
+/// Monotonic id for each window instance, so that background results started
+/// by one window are never applied to another.
+static NEXT_WINDOW_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The live window, if any, for background work that finished after the user
+/// navigated or closed the UI (the fetch result ferry below runs on the main
+/// thread, so `Rc` handling here is fine).
+fn live_window() -> Option<Rc<MainWindow>> {
+    MAIN_WINDOW
+        .with(|slot| slot.borrow().clone())
+        .and_then(|weak| weak.upgrade())
+}
+
 /// Open (or queue) the mailto draft captured at launch or runtime.
 ///
 /// If the main window exists, present it and open the composer now; otherwise
@@ -242,6 +259,10 @@ pub struct MainWindow {
     programmatic: Cell<bool>,
     search_generation: Cell<u64>,
     closed: Rc<Cell<bool>>,
+    /// Identifies this window instance. Background fetches started by this
+    /// window only apply their results to it, never to a later window that
+    /// replaces it.
+    window_id: Cell<u64>,
     html_view: RefCell<Option<webkit6::WebView>>,
     /// HTML view currently targeted by find-in-message (main or decrypted).
     find_target_view: Rc<RefCell<Option<webkit6::WebView>>>,
@@ -250,12 +271,70 @@ pub struct MainWindow {
     /// Message for which the user explicitly allowed remote content.
     remote_allowed: Cell<Option<MessageId>>,
     pending_attachment: Rc<RefCell<Vec<PendingAttachment>>>,
+    /// Bumped on every `refresh_folders`; background fetches whose
+    /// generation no longer matches are dropped instead of rendered.
+    folders_generation: Cell<u64>,
+    /// A folder fetch is running; further requests are coalesced into one
+    /// follow-up refresh instead of starting a thread per event.
+    folders_inflight: Cell<bool>,
+    folders_pending: Cell<bool>,
+    /// Bumped on every `refresh_messages`; same staleness guard as folders.
+    messages_generation: Cell<u64>,
+    /// A message-list fetch is running; further requests are coalesced.
+    messages_inflight: Cell<bool>,
+    messages_pending: Cell<bool>,
+    /// Bumped on every `render_body`; guards stale inline-image loads.
+    reader_generation: Cell<u64>,
+    /// Decoded attachment thumbnails, keyed by (message, part). Background
+    /// decodes deposit their results here so re-renders never re-decode.
+    preview_cache: Rc<RefCell<PreviewCache>>,
+    /// Thumbnail decodes currently running, to avoid duplicate work while the
+    /// first decode of an attachment is still pending.
+    preview_inflight: Rc<RefCell<std::collections::HashSet<(MessageId, String)>>>,
     /// Draft edit window per message, so selecting the same draft row again
     /// focuses the open composer instead of spawning a second one.
     last_draft: RefCell<Option<(MessageId, glib::WeakRef<gtk::Window>)>>,
     /// Expanded thread roots (thread_root_key) for threaded view.
     expanded_threads: RefCell<std::collections::HashSet<String>>,
     widgets: Widgets,
+}
+
+/// Search scope for a single-account search result, transferred from the
+/// background fetch so the apply step can label the list.
+#[derive(Clone, Copy)]
+enum SearchScope {
+    AllMail,
+    CurrentFolder,
+}
+
+/// Result of the background message-list fetch in `refresh_messages`.
+enum MessageFetch {
+    /// Nothing to do (e.g. search requested but no account): keep the list.
+    NoChange,
+    /// No folder/outbox selected: clear the list.
+    Clear,
+    Failed(String),
+    Unified(Vec<MessageHeader>),
+    UnifiedSearch {
+        results: Vec<MessageHeader>,
+        failure: Option<String>,
+    },
+    Search {
+        results: Vec<MessageHeader>,
+        scope: SearchScope,
+    },
+    Outbox {
+        entries: Vec<OutboxEntry>,
+    },
+    Flat {
+        messages: Vec<MessageHeader>,
+        title: String,
+        more: bool,
+    },
+    Threaded {
+        flat_messages: Vec<MessageHeader>,
+        title: String,
+    },
 }
 
 impl MainWindow {
@@ -775,11 +854,21 @@ impl MainWindow {
             programmatic: Cell::new(false),
             search_generation: Cell::new(0),
             closed: Rc::new(Cell::new(false)),
+            window_id: Cell::new(NEXT_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
             html_view: RefCell::new(None),
             find_target_view: Rc::new(RefCell::new(None)),
             html_mode: Cell::new(html_mode),
             remote_allowed: Cell::new(None),
             pending_attachment: Rc::new(RefCell::new(Vec::new())),
+            folders_generation: Cell::new(0),
+            folders_inflight: Cell::new(false),
+            folders_pending: Cell::new(false),
+            messages_generation: Cell::new(0),
+            messages_inflight: Cell::new(false),
+            messages_pending: Cell::new(false),
+            reader_generation: Cell::new(0),
+            preview_cache: Rc::new(RefCell::new(std::collections::HashMap::new())),
+            preview_inflight: Rc::new(RefCell::new(std::collections::HashSet::new())),
             last_draft: RefCell::new(None),
             expanded_threads: RefCell::new(std::collections::HashSet::new()),
             widgets: Widgets {
@@ -849,11 +938,12 @@ impl MainWindow {
             },
         });
 
+        // Remember the window before the first refresh: background method
+        // fetches resolve `live_window()` from this slot on completion.
+        MAIN_WINDOW.with(|slot| *slot.borrow_mut() = Some(Rc::downgrade(&this)));
+
         Self::connect(&this);
         this.refresh_accounts();
-
-        // Remember the window so runtime "mailto:"/--compose activations can find it.
-        MAIN_WINDOW.with(|slot| *slot.borrow_mut() = Some(Rc::downgrade(&this)));
 
         // Check for a mailto: draft that was set before window creation
         if let Some(draft) = take_mailto_draft() {
@@ -2031,75 +2121,135 @@ impl MainWindow {
     // -------------------------------------------------------------- folders
 
     fn refresh_folders(&self) {
-        let selection = self.selection.borrow();
-        if selection.unified_inbox {
-            // In unified inbox mode, show just "Unified Inbox" as the only folder
-            self.clear_folders();
-            let unread_total = self.app.mailin.unread_total_all().unwrap_or(0);
-            let unified_folder = Folder {
-                id: FolderId::UNIFIED_INBOX, // UI virtual: Unified Inbox
-                account_id: AccountId::default(),
-                name: "Unified Inbox".to_owned(),
-                delimiter: "/".to_owned(),
-                role: FolderRole::Other,
-                uid_validity: None,
-                uid_next: None,
-                highest_modseq: None,
-                last_synced_at: None,
-                subscribed: true,
-                message_count: 0,
-                unread_count: unread_total,
-            };
-
-            self.programmatic.set(true);
-            clear_list(&self.widgets.folder_list);
-            self.widgets
-                .folder_list
-                .append(&folder_row(&unified_folder));
-            if let Some(row) = self.widgets.folder_list.row_at_index(0) {
-                self.widgets.folder_list.select_row(Some(&row));
-            } else {
-                tracing::warn!("unified folder row missing after append");
-            }
-            self.widgets.folder_stack.set_visible_child_name("list");
-            *self.folders.borrow_mut() = vec![unified_folder];
-            self.programmatic.set(false);
+        // Copy the needed selection fields out first: the apply step below
+        // calls clear_folders(), which mutates `selection` again. Holding the
+        // immutable borrow across that call would panic (double borrow).
+        let (unified_inbox, account_id) = {
+            let selection = self.selection.borrow();
+            (selection.unified_inbox, selection.account)
+        };
+        // A sync storm must not start a thread per event: remember that
+        // another refresh is needed and run it once the current fetch ends.
+        if self.folders_inflight.get() {
+            self.folders_pending.set(true);
             return;
         }
+        self.folders_inflight.set(true);
+        let generation = self.folders_generation.get().wrapping_add(1);
+        self.folders_generation.set(generation);
 
-        let Some(account_id) = selection.account else {
-            self.clear_folders();
-            return;
-        };
-        drop(selection);
-
-        let mut folders = match self.app.mailin.list_folders(&account_id) {
-            Ok(folders) => folders,
-            Err(error) => {
-                self.show_error(&error.to_string());
-                return;
-            }
-        };
-
-        // Add virtual Outbox folder at the end
-        let outbox_len = self.app.mailin.outbox_len().unwrap_or(0);
-        if outbox_len > 0 {
-            folders.push(Folder {
-                id: FolderId::OUTBOX, // UI virtual: Outbox
-                account_id,
-                name: "Outbox".to_owned(),
-                delimiter: "/".to_owned(),
-                role: FolderRole::Other,
-                uid_validity: None,
-                uid_next: None,
-                highest_modseq: None,
-                last_synced_at: None,
-                subscribed: true,
-                message_count: outbox_len,
-                unread_count: outbox_len,
-            });
+        enum FolderFetch {
+            Unified(u32),
+            Empty,
+            Failed(String),
+            Folders(Vec<Folder>),
         }
 
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let window_id = self.window_id.get();
+        background::spawn_result(
+            move || -> FolderFetch {
+                if unified_inbox {
+                    return FolderFetch::Unified(mailin.unread_total_all().unwrap_or(0));
+                }
+                let Some(account_id) = account_id else {
+                    return FolderFetch::Empty;
+                };
+                match mailin.list_folders(&account_id) {
+                    Ok(mut folders) => {
+                        // Add virtual Outbox folder at the end
+                        let outbox_len = mailin.outbox_len().unwrap_or(0);
+                        if outbox_len > 0 {
+                            folders.push(Folder {
+                                id: FolderId::OUTBOX, // UI virtual: Outbox
+                                account_id,
+                                name: "Outbox".to_owned(),
+                                delimiter: "/".to_owned(),
+                                role: FolderRole::Other,
+                                uid_validity: None,
+                                uid_next: None,
+                                highest_modseq: None,
+                                last_synced_at: None,
+                                subscribed: true,
+                                message_count: outbox_len,
+                                unread_count: outbox_len,
+                            });
+                        }
+                        FolderFetch::Folders(folders)
+                    }
+                    Err(error) => FolderFetch::Failed(error.to_string()),
+                }
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one; its own refresh wins.
+                    return;
+                }
+                this.folders_inflight.set(false);
+                if this.folders_pending.get() {
+                    // The state changed while this fetch was running: run one
+                    // more refresh with the current selection.
+                    this.folders_pending.set(false);
+                    this.refresh_folders();
+                    return;
+                }
+                if this.closed.get() || this.folders_generation.get() != generation {
+                    return;
+                }
+                let Ok(fetch) = result else {
+                    tracing::error!("the folder refresh worker failed");
+                    return;
+                };
+                match fetch {
+                    FolderFetch::Empty => this.clear_folders(),
+                    FolderFetch::Failed(error) => this.show_error(&error),
+                    FolderFetch::Unified(unread_total) => this.show_unified_folder(unread_total),
+                    FolderFetch::Folders(folders) => this.show_account_folders(folders),
+                }
+            },
+        );
+    }
+
+    /// Render the unified-inbox folder list from a background fetch.
+    fn show_unified_folder(&self, unread_total: u32) {
+        // In unified inbox mode, show just "Unified Inbox" as the only folder
+        self.clear_folders();
+        let unified_folder = Folder {
+            id: FolderId::UNIFIED_INBOX, // UI virtual: Unified Inbox
+            account_id: AccountId::default(),
+            name: "Unified Inbox".to_owned(),
+            delimiter: "/".to_owned(),
+            role: FolderRole::Other,
+            uid_validity: None,
+            uid_next: None,
+            highest_modseq: None,
+            last_synced_at: None,
+            subscribed: true,
+            message_count: 0,
+            unread_count: unread_total,
+        };
+
+        self.programmatic.set(true);
+        clear_list(&self.widgets.folder_list);
+        self.widgets
+            .folder_list
+            .append(&folder_row(&unified_folder));
+        if let Some(row) = self.widgets.folder_list.row_at_index(0) {
+            self.widgets.folder_list.select_row(Some(&row));
+        } else {
+            tracing::warn!("unified folder row missing after append");
+        }
+        self.widgets.folder_stack.set_visible_child_name("list");
+        *self.folders.borrow_mut() = vec![unified_folder];
+        self.programmatic.set(false);
+    }
+
+    /// Render a single account's folder list from a background fetch
+    /// (including the virtual Outbox, when it has entries).
+    fn show_account_folders(&self, folders: Vec<Folder>) {
         let selected_id = self.selection.borrow().folder;
         let index = selected_id
             .and_then(|id| folders.iter().position(|folder| folder.id == id))
@@ -2178,7 +2328,30 @@ impl MainWindow {
                 .last_synced_at
                 .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
             if stale {
-                self.app.mailin.store().refresh_folder(folder.id)?;
+                // Marking the folder for a resync is a store write: keep it
+                // off the main thread so selecting a folder never stalls.
+                let mailin = std::sync::Arc::clone(&self.app.mailin);
+                let folder_id = folder.id;
+                background::spawn_result(
+                    move || {
+                        mailin
+                            .store()
+                            .refresh_folder(folder_id)
+                            .map_err(|error| error.to_string())
+                    },
+                    move |result| match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            tracing::warn!("could not mark the folder for a resync: {error}");
+                        }
+                        Err(failed) => {
+                            tracing::warn!(
+                                "could not mark the folder for a resync: {}",
+                                failed.message
+                            );
+                        }
+                    },
+                );
             }
         }
         Ok(())
@@ -2222,137 +2395,211 @@ impl MainWindow {
                 selection.unified_inbox,
             )
         };
-
-        if unified_inbox {
-            let account_ids: Vec<AccountId> = self.accounts.borrow().iter().map(|a| a.id).collect();
-            if search {
-                // Search across every account (unified inbox has no
-                // single folder to scope to, so use the all-mail scope).
-                let mut results = Vec::new();
-                let mut failure: Option<String> = None;
-                for account_id in &account_ids {
-                    match self
-                        .app
-                        .mailin
-                        .search_messages(account_id, None, &query, SEARCH_LIMIT)
-                    {
-                        Ok(mut found) => results.append(&mut found),
-                        Err(error) => failure = Some(error.to_string()),
-                    }
-                }
-                results.sort_by_key(|a| std::cmp::Reverse(a.received_at));
-                results.truncate(SEARCH_LIMIT as usize);
-                self.show_messages(results, format!("Results for “{query}” (All mail)"), false);
-                if let Some(error) = failure {
-                    self.show_error(&format!("Some accounts could not be searched: {error}"));
-                }
-                return;
-            }
-            let limit = limit.max(self.page_size());
-            match self.app.mailin.list_messages_virtual(
-                mailin_core::model::VirtualFolderKind::UnifiedInbox,
-                &account_ids,
-                limit,
-                0,
-            ) {
-                Ok(messages) => {
-                    let title =
-                        format!("Unified Inbox ({} accounts)", self.accounts.borrow().len());
-                    let more = messages.len() as u32 >= limit && limit < MAX_PAGE;
-                    let message_headers: Vec<MessageHeader> =
-                        messages.into_iter().map(|(h, _, _)| h).collect();
-                    self.show_messages(message_headers, title, more);
-                }
-                Err(error) => self.show_error(&error.to_string()),
-            }
-            return;
-        }
-
-        if search {
-            let Some(account_id) = account_id else {
-                return;
-            };
-            let search_all_mail = self.selection.borrow().search_all_mail;
-            let folder_id = if search_all_mail {
-                None
-            } else {
-                self.selection.borrow().folder
-            };
-            match self
-                .app
-                .mailin
-                .search_messages(&account_id, folder_id, &query, SEARCH_LIMIT)
-            {
-                Ok(results) => {
-                    let scope_label = if search_all_mail {
-                        "All mail"
-                    } else {
-                        "Current folder"
-                    };
-                    self.show_messages(
-                        results,
-                        format!("Results for “{query}” ({scope_label})"),
-                        false,
-                    );
-                }
-                Err(error) => self.show_error(&error.to_string()),
-            }
-            return;
-        }
-
-        if show_outbox {
-            let Some(account_id) = account_id else {
-                self.clear_messages();
-                return;
-            };
-            self.refresh_outbox(account_id);
-            return;
-        }
-
-        let Some(folder_id) = folder_id else {
-            self.clear_messages();
-            return;
-        };
         let limit = limit.max(self.page_size());
         let thread_mode = self.app.config.borrow().ui.thread_mode;
-        if thread_mode != mailin_core::config::ThreadMode::Off {
-            let title = self
-                .app
-                .mailin
-                .folder(folder_id)
-                .ok()
-                .flatten()
-                .map(|folder| folder_title(&folder))
-                .unwrap_or_else(|| "Messages".to_owned());
-            let more = false; // Threaded view loads roots, more is handled differently
-            self.show_threaded_messages(folder_id, title, more);
+        let search_all_mail = self.selection.borrow().search_all_mail;
+        let account_ids: Vec<AccountId> = self.accounts.borrow().iter().map(|a| a.id).collect();
+        let expanded_threads = self.expanded_threads.borrow().clone();
+
+        // A sync storm must not start a thread per event: remember that
+        // another refresh is needed and run it once the current fetch ends.
+        if self.messages_inflight.get() {
+            self.messages_pending.set(true);
             return;
         }
-        match self.app.mailin.list_messages(folder_id, 0, limit) {
-            Ok(messages) => {
-                let title = self
-                    .app
-                    .mailin
-                    .folder(folder_id)
-                    .ok()
-                    .flatten()
-                    .map(|folder| folder_title(&folder))
-                    .unwrap_or_else(|| "Messages".to_owned());
-                let more = messages.len() as u32 >= limit && limit < MAX_PAGE;
-                self.show_messages(messages, title, more);
-            }
-            Err(error) => self.show_error(&error.to_string()),
-        }
-    }
+        self.messages_inflight.set(true);
+        let generation = self.messages_generation.get().wrapping_add(1);
+        self.messages_generation.set(generation);
 
-    fn refresh_outbox(&self, account_id: AccountId) {
-        match self.app.mailin.list_outbox(&account_id) {
-            Ok(entries) => {
-                let title = format!("Outbox ({})", entries.len());
-                self.show_outbox_entries(entries, title);
-            }
-            Err(error) => self.show_error(&error.to_string()),
-        }
+        // Search history keeps the query around for the apply step.
+        let query_for_apply = query.clone();
+        let window_id = self.window_id.get();
+
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        background::spawn_result(
+            move || -> MessageFetch {
+                if unified_inbox {
+                    if search {
+                        // Search across every account (unified inbox has no
+                        // single folder to scope to, so use the all-mail scope).
+                        let mut results = Vec::new();
+                        let mut failure: Option<String> = None;
+                        for account_id in &account_ids {
+                            match mailin.search_messages(account_id, None, &query, SEARCH_LIMIT) {
+                                Ok(mut found) => results.append(&mut found),
+                                Err(error) => failure = Some(error.to_string()),
+                            }
+                        }
+                        results.sort_by_key(|a| std::cmp::Reverse(a.received_at));
+                        results.truncate(SEARCH_LIMIT as usize);
+                        MessageFetch::UnifiedSearch { results, failure }
+                    } else {
+                        match mailin.list_messages_virtual(
+                            mailin_core::model::VirtualFolderKind::UnifiedInbox,
+                            &account_ids,
+                            limit,
+                            0,
+                        ) {
+                            Ok(messages) => {
+                                let headers: Vec<MessageHeader> =
+                                    messages.into_iter().map(|(header, _, _)| header).collect();
+                                MessageFetch::Unified(headers)
+                            }
+                            Err(error) => MessageFetch::Failed(error.to_string()),
+                        }
+                    }
+                    // The outbox has no folder to scope the query to, so fall
+                    // back to the account search above.
+                } else if search {
+                    let Some(account_id) = account_id else {
+                        return MessageFetch::NoChange;
+                    };
+                    let scope_folder = if search_all_mail { None } else { folder_id };
+                    match mailin.search_messages(&account_id, scope_folder, &query, SEARCH_LIMIT) {
+                        Ok(results) => MessageFetch::Search {
+                            results,
+                            scope: if search_all_mail {
+                                SearchScope::AllMail
+                            } else {
+                                SearchScope::CurrentFolder
+                            },
+                        },
+                        Err(error) => MessageFetch::Failed(error.to_string()),
+                    }
+                } else if show_outbox {
+                    match account_id {
+                        Some(account_id) => match mailin.list_outbox(&account_id) {
+                            Ok(entries) => MessageFetch::Outbox { entries },
+                            Err(error) => MessageFetch::Failed(error.to_string()),
+                        },
+                        None => MessageFetch::Clear,
+                    }
+                } else {
+                    let Some(folder_id) = folder_id else {
+                        return MessageFetch::Clear;
+                    };
+                    let folder_title = mailin
+                        .folder(folder_id)
+                        .ok()
+                        .flatten()
+                        .map(|folder| folder_title(&folder))
+                        .unwrap_or_else(|| "Messages".to_owned());
+                    if thread_mode != mailin_core::config::ThreadMode::Off {
+                        // Build the flat list (roots + expanded replies) on the
+                        // worker to keep the expanded-thread reply queries off
+                        // the main thread.
+                        let roots = match mailin.store().get_thread_roots(folder_id, limit) {
+                            Ok(roots) => roots,
+                            Err(error) => return MessageFetch::Failed(error.to_string()),
+                        };
+                        let mut flat_messages = Vec::new();
+                        for root in &roots {
+                            flat_messages.push(root.clone());
+                            let root_key =
+                                root.thread_root_key.as_ref().or(root.message_id.as_ref());
+                            if let Some(key) = root_key {
+                                if expanded_threads.contains(key) {
+                                    if let Ok(replies) = mailin.store().list_thread_replies(key) {
+                                        for mut reply in replies {
+                                            // All replies at depth 1 for flat view
+                                            reply.thread_depth = 1;
+                                            flat_messages.push(reply);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        MessageFetch::Threaded {
+                            flat_messages,
+                            title: folder_title,
+                        }
+                    } else {
+                        match mailin.list_messages(folder_id, 0, limit) {
+                            Ok(messages) => {
+                                let more = messages.len() as u32 >= limit && limit < MAX_PAGE;
+                                MessageFetch::Flat {
+                                    messages,
+                                    title: folder_title,
+                                    more,
+                                }
+                            }
+                            Err(error) => MessageFetch::Failed(error.to_string()),
+                        }
+                    }
+                }
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one; its own refresh wins.
+                    return;
+                }
+                this.messages_inflight.set(false);
+                if this.messages_pending.get() {
+                    // The selection changed while this fetch was running: run
+                    // one more refresh with the current state.
+                    this.messages_pending.set(false);
+                    this.refresh_messages();
+                    return;
+                }
+                if this.closed.get() || this.messages_generation.get() != generation {
+                    return;
+                }
+                let Ok(fetch) = result else {
+                    tracing::error!("the message list worker failed");
+                    return;
+                };
+                match fetch {
+                    MessageFetch::NoChange => {}
+                    MessageFetch::Clear => this.clear_messages(),
+                    MessageFetch::Failed(error) => this.show_error(&error),
+                    MessageFetch::Unified(messages) => {
+                        let title =
+                            format!("Unified Inbox ({} accounts)", this.accounts.borrow().len());
+                        let more = messages.len() as u32 >= limit && limit < MAX_PAGE;
+                        this.show_messages(messages, title, more);
+                    }
+                    MessageFetch::UnifiedSearch { results, failure } => {
+                        this.show_messages(
+                            results,
+                            format!("Results for “{query_for_apply}” (All mail)"),
+                            false,
+                        );
+                        if let Some(error) = failure {
+                            this.show_error(&format!(
+                                "Some accounts could not be searched: {error}"
+                            ));
+                        }
+                    }
+                    MessageFetch::Search { results, scope } => {
+                        let scope_label = match scope {
+                            SearchScope::AllMail => "All mail",
+                            SearchScope::CurrentFolder => "Current folder",
+                        };
+                        this.show_messages(
+                            results,
+                            format!("Results for “{query_for_apply}” ({scope_label})"),
+                            false,
+                        );
+                    }
+                    MessageFetch::Outbox { entries } => {
+                        let title = format!("Outbox ({})", entries.len());
+                        this.show_outbox_entries(entries, title);
+                    }
+                    MessageFetch::Flat {
+                        messages,
+                        title,
+                        more,
+                    } => this.show_messages(messages, title, more),
+                    MessageFetch::Threaded {
+                        flat_messages,
+                        title,
+                    } => this.show_threaded_list(flat_messages, title),
+                }
+            },
+        );
     }
 
     fn show_outbox_entries(&self, entries: Vec<OutboxEntry>, title: String) {
@@ -2451,52 +2698,11 @@ impl MainWindow {
         self.update_bulk_bar();
     }
 
-    /// Show messages with threaded/conversation view.
-    fn show_threaded_messages(&self, folder_id: FolderId, title: String, more: bool) {
-        let thread_mode = self.app.config.borrow().ui.thread_mode;
-        if thread_mode == mailin_core::config::ThreadMode::Off {
-            // Fall back to flat view
-            let limit = self.selection.borrow().limit.max(self.page_size());
-            if let Ok(messages) = self.app.mailin.list_messages(folder_id, 0, limit) {
-                self.show_messages(messages, title, more);
-            }
-            return;
-        }
-
+    /// Show messages with threaded/conversation view from a background fetch.
+    fn show_threaded_list(&self, flat_messages: Vec<MessageHeader>, title: String) {
         let selected = self.selection.borrow().message;
         let previous = self.selected_message_ids();
         let now = format::now_unix();
-
-        // Fetch thread roots
-        let limit = self.selection.borrow().limit.max(self.page_size());
-        let roots = match self.app.mailin.store().get_thread_roots(folder_id, limit) {
-            Ok(r) => r,
-            Err(e) => {
-                self.show_error(&e.to_string());
-                return;
-            }
-        };
-
-        // Build flat list: roots + expanded replies
-        let mut flat_messages = Vec::new();
-        let expanded = self.expanded_threads.borrow();
-
-        for root in &roots {
-            flat_messages.push(root.clone());
-            let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
-            if let Some(key) = root_key {
-                if expanded.contains(key) {
-                    // Fetch replies for this thread
-                    if let Ok(replies) = self.app.mailin.store().list_thread_replies(key) {
-                        for mut reply in replies {
-                            reply.thread_depth = 1; // All replies at depth 1 for flat view
-                            flat_messages.push(reply);
-                        }
-                    }
-                }
-            }
-        }
-
         let empty = flat_messages.is_empty();
 
         self.programmatic.set(true);
@@ -2550,7 +2756,8 @@ impl MainWindow {
         self.widgets
             .list_stack
             .set_visible_child_name(if empty { "empty" } else { "list" });
-        self.widgets.load_more.set_visible(more);
+        // Threaded view loads roots, more is handled through the page limit.
+        self.widgets.load_more.set_visible(false);
         self.update_bulk_bar();
     }
 
@@ -2790,21 +2997,50 @@ impl MainWindow {
         let Some(mut account) = self.app.mailin.account(&account_id).ok().flatten() else {
             return;
         };
-        if account.allow_remote_domain(&domain)
-            && let Err(error) = self.app.mailin.save_account(&account, None)
-        {
-            self.show_error(&error.to_string());
+        if !account.allow_remote_domain(&domain) {
             return;
         }
-        self.remote_allowed.set(Some(message_id));
-        self.widgets.remote_panel.set_reveal_child(false);
-        self.widgets.toast.add_toast(adw::Toast::new(&format!(
-            "Always showing content from @{domain}"
-        )));
-        self.render_body(message_id);
+        // Persisting the allowlist writes the account row (and the OAuth
+        // token in the keyring): run it off the main thread.
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let window_id = self.window_id.get();
+        background::spawn_result(
+            move || mailin.save_account(&account, None),
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    return;
+                }
+                match result {
+                    Ok(Ok(())) => {
+                        this.remote_allowed.set(Some(message_id));
+                        this.widgets.remote_panel.set_reveal_child(false);
+                        this.widgets.toast.add_toast(adw::Toast::new(&format!(
+                            "Always showing content from @{domain}"
+                        )));
+                        this.render_body(message_id);
+                    }
+                    Ok(Err(error)) => {
+                        this.show_error(&error.to_string());
+                    }
+                    Err(failed) => {
+                        this.show_error(&format!(
+                            "Could not save the sender allowlist: {}",
+                            failed.message
+                        ));
+                    }
+                }
+            },
+        );
     }
 
     fn render_body(&self, message_id: MessageId) {
+        // Invalidate any background finalization that is still pending for a
+        // previous render (e.g. inline images), then rebuild the content.
+        let reader_generation = self.reader_generation.get().wrapping_add(1);
+        self.reader_generation.set(reader_generation);
         clear_box(&self.widgets.reader_body);
         self.widgets.remote_panel.set_reveal_child(false);
         if let Ok(Some(pgp)) = self.app.mailin.pgp_mime(message_id) {
@@ -2851,23 +3087,91 @@ impl MainWindow {
                     let allow_remote = self.app.config.borrow().ui.remote_content_enabled
                         || self.remote_allowed.get() == Some(message_id)
                         || trusted;
-                    let images = self.inline_images(message_id);
+                    // Inline attachments live in the store: snapshot their
+                    // metadata synchronously (a small indexed query) and defer
+                    // the byte reads + base64 encoding to a background thread
+                    // when any are present. The document is loaded right away
+                    // without them and reloaded once they arrive, so the reader
+                    // never freezes on a message with large embedded images.
+                    let inline_parts: Vec<(String, String, String)> = self
+                        .app
+                        .mailin
+                        .list_attachments(message_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|attachment| attachment.is_inline)
+                        .filter_map(|attachment| {
+                            let content_id = attachment.content_id?;
+                            Some((content_id, attachment.part_id, attachment.mime_type))
+                        })
+                        .collect();
                     let view = self.html_view();
-                    let rendered = html::document(html_body, allow_remote, &images);
-                    view.load_html(&rendered, None);
-                    *self.find_target_view.borrow_mut() = Some(view.clone());
-                    self.widgets.reader_body.append(&view);
-                    // If cid: image sources remain unresolved after rewriting,
-                    // show a small notice (M4-D). The check parses the markup
-                    // instead of grepping for `cid:` so quoted text and
-                    // `data-src` attributes do not raise a false alarm.
-                    let unresolved_cids = mailin_core::cid::references(&rendered);
-                    if !unresolved_cids.is_empty() {
-                        let count = unresolved_cids.len();
-                        self.widgets.reader_body.append(&notice_body(&format!(
-                            "{} couldn't be loaded.",
-                            mailin_core::plural(count, "inline image", "inline images")
-                        )));
+                    if inline_parts.is_empty() {
+                        let rendered = html::document(html_body, allow_remote, &[]);
+                        view.load_html(&rendered, None);
+                        *self.find_target_view.borrow_mut() = Some(view.clone());
+                        self.widgets.reader_body.append(&view);
+                        // If cid: image sources remain unresolved after rewriting,
+                        // show a small notice (M4-D). The check parses the markup
+                        // instead of grepping for `cid:` so quoted text and
+                        // `data-src` attributes do not raise a false alarm.
+                        let unresolved_cids = mailin_core::cid::references(&rendered);
+                        if !unresolved_cids.is_empty() {
+                            let count = unresolved_cids.len();
+                            self.widgets.reader_body.append(&notice_body(&format!(
+                                "{} couldn't be loaded.",
+                                mailin_core::plural(count, "inline image", "inline images")
+                            )));
+                        }
+                    } else {
+                        let provisional = html::document(html_body, allow_remote, &[]);
+                        view.load_html(&provisional, None);
+                        *self.find_target_view.borrow_mut() = Some(view.clone());
+                        self.widgets.reader_body.append(&view);
+                        let images_mailin = std::sync::Arc::clone(&self.app.mailin);
+                        let html_body_for_finish = html_body.to_owned();
+                        let view_for_finish = view.clone();
+                        let allow_remote_for_finish = allow_remote;
+                        let window_id = self.window_id.get();
+                        background::spawn_result(
+                            move || {
+                                Self::fetch_inline_images(&images_mailin, message_id, inline_parts)
+                            },
+                            move |result| {
+                                let Some(this) = live_window() else {
+                                    return;
+                                };
+                                if this.window_id.get() != window_id {
+                                    // A newer window replaced this one.
+                                    return;
+                                }
+                                let Ok(images) = result else {
+                                    tracing::error!("the inline image worker failed");
+                                    return;
+                                };
+                                if this.closed.get()
+                                    || this.reader_generation.get() != reader_generation
+                                    || this.selection.borrow().message != Some(message_id)
+                                    || view_for_finish.parent().is_none()
+                                {
+                                    return;
+                                }
+                                let rendered = html::document(
+                                    &html_body_for_finish,
+                                    allow_remote_for_finish,
+                                    &images,
+                                );
+                                view_for_finish.load_html(&rendered, None);
+                                let unresolved_cids = mailin_core::cid::references(&rendered);
+                                if !unresolved_cids.is_empty() {
+                                    let count = unresolved_cids.len();
+                                    this.widgets.reader_body.append(&notice_body(&format!(
+                                        "{} couldn't be loaded.",
+                                        mailin_core::plural(count, "inline image", "inline images")
+                                    )));
+                                }
+                            },
+                        );
                     }
                     if !allow_remote && html::has_remote_content(html_body) {
                         match sender_domain {
@@ -2980,6 +3284,14 @@ impl MainWindow {
             glib::timeout_add_local(Duration::from_millis(50), move || {
                 match rx.try_recv() {
                     Ok(Ok((text, html_body, signature))) => {
+                        if holder_for_click.parent().is_none() {
+                            // The user opened another message (or re-rendered
+                            // this one) while the decrypt was running: the
+                            // placeholder widgets are detached. Updating them
+                            // here would repoint the shared find-in-message
+                            // target at a stale view, so just stop polling.
+                            return glib::ControlFlow::Break;
+                        }
                         actions_for_click.set_visible(false);
                         status_for_click.set_text(&format!(
                             "OpenPGP signature: {}",
@@ -3096,28 +3408,71 @@ impl MainWindow {
         view
     }
 
-    /// `cid:` images from inline attachment data, ready for the HTML viewer.
-    fn inline_images(&self, message_id: MessageId) -> Vec<(String, String)> {
-        let attachments = self
-            .app
-            .mailin
-            .list_attachments(message_id)
-            .unwrap_or_default();
-        attachments
+    /// Load inline attachment bodies on a background thread and turn them into
+    /// `data:` URLs. `parts` carries the `(content_id, part_id, mime_type)`
+    /// triples snapshotted on the main thread by `render_body`.
+    fn fetch_inline_images(
+        mailin: &std::sync::Arc<mailin_core::client::Mailin>,
+        message_id: MessageId,
+        parts: Vec<(String, String, String)>,
+    ) -> Vec<(String, String)> {
+        parts
             .into_iter()
-            .filter(|attachment| attachment.is_inline)
-            .filter_map(|attachment| {
-                let content_id = attachment.content_id?;
-                let data = self
-                    .app
-                    .mailin
-                    .attachment(message_id, &attachment.part_id)
+            .filter_map(|(content_id, part_id, mime_type)| {
+                let data = mailin
+                    .attachment(message_id, &part_id)
                     .ok()
                     .flatten()?
                     .data?;
-                Some((content_id, html::data_url(&attachment.mime_type, &data)))
+                Some((content_id, html::data_url(&mime_type, &data)))
             })
             .collect()
+    }
+
+    /// Decode an attachment thumbnail on a background thread and return it as
+    /// PNG bytes. gdk-pixbuf decoding is thread-safe, and the encoded result
+    /// is plain data, so it can cross the thread boundary (`Pixbuf` itself is
+    /// not `Send`).
+    fn decode_attachment_thumbnail(
+        mailin: &std::sync::Arc<mailin_core::client::Mailin>,
+        message_id: MessageId,
+        part_id: &str,
+    ) -> Option<Vec<u8>> {
+        let data = mailin
+            .attachment(message_id, part_id)
+            .ok()
+            .flatten()?
+            .data?;
+        let pixbuf = Self::bytes_to_pixbuf(&data).ok()?;
+        let (width, height) = (pixbuf.width().max(1), pixbuf.height().max(1));
+        let scale = (128.0 / width.max(height) as f64).min(1.0);
+        let thumbnail = if scale < 1.0 {
+            let thumb_width = (width as f64 * scale).max(1.0) as i32;
+            let thumb_height = (height as f64 * scale).max(1.0) as i32;
+            pixbuf.scale_simple(thumb_width, thumb_height, gdk_pixbuf::InterpType::Bilinear)?
+        } else {
+            pixbuf
+        };
+        thumbnail.save_to_bufferv("png", &[]).ok()
+    }
+
+    /// Turn encoded thumbnail bytes into a texture. Must run on the main
+    /// thread; the image is already small, so decoding it here is cheap.
+    fn texture_from_png(png: Vec<u8>) -> Option<gtk::gdk::Texture> {
+        let bytes = glib::Bytes::from(png.as_slice());
+        gtk::gdk::Texture::from_bytes(&bytes).ok()
+    }
+
+    fn bytes_to_pixbuf(bytes: &[u8]) -> Result<gdk_pixbuf::Pixbuf, glib::Error> {
+        let loader = gdk_pixbuf::PixbufLoader::new();
+        loader.write(bytes)?;
+        loader.close()?;
+        loader.pixbuf().ok_or_else(|| {
+            glib::Error::new(
+                gdk_pixbuf::PixbufError::InsufficientMemory,
+                "Failed to load pixbuf",
+            )
+        })
     }
 
     fn render_attachments(&self, message_id: MessageId) {
@@ -3167,65 +3522,77 @@ impl MainWindow {
                         return;
                     };
                     let total = visible_clone.len();
-                    let mut saved = 0usize;
-                    let mut queued = 0usize;
-                    let mut failed = 0usize;
-                    for (i, att) in visible_clone.iter().enumerate() {
-                        // Update progress for cached saves.
-                        if i > 0 && (saved + failed) > 0 && (saved + failed).is_multiple_of(3) {
-                            toast.add_toast(adw::Toast::new(&format!(
-                                "Saving {} of {}…",
-                                i + 1,
-                                total
-                            )));
-                        }
-                        match app.mailin.attachment(message_id, &att.part_id) {
-                            Ok(Some(data)) if data.data.is_some() => {
-                                match save_attachment_to_dir(
-                                    &dir,
-                                    att,
-                                    data.data.as_deref().unwrap_or_default(),
-                                ) {
-                                    Ok(_) => saved += 1,
-                                    Err(e) => {
+                    let mailin = std::sync::Arc::clone(&app.mailin);
+                    // Writing the files happens on a background thread: the
+                    // loop blocked the whole window while it ran.
+                    toast.add_toast(adw::Toast::new(&format!(
+                        "Saving {}…",
+                        mailin_core::plural(total, "attachment", "attachments")
+                    )));
+                    let attachments = visible_clone.clone();
+                    let dir_for_worker = dir.clone();
+                    background::spawn_result(
+                        move || {
+                            save_attachments_to_dir(
+                                &mailin,
+                                message_id,
+                                &dir_for_worker,
+                                &attachments,
+                            )
+                        },
+                        move |result| {
+                            let Ok(outcomes) = result else {
+                                tracing::error!("the attachment save worker failed");
+                                toast.add_toast(adw::Toast::new("Could not save the attachments."));
+                                return;
+                            };
+                            let mut saved = 0usize;
+                            let mut failed = 0usize;
+                            let mut first_error: Option<String> = None;
+                            let mut queued = 0usize;
+                            for outcome in outcomes {
+                                match outcome {
+                                    BatchSave::Saved => saved += 1,
+                                    BatchSave::Failed(name, error) => {
                                         failed += 1;
-                                        toast.add_toast(adw::Toast::new(&format!(
-                                            "Could not save {}: {e}",
-                                            att.display_name()
-                                        )));
+                                        if first_error.is_none() {
+                                            first_error = Some(format!("{name}: {error}"));
+                                        }
+                                    }
+                                    BatchSave::NotDownloaded(attachment, target_dir) => {
+                                        queued += 1;
+                                        // The bytes are not in the cache yet:
+                                        // ask the engine for them and save
+                                        // them when they arrive.
+                                        request_save_attachment(
+                                            Rc::clone(&app),
+                                            window.clone(),
+                                            toast.clone(),
+                                            Rc::clone(&pending),
+                                            message_id,
+                                            attachment,
+                                            false,
+                                            target_dir,
+                                        );
                                     }
                                 }
                             }
-                            Ok(_) => {
-                                queued += 1;
-                                request_save_attachment(
-                                    Rc::clone(&app),
-                                    window.clone(),
-                                    toast.clone(),
-                                    Rc::clone(&pending),
-                                    message_id,
-                                    att.clone(),
-                                    false,
-                                    Some(dir.clone()),
-                                );
+                            let mut msg = if queued > 0 {
+                                format!("Saved {saved} of {total}; downloading {queued} more…")
+                            } else if failed == 0 {
+                                format!(
+                                    "Saved {}",
+                                    mailin_core::plural(saved, "attachment", "attachments")
+                                )
+                            } else {
+                                format!("Saved {saved}, couldn't save {failed}")
+                            };
+                            if let Some(error) = first_error {
+                                msg.push_str(&format!(" ({error})"));
                             }
-                            Err(e) => {
-                                failed += 1;
-                                toast.add_toast(adw::Toast::new(&format!(
-                                    "Could not read {}: {e}",
-                                    att.display_name()
-                                )));
-                            }
-                        }
-                    }
-                    let msg = if queued > 0 {
-                        format!("Saved {saved} of {total}; downloading {queued} more…")
-                    } else if failed == 0 {
-                        mailin_core::plural(saved, "attachment", "attachments")
-                    } else {
-                        format!("Saved {saved}, couldn't save {failed}")
-                    };
-                    toast.add_toast(adw::Toast::new(&msg));
+                            toast.add_toast(adw::Toast::new(&msg));
+                        },
+                    );
                 });
             });
             download_all_row.append(&download_all);
@@ -3330,17 +3697,35 @@ impl MainWindow {
         let is_pdf = attachment.mime_type == "application/pdf";
 
         if is_image {
-            // Image preview - show thumbnail
-            if let Ok(Some(data)) = self.app.mailin.attachment(message_id, &attachment.part_id) {
-                if let Some(bytes) = data.data {
-                    if let Ok(pixbuf) = Self::bytes_to_pixbuf(&bytes) {
-                        let texture = gtk::gdk::Texture::for_pixbuf(&pixbuf);
-                        let image = gtk::Image::from_paintable(Some(&texture));
-                        image.set_halign(gtk::Align::Center);
-                        image.set_valign(gtk::Align::Center);
-                        container.append(&image);
-                    }
+            // Show an immediate placeholder and decode the thumbnail in the
+            // background: decoding a multi-megabyte image on the main thread
+            // froze the whole window per attachment row.
+            let key = (message_id, attachment.part_id.clone());
+            let cached = self.preview_cache.borrow().get(&key).cloned();
+            let texture = match cached {
+                Some(result) => result,
+                None => {
+                    self.spawn_attachment_thumbnail(
+                        message_id,
+                        attachment.clone(),
+                        container.clone(),
+                    );
+                    None
                 }
+            };
+            if let Some(texture) = texture {
+                let image = gtk::Image::from_paintable(Some(&texture));
+                image.set_halign(gtk::Align::Center);
+                image.set_valign(gtk::Align::Center);
+                container.append(&image);
+            } else {
+                // Placeholder (while decoding, or after a known-undecodable
+                // attachment; the cache stores the failure as `None`).
+                let icon = gtk::Image::from_icon_name("mail-attachment-symbolic");
+                icon.set_pixel_size(24);
+                icon.set_halign(gtk::Align::Center);
+                icon.set_valign(gtk::Align::Center);
+                container.append(&icon);
             }
         } else if is_pdf {
             // PDF preview - show icon
@@ -3357,16 +3742,58 @@ impl MainWindow {
         Ok(container.upcast())
     }
 
-    fn bytes_to_pixbuf(bytes: &[u8]) -> Result<gdk_pixbuf::Pixbuf, glib::Error> {
-        let loader = gdk_pixbuf::PixbufLoader::new();
-        loader.write(bytes)?;
-        loader.close()?;
-        loader.pixbuf().ok_or_else(|| {
-            glib::Error::new(
-                gdk_pixbuf::PixbufError::InsufficientMemory,
-                "Failed to load pixbuf",
-            )
-        })
+    /// Decode one attachment thumbnail on a background thread and swap it
+    /// into the placeholder when (and only when) the row is still on screen.
+    fn spawn_attachment_thumbnail(
+        &self,
+        message_id: MessageId,
+        attachment: AttachmentMeta,
+        container: gtk::Box,
+    ) {
+        let key = (message_id, attachment.part_id.clone());
+        // Skip duplicates: multiple renders must not queue the same decode.
+        if !self.preview_inflight.borrow_mut().insert(key.clone()) {
+            return;
+        }
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let cache = Rc::clone(&self.preview_cache);
+        let inflight = Rc::clone(&self.preview_inflight);
+        background::spawn_result(
+            move || Self::decode_attachment_thumbnail(&mailin, message_id, &attachment.part_id),
+            move |decoded| {
+                inflight.borrow_mut().remove(&key);
+                let Ok(decoded) = decoded else {
+                    tracing::error!("the attachment thumbnail worker failed");
+                    return;
+                };
+                // The texture is built on the main thread: `Pixbuf` is not
+                // `Send`, so the worker hands over encoded PNG bytes instead.
+                let texture = decoded.and_then(Self::texture_from_png);
+                cache.borrow_mut().insert(key.clone(), texture.clone());
+                if container.parent().is_none() {
+                    // The row was detached: either the user moved on, or the
+                    // message was rendered again while the decode was still
+                    // running. In the latter case the fresh row still shows
+                    // the placeholder, so rebuild the list to pick up the
+                    // cached thumbnail.
+                    if let Some(this) = live_window()
+                        && this.selection.borrow().message == Some(message_id)
+                    {
+                        this.render_attachments(message_id);
+                    }
+                    return;
+                }
+                if let Some(texture) = texture {
+                    while let Some(child) = container.first_child() {
+                        container.remove(&child);
+                    }
+                    let image = gtk::Image::from_paintable(Some(&texture));
+                    image.set_halign(gtk::Align::Center);
+                    image.set_valign(gtk::Align::Center);
+                    container.append(&image);
+                }
+            },
+        );
     }
 
     /// Finish saves that were waiting for attachment bytes to be downloaded.
@@ -3380,66 +3807,121 @@ impl MainWindow {
             *pending = rest;
             for_message
         };
-        let mut saved = 0usize;
-        let mut failed = 0usize;
-        for pending in &ready {
-            if let Some(dir) = &pending.target_dir {
-                match self
-                    .app
-                    .mailin
-                    .attachment(message_id, &pending.attachment.part_id)
-                {
-                    Ok(Some(data)) if data.data.is_some() => {
-                        match save_attachment_to_dir(
-                            dir,
-                            &pending.attachment,
-                            data.data.as_deref().unwrap_or_default(),
-                        ) {
-                            Ok(_) => saved += 1,
-                            Err(e) => {
-                                failed += 1;
-                                self.widgets.toast.add_toast(adw::Toast::new(&format!(
-                                    "Could not save {}: {e}",
-                                    pending.attachment.display_name()
-                                )));
+        if ready.is_empty() {
+            return;
+        }
+        let app = Rc::clone(&self.app);
+        let window = self.widgets.window.clone().upcast::<gtk::Window>();
+        let toast = self.widgets.toast.clone();
+        let pending_list = Rc::clone(&self.pending_attachment);
+
+        // Writes happen on a background thread; only the queueing of still
+        // missing attachments needs the main thread.
+        let (with_dir, without_dir): (Vec<PendingAttachment>, Vec<PendingAttachment>) = ready
+            .into_iter()
+            .partition(|pending| pending.target_dir.is_some());
+        for pending in &without_dir {
+            request_save_attachment(
+                Rc::clone(&app),
+                window.clone(),
+                toast.clone(),
+                Rc::clone(&pending_list),
+                message_id,
+                pending.attachment.clone(),
+                true,
+                None,
+            );
+        }
+        if with_dir.is_empty() {
+            return;
+        }
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        background::spawn_result(
+            move || {
+                with_dir
+                    .iter()
+                    .map(|pending| {
+                        let dir = pending
+                            .target_dir
+                            .clone()
+                            .unwrap_or_else(std::path::PathBuf::new);
+                        match mailin.attachment(message_id, &pending.attachment.part_id) {
+                            Ok(Some(data)) => match data.data {
+                                Some(bytes) => {
+                                    match save_attachment_to_dir(&dir, &pending.attachment, &bytes)
+                                    {
+                                        Ok(_) => BatchSave::Saved,
+                                        Err(error) => BatchSave::Failed(
+                                            pending.attachment.display_name(),
+                                            error,
+                                        ),
+                                    }
+                                }
+                                None => BatchSave::NotDownloaded(
+                                    pending.attachment.clone(),
+                                    pending.target_dir.clone(),
+                                ),
+                            },
+                            Ok(None) => BatchSave::NotDownloaded(
+                                pending.attachment.clone(),
+                                pending.target_dir.clone(),
+                            ),
+                            Err(error) => BatchSave::Failed(
+                                pending.attachment.display_name(),
+                                error.to_string(),
+                            ),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            },
+            move |result| {
+                let Ok(outcomes) = result else {
+                    tracing::error!("the attachment save worker failed");
+                    toast.add_toast(adw::Toast::new("Could not save the attachments."));
+                    return;
+                };
+                let mut saved = 0usize;
+                let mut failed = 0usize;
+                let mut first_error: Option<String> = None;
+                for outcome in outcomes {
+                    match outcome {
+                        BatchSave::Saved => saved += 1,
+                        BatchSave::Failed(name, error) => {
+                            failed += 1;
+                            if first_error.is_none() {
+                                first_error = Some(format!("{name}: {error}"));
                             }
                         }
-                    }
-                    _ => {
-                        failed += 1;
-                        request_save_attachment(
-                            Rc::clone(&self.app),
-                            self.widgets.window.clone().upcast::<gtk::Window>(),
-                            self.widgets.toast.clone(),
-                            Rc::clone(&self.pending_attachment),
-                            message_id,
-                            pending.attachment.clone(),
-                            true,
-                            pending.target_dir.clone(),
-                        );
+                        BatchSave::NotDownloaded(attachment, target_dir) => {
+                            request_save_attachment(
+                                Rc::clone(&app),
+                                window.clone(),
+                                toast.clone(),
+                                Rc::clone(&pending_list),
+                                message_id,
+                                attachment,
+                                true,
+                                target_dir,
+                            );
+                        }
                     }
                 }
-            } else {
-                request_save_attachment(
-                    Rc::clone(&self.app),
-                    self.widgets.window.clone().upcast::<gtk::Window>(),
-                    self.widgets.toast.clone(),
-                    Rc::clone(&self.pending_attachment),
-                    message_id,
-                    pending.attachment.clone(),
-                    true,
-                    None,
-                );
-            }
-        }
-        if saved > 0 || failed > 0 {
-            let msg = if failed == 0 {
-                mailin_core::plural(saved, "attachment", "attachments")
-            } else {
-                format!("Saved {saved}, couldn't save {failed}")
-            };
-            self.widgets.toast.add_toast(adw::Toast::new(&msg));
-        }
+                if saved > 0 || failed > 0 {
+                    let mut msg = if failed == 0 {
+                        format!(
+                            "Saved {}",
+                            mailin_core::plural(saved, "attachment", "attachments")
+                        )
+                    } else {
+                        format!("Saved {saved}, couldn't save {failed}")
+                    };
+                    if let Some(error) = first_error {
+                        msg.push_str(&format!(" ({error})"));
+                    }
+                    toast.add_toast(adw::Toast::new(&msg));
+                }
+            },
+        );
     }
 
     fn update_actions(&self, message: &MessageHeader) {
@@ -3598,7 +4080,28 @@ impl MainWindow {
                 .filter_map(|s| s.parse::<i64>().ok().map(MessageId))
                 .collect()
         } else {
-            self.get_unread_inbox_messages(account_id)
+            // Reading the inbox is a store query: run it off the main thread.
+            let mailin = std::sync::Arc::clone(&self.app.mailin);
+            let app = Rc::clone(&self.app);
+            background::spawn_result(
+                move || unread_inbox_message_ids(&mailin, account_id),
+                move |result| {
+                    let Ok(ids) = result else {
+                        tracing::error!("the notification lookup worker failed");
+                        return;
+                    };
+                    if ids.is_empty() {
+                        return;
+                    }
+                    // Mark as read by adding \Seen flag
+                    app.engine
+                        .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+                    if let Some(this) = live_window() {
+                        this.toast("Marked as read");
+                    }
+                },
+            );
+            return;
         };
 
         if ids.is_empty() {
@@ -3626,7 +4129,26 @@ impl MainWindow {
                 .filter_map(|s| s.parse::<i64>().ok().map(MessageId))
                 .collect()
         } else {
-            self.get_unread_inbox_messages(account_id)
+            // Reading the inbox is a store query: run it off the main thread.
+            let mailin = std::sync::Arc::clone(&self.app.mailin);
+            let app = Rc::clone(&self.app);
+            background::spawn_result(
+                move || unread_inbox_message_ids(&mailin, account_id),
+                move |result| {
+                    let Ok(ids) = result else {
+                        tracing::error!("the notification lookup worker failed");
+                        return;
+                    };
+                    if ids.is_empty() {
+                        return;
+                    }
+                    app.engine.archive_messages(&ids);
+                    if let Some(this) = live_window() {
+                        this.toast("Archiving…");
+                    }
+                },
+            );
+            return;
         };
 
         if ids.is_empty() {
@@ -3634,25 +4156,6 @@ impl MainWindow {
         }
         self.app.engine.archive_messages(&ids);
         self.toast("Archiving…");
-    }
-
-    /// Get unread message IDs from the inbox folder for an account.
-    fn get_unread_inbox_messages(&self, account_id: AccountId) -> Vec<MessageId> {
-        let Ok(folders) = self.app.mailin.list_folders(&account_id) else {
-            return Vec::new();
-        };
-        let inbox_folder = folders.iter().find(|f| f.role == FolderRole::Inbox);
-        let Some(folder) = inbox_folder else {
-            return Vec::new();
-        };
-        let Ok(messages) = self.app.mailin.list_messages(folder.id, 0, 100) else {
-            return Vec::new();
-        };
-        messages
-            .into_iter()
-            .filter(|m| !m.is_seen())
-            .map(|m| m.id)
-            .collect()
     }
 
     fn delete_selected(&self, permanent: bool) {
@@ -4717,6 +5220,69 @@ fn request_save_attachment(
             )));
         }
     }
+}
+
+/// Unread message IDs from the inbox folder of `account`.
+///
+/// Runs on a background thread: it reads the folder list and the first page
+/// of inbox messages from the store.
+fn unread_inbox_message_ids(
+    mailin: &std::sync::Arc<mailin_core::client::Mailin>,
+    account_id: AccountId,
+) -> Vec<MessageId> {
+    let Ok(folders) = mailin.list_folders(&account_id) else {
+        return Vec::new();
+    };
+    let Some(folder) = folders.iter().find(|f| f.role == FolderRole::Inbox) else {
+        return Vec::new();
+    };
+    let Ok(messages) = mailin.list_messages(folder.id, 0, 100) else {
+        return Vec::new();
+    };
+    messages
+        .into_iter()
+        .filter(|m| !m.is_seen())
+        .map(|m| m.id)
+        .collect()
+}
+
+/// Outcome of saving one attachment in a background batch.
+enum BatchSave {
+    Saved,
+    /// The bytes are not cached yet: queue the attachment for download and
+    /// save it once it arrives.
+    NotDownloaded(AttachmentMeta, Option<PathBuf>),
+    /// Display name and the error that stopped the save.
+    Failed(String, String),
+}
+
+/// Write attachments to `dir` on a background thread.
+///
+/// Attachments whose bytes are not cached yet are reported as
+/// `NotDownloaded` so the caller can queue them for download instead of
+/// writing an empty file.
+fn save_attachments_to_dir(
+    mailin: &std::sync::Arc<mailin_core::client::Mailin>,
+    message_id: MessageId,
+    dir: &std::path::Path,
+    attachments: &[AttachmentMeta],
+) -> Vec<BatchSave> {
+    attachments
+        .iter()
+        .map(
+            |attachment| match mailin.attachment(message_id, &attachment.part_id) {
+                Ok(Some(data)) => match data.data {
+                    Some(bytes) => match save_attachment_to_dir(dir, attachment, &bytes) {
+                        Ok(_) => BatchSave::Saved,
+                        Err(error) => BatchSave::Failed(attachment.display_name(), error),
+                    },
+                    None => BatchSave::NotDownloaded(attachment.clone(), Some(dir.to_path_buf())),
+                },
+                Ok(None) => BatchSave::NotDownloaded(attachment.clone(), Some(dir.to_path_buf())),
+                Err(error) => BatchSave::Failed(attachment.display_name(), error.to_string()),
+            },
+        )
+        .collect()
 }
 
 fn unique_attachment_path(dir: &std::path::Path, name: &str) -> PathBuf {

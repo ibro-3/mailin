@@ -535,6 +535,12 @@ pub fn present(
     let save = gtk::Button::with_label(save_label);
     save.add_css_class("suggested-action");
 
+    // Busy indicator for the background save: it replaces the button's
+    // label while the keyring and the store are written.
+    let save_spinner = gtk::Spinner::new();
+    save_spinner.set_visible(false);
+    save_spinner.set_valign(gtk::Align::Center);
+
     // Remove button for edit mode
     let remove = match mode {
         AccountDialogMode::Edit => {
@@ -557,6 +563,7 @@ pub fn present(
         actions.append(remove);
     }
     actions.append(&cancel);
+    actions.append(&save_spinner);
     actions.append(&save);
 
     let bottom = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1434,6 +1441,8 @@ pub fn present(
         let stack = stack.clone();
         let password_row = password_row.clone();
         let email_row = email_row.clone();
+        let save = save.clone();
+        let save_spinner = save_spinner.clone();
         let account_id: Rc<std::cell::Cell<Option<AccountId>>> =
             Rc::new(std::cell::Cell::new(None));
         move |_| {
@@ -1502,13 +1511,47 @@ pub fn present(
             } else {
                 Some(secrecy::SecretString::new(password.into()))
             };
-            if let Err(error) = app.mailin.save_account(&account, password_opt.as_ref()) {
-                set_status_message(&error_label, &error.to_string(), "error");
-                return;
-            }
-            app.engine.sync_account(account.id);
-            on_saved(account.id);
-            dialog.close();
+            // Writing the keyring entry and the account row can block for
+            // seconds: run it off the main thread and show the state in the
+            // dialog instead of freezing the window.
+            save.set_sensitive(false);
+            save_spinner.set_visible(true);
+            save_spinner.start();
+            set_status_message(&error_label, "Saving…", "");
+            let mailin = std::sync::Arc::clone(&app.mailin);
+            let account_for_save = account.clone();
+            let save_button = save.clone();
+            let error_label_for_save = error_label.clone();
+            let dialog_for_save = dialog.clone();
+            let app_for_save = Rc::clone(&app);
+            let on_saved_for_save = Rc::clone(&on_saved);
+            let spinner_for_save = save_spinner.clone();
+            crate::background::spawn_result(
+                move || mailin.save_account(&account_for_save, password_opt.as_ref()),
+                move |result| {
+                    spinner_for_save.stop();
+                    spinner_for_save.set_visible(false);
+                    match result {
+                        Ok(Err(error)) => {
+                            save_button.set_sensitive(true);
+                            set_status_message(&error_label_for_save, &error.to_string(), "error");
+                        }
+                        Ok(Ok(())) => {
+                            app_for_save.engine.sync_account(account.id);
+                            on_saved_for_save(account.id);
+                            dialog_for_save.close();
+                        }
+                        Err(failed) => {
+                            save_button.set_sensitive(true);
+                            set_status_message(
+                                &error_label_for_save,
+                                &format!("Could not save the account: {}", failed.message),
+                                "error",
+                            );
+                        }
+                    }
+                },
+            );
         }
     });
 

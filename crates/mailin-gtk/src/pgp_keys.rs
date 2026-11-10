@@ -95,6 +95,45 @@ pub fn present(parent: &gtk::Window, app: Rc<AppState>, account: AccountId) {
     import.grab_focus();
 }
 
+/// One row of the key list, prepared off the main thread.
+struct KeyRow {
+    fingerprint: String,
+    title: String,
+    subtitle: String,
+}
+
+/// Read the key list and the secret-key availability of every entry without
+/// blocking the UI: both the store and the system keyring can take a while.
+fn collect_key_rows(
+    mailin: &std::sync::Arc<mailin_core::client::Mailin>,
+    account: AccountId,
+) -> Result<Vec<KeyRow>, String> {
+    let keys = mailin
+        .list_pgp_keys(&account)
+        .map_err(|error| error.to_string())?;
+    Ok(keys
+        .into_iter()
+        .map(|key| {
+            let has_secret = mailin.has_pgp_secret(&account, &key.fingerprint);
+            let title = if key.user_ids.is_empty() {
+                key.fingerprint.clone()
+            } else {
+                key.user_ids.join(", ")
+            };
+            let subtitle = if has_secret {
+                format!("{} · secret key available", key.fingerprint)
+            } else {
+                key.fingerprint.clone()
+            };
+            KeyRow {
+                fingerprint: key.fingerprint,
+                title,
+                subtitle,
+            }
+        })
+        .collect())
+}
+
 /// Rebuild the list of keys from the store.
 fn populate(
     group: &adw::PreferencesGroup,
@@ -103,20 +142,46 @@ fn populate(
     window: &adw::Window,
     banner: &adw::Banner,
 ) {
+    let mailin = std::sync::Arc::clone(&app.mailin);
+    let app_for_rows = Rc::clone(app);
+    let group = group.clone();
+    let window = window.clone();
+    let banner = banner.clone();
+    crate::background::spawn_result(
+        move || collect_key_rows(&mailin, account),
+        move |result| {
+            let rows = match result {
+                Ok(Ok(rows)) => rows,
+                Ok(Err(error)) => {
+                    banner.set_title(&format!("Could not load keys: {error}"));
+                    banner.set_revealed(true);
+                    return;
+                }
+                Err(failed) => {
+                    banner.set_title(&format!("Could not load keys: {}", failed.message));
+                    banner.set_revealed(true);
+                    return;
+                }
+            };
+            build_key_rows(&group, &app_for_rows, rows, account, &window, &banner);
+        },
+    );
+}
+
+/// Replace the contents of `group` with one row per key.
+fn build_key_rows(
+    group: &adw::PreferencesGroup,
+    app: &Rc<AppState>,
+    rows: Vec<KeyRow>,
+    account: AccountId,
+    window: &adw::Window,
+    banner: &adw::Banner,
+) {
     while let Some(child) = group.first_child() {
         group.remove(&child);
     }
 
-    let keys = match app.mailin.list_pgp_keys(&account) {
-        Ok(keys) => keys,
-        Err(error) => {
-            banner.set_title(&format!("Could not load keys: {error}"));
-            banner.set_revealed(true);
-            return;
-        }
-    };
-
-    if keys.is_empty() {
+    if rows.is_empty() {
         let row = adw::ActionRow::builder()
             .title("No keys yet")
             .subtitle("Import a key or generate a new pair to use PGP.")
@@ -125,21 +190,10 @@ fn populate(
         return;
     }
 
-    for key in keys {
-        let has_secret = app.mailin.has_pgp_secret(&account, &key.fingerprint);
-        let title = if key.user_ids.is_empty() {
-            key.fingerprint.clone()
-        } else {
-            key.user_ids.join(", ")
-        };
-        let subtitle = if has_secret {
-            format!("{} · secret key available", key.fingerprint)
-        } else {
-            key.fingerprint.clone()
-        };
+    for key in rows {
         let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&title))
-            .subtitle(glib::markup_escape_text(&subtitle))
+            .title(glib::markup_escape_text(&key.title))
+            .subtitle(glib::markup_escape_text(&key.subtitle))
             .build();
 
         let delete = gtk::Button::builder()
@@ -185,13 +239,31 @@ fn populate(
                 if response != "delete" {
                     return;
                 }
-                match app.mailin.delete_pgp_key(&account, &fingerprint) {
-                    Ok(_) => populate(&group, &app, account, &window, &banner),
-                    Err(error) => {
-                        banner.set_title(&format!("Could not delete the key: {error}"));
-                        banner.set_revealed(true);
-                    }
-                }
+                // Deleting the key touches the store and the keyring: run it
+                // off the main thread.
+                let app = Rc::clone(&app);
+                let group = group.clone();
+                let window = window.clone();
+                let banner = banner.clone();
+                let fingerprint = fingerprint.clone();
+                let mailin = std::sync::Arc::clone(&app.mailin);
+                crate::background::spawn_result(
+                    move || mailin.delete_pgp_key(&account, &fingerprint),
+                    move |result| match result {
+                        Ok(Ok(_)) => populate(&group, &app, account, &window, &banner),
+                        Ok(Err(error)) => {
+                            banner.set_title(&format!("Could not delete the key: {error}"));
+                            banner.set_revealed(true);
+                        }
+                        Err(failed) => {
+                            banner.set_title(&format!(
+                                "Could not delete the key: {}",
+                                failed.message
+                            ));
+                            banner.set_revealed(true);
+                        }
+                    },
+                );
             });
             confirm.present();
         });
@@ -249,23 +321,48 @@ fn import_dialog(
             return;
         }
 
-        let result = if armored.contains("PRIVATE KEY BLOCK") {
-            app.mailin.import_pgp_secret_key(&account, &armored)
-        } else {
-            app.mailin.import_pgp_public_key(&account, &armored)
-        };
-        match result {
-            Ok(key) => {
-                banner.set_revealed(false);
-                populate(&group, &app, account, &parent, &banner);
-                banner.set_title(&format!("Imported key {}", key.fingerprint));
-                banner.set_revealed(true);
-            }
-            Err(error) => {
-                banner.set_title(&format!("Could not import the key: {error}"));
-                banner.set_revealed(true);
-            }
-        }
+        // Parsing an armored key (and the keyring write that follows) can take
+        // seconds: run it off the main thread.
+        banner.set_title("Importing key…");
+        banner.set_revealed(true);
+        let mailin = std::sync::Arc::clone(&app.mailin);
+        let account_for_work = account;
+        let armored_for_work = armored;
+        let app_for_work = Rc::clone(&app);
+        let group_for_work = group.clone();
+        let banner_for_work = banner.clone();
+        let parent_for_work = parent.clone();
+        crate::background::spawn_result(
+            move || {
+                if armored_for_work.contains("PRIVATE KEY BLOCK") {
+                    mailin.import_pgp_secret_key(&account_for_work, &armored_for_work)
+                } else {
+                    mailin.import_pgp_public_key(&account_for_work, &armored_for_work)
+                }
+            },
+            move |result| match result {
+                Ok(Ok(key)) => {
+                    populate(
+                        &group_for_work,
+                        &app_for_work,
+                        account,
+                        &parent_for_work,
+                        &banner_for_work,
+                    );
+                    banner_for_work.set_title(&format!("Imported key {}", key.fingerprint));
+                    banner_for_work.set_revealed(true);
+                }
+                Ok(Err(error)) => {
+                    banner_for_work.set_title(&format!("Could not import the key: {error}"));
+                    banner_for_work.set_revealed(true);
+                }
+                Err(failed) => {
+                    banner_for_work
+                        .set_title(&format!("Could not import the key: {}", failed.message));
+                    banner_for_work.set_revealed(true);
+                }
+            },
+        );
     });
     dialog.present();
     view.grab_focus();
@@ -314,17 +411,42 @@ fn generate_dialog(
             banner.set_revealed(true);
             return;
         }
-        match app.mailin.generate_pgp_key(&account, user_id.trim()) {
-            Ok(key) => {
-                populate(&group, &app, account, &parent, &banner);
-                banner.set_title(&format!("Generated key {}", key.fingerprint));
-                banner.set_revealed(true);
-            }
-            Err(error) => {
-                banner.set_title(&format!("Could not generate a key: {error}"));
-                banner.set_revealed(true);
-            }
-        }
+        // Generating a key pair is CPU-heavy (RSA parameters): run it off the
+        // main thread so the dialog keeps responding.
+        banner.set_title("Generating key pair…");
+        banner.set_revealed(true);
+        let mailin = std::sync::Arc::clone(&app.mailin);
+        let account_for_work = account;
+        let user_id_for_work = user_id.trim().to_owned();
+        let app_for_work = Rc::clone(&app);
+        let group_for_work = group.clone();
+        let banner_for_work = banner.clone();
+        let parent_for_work = parent.clone();
+        crate::background::spawn_result(
+            move || mailin.generate_pgp_key(&account_for_work, &user_id_for_work),
+            move |result| match result {
+                Ok(Ok(key)) => {
+                    populate(
+                        &group_for_work,
+                        &app_for_work,
+                        account,
+                        &parent_for_work,
+                        &banner_for_work,
+                    );
+                    banner_for_work.set_title(&format!("Generated key {}", key.fingerprint));
+                    banner_for_work.set_revealed(true);
+                }
+                Ok(Err(error)) => {
+                    banner_for_work.set_title(&format!("Could not generate a key: {error}"));
+                    banner_for_work.set_revealed(true);
+                }
+                Err(failed) => {
+                    banner_for_work
+                        .set_title(&format!("Could not generate a key: {}", failed.message));
+                    banner_for_work.set_revealed(true);
+                }
+            },
+        );
     });
     dialog.present();
     entry.grab_focus();
