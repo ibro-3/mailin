@@ -72,6 +72,7 @@ impl Engine {
         let mut state = Arc::new(EngineState {
             mailbox: Arc::clone(&mailbox),
             outbox: Arc::new(Notify::new()),
+            scheduled: Arc::new(Notify::new()),
             sync_status: Arc::new(RwLock::new(HashMap::new())),
             last_sync_at: Arc::new(RwLock::new(HashMap::new())),
             plugin_system: None,
@@ -387,6 +388,9 @@ impl Drop for Engine {
 struct EngineState {
     mailbox: Arc<Mailin>,
     outbox: Arc<Notify>,
+    /// Wake-up signal for the scheduled-action worker. Scheduling an action
+    /// notifies it so the action does not wait for the next poll.
+    scheduled: Arc<Notify>,
     /// Per-account sync status. Workers update this; UIs read via Mailin.
     sync_status: Arc<RwLock<HashMap<AccountId, SyncStatus>>>,
     /// Timestamp of the last successful sync per account.
@@ -1713,6 +1717,8 @@ async fn snooze_messages(
                 "snooze_message",
                 &payload_json,
             )?;
+            // Wake the scheduler so the action does not wait for its poll.
+            state.scheduled.notify_one();
             state.mailbox.publish(Event::MessagesChanged {
                 folder_id: source_id,
             });
@@ -2053,6 +2059,8 @@ async fn execute_rule_action(
                         rfc_message_id: message.message_id.clone(),
                     })?,
                 )?;
+                // Wake the scheduler so the action does not wait for its poll.
+                state.scheduled.notify_one();
                 let Some(source) = folders.iter().find(|f| f.id == message.folder_id) else {
                     return Ok(());
                 };
@@ -2476,9 +2484,6 @@ async fn scheduled_worker(state: Arc<EngineState>) {
         tracing::warn!(%error, "could not reset interrupted scheduled actions");
     }
 
-    let notify = Arc::new(tokio::sync::Notify::new());
-    let notify_clone = notify.clone();
-
     loop {
         // Process all due actions
         let actions = match state.mailbox.store().due_actions() {
@@ -2537,10 +2542,11 @@ async fn scheduled_worker(state: Arc<EngineState>) {
             }
         }
 
-        // Wait for next check: either 60 seconds or until notified
+        // Wait for next check: either 60 seconds or until a new action is
+        // scheduled.
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(60)) => {}
-            _ = notify_clone.notified() => {}
+            _ = state.scheduled.notified() => {}
         }
     }
 }
