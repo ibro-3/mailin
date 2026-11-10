@@ -4305,19 +4305,22 @@ impl MainWindow {
                     draft_key: None,
                     attachments: Vec::new(),
                 };
-                // Parse the raw message to get subject and body
+                // Parse the raw message to get subject and body. The envelope
+                // carries no subject, so an unparseable message keeps an
+                // empty subject instead of showing the recipients as one.
                 if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
                     draft.subject = parsed.subject().unwrap_or_default().to_owned();
                     if let Some(text) = parsed.body_text(0) {
                         draft.body = text.to_string();
                     }
-                } else {
-                    // Fallback: extract subject from envelope
-                    draft.subject = env.to.join(", ");
                 }
-                // Need to mark the original entry as cancelled so it doesn't get sent again
-                this.app.engine.cancel_outbox(account_id, id);
-                let _ = this.open_compose(draft);
+                // Open the composer first and only cancel the queued entry
+                // once the draft is safely on screen: cancelling first would
+                // destroy the message whenever opening the composer fails
+                // (e.g. no account selected).
+                if this.open_compose(draft).is_some() {
+                    this.app.engine.cancel_outbox(account_id, id);
+                }
             }
         }
     }
