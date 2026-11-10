@@ -248,8 +248,6 @@ pub fn show_preferences(
         (QuickAction::MarkUnread, "Quick action: Mark unread"),
         (QuickAction::Junk, "Quick action: Mark as junk"),
     ];
-    let quick_item_rows: Rc<RefCell<Vec<(QuickAction, adw::SwitchRow)>>> =
-        Rc::new(RefCell::new(Vec::new()));
     for (action, title) in quick_item_defs {
         let row = adw::SwitchRow::new();
         row.set_title(title);
