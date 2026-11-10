@@ -109,12 +109,11 @@ pub fn show(
         }
     });
 
-    // Keep the rows and the selection in sync with the filter text. Rows are
-    // hidden rather than removed so the index mapping stays intact.
+    // Keep the rows in sync with the filter text. Rows are hidden rather than
+    // removed so the index mapping stays intact.
     search.connect_search_changed({
         let list = list.clone();
         let candidates = candidates.clone();
-        let chosen = Rc::clone(&chosen);
         move |entry| {
             let needle = entry.text().to_lowercase();
             for (index, folder) in candidates.iter().enumerate() {
@@ -125,13 +124,15 @@ pub fn show(
                     row.set_visible(matches);
                 }
             }
-            // A hidden selected row would leave a stale destination behind.
+            // A hidden selected row would leave a stale destination behind;
+            // unselecting fires `row_selected`, which clears the choice. A
+            // selection whose row is still visible is kept, so filtering then
+            // clicking "Move" keeps working.
             if let Some(row) = list.selected_row()
                 && !row.is_visible()
             {
                 list.unselect_row(&row);
             }
-            *chosen.borrow_mut() = None;
         }
     });
 
