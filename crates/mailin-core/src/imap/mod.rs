@@ -503,6 +503,18 @@ impl ImapSession {
                 .map_err(|e| Error::Imap(format!("UID MOVE to {target} failed: {e}")));
         }
 
+        if !self.supports_uidplus {
+            // The fallback ends in a plain EXPUNGE, which removes every
+            // \Deleted message in the source mailbox. Check before the copy
+            // so a refused expunge cannot leave the message in both folders.
+            let foreign = self.foreign_deleted_count(uids).await?;
+            if foreign > 0 {
+                return Err(Error::Imap(format!(
+                    "the server does not support UIDPLUS and {foreign} other message(s) in this mailbox are already marked \\Deleted; refusing to move because the fallback EXPUNGE would delete messages that were not selected"
+                )));
+            }
+        }
+
         self.inner
             .uid_copy(&set, target)
             .await
@@ -526,7 +538,8 @@ impl ImapSession {
     ///
     /// On servers without UIDPLUS the only way to expunge is a plain `EXPUNGE`,
     /// which removes *all* `\Deleted` messages in the selected mailbox —
-    /// including ones other clients marked. A warning is logged in that case.
+    /// including ones other clients marked. Such a deletion is refused when
+    /// it would remove messages that were not selected.
     pub async fn delete_messages(&mut self, uids: &[u32]) -> Result<()> {
         if uids.is_empty() {
             return Ok(());
@@ -549,32 +562,25 @@ impl ImapSession {
         } else {
             // No UIDPLUS: a plain EXPUNGE removes *every* message flagged
             // \Deleted in the selected mailbox, including ones other clients
-            // marked. Detect that case and warn loudly so the user can pick a
-            // server with UIDPLUS (or not mark mail \Deleted elsewhere).
-            match self.fetch_all_flags().await {
-                Ok(flags) => {
-                    let foreign = flags
-                        .iter()
-                        .filter(|(uid, flags)| {
-                            !uids.contains(uid)
-                                && flags
-                                    .iter()
-                                    .any(|flag| flag.eq_ignore_ascii_case("\\Deleted"))
-                        })
-                        .count();
-                    if foreign > 0 {
-                        tracing::warn!(
-                            count = foreign,
-                            "server does not support UIDPLUS; EXPUNGE will also remove \\Deleted messages set by other clients"
-                        );
-                    }
-                }
+            // marked. Refuse the deletion when that would destroy messages we
+            // did not select, and roll back our own \Deleted flags so the
+            // mailbox is left as we found it.
+            let foreign = match self.foreign_deleted_count(uids).await {
+                Ok(count) => count,
                 Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "could not inspect existing flags; proceeding with EXPUNGE anyway"
-                    );
+                    // Without the flags there is no way to prove that the
+                    // expunge only removes the selected messages.
+                    self.rollback_deleted_flags(uids).await;
+                    return Err(Error::Imap(format!(
+                        "could not inspect the existing \\Deleted flags ({error}); refusing to EXPUNGE on a server without UIDPLUS"
+                    )));
                 }
+            };
+            if foreign > 0 {
+                self.rollback_deleted_flags(uids).await;
+                return Err(Error::Imap(format!(
+                    "the server does not support UIDPLUS and {foreign} other message(s) in this mailbox are already marked \\Deleted; refusing to EXPUNGE because it would delete messages that were not selected"
+                )));
             }
             let mut stream = Box::pin(
                 self.inner
@@ -590,6 +596,32 @@ impl ImapSession {
             {}
         }
         Ok(())
+    }
+
+    /// Undo the `\Deleted` flag that was set before a refused expunge.
+    ///
+    /// Leaves the mailbox as it was before the deletion attempt, so a later
+    /// attempt does not trip over flags this client set.
+    async fn rollback_deleted_flags(&mut self, uids: &[u32]) {
+        if let Err(error) = self
+            .store_flags_command(uids, "-", &["\\Deleted".to_owned()])
+            .await
+        {
+            tracing::warn!(%error, "could not roll back the \\Deleted flags");
+        }
+    }
+
+    /// Number of messages in the selected mailbox that are marked `\Deleted`
+    /// but are not part of `uids`.
+    ///
+    /// A plain `EXPUNGE` would remove those as well, so a caller that cannot
+    /// use `UID EXPUNGE` has to know about them.
+    async fn foreign_deleted_count(&mut self, uids: &[u32]) -> Result<usize> {
+        let flags = self.fetch_all_flags().await?;
+        Ok(flags
+            .iter()
+            .filter(|(uid, flags)| is_foreign_deleted(uid, flags, uids))
+            .count())
     }
 
     /// Append a raw message, for example a copy of an outgoing message to the
@@ -649,6 +681,17 @@ fn uid_set(uids: &[u32]) -> String {
         .join(",")
 }
 
+/// Whether a message is flagged `\Deleted` without being part of `uids`.
+///
+/// A plain `EXPUNGE` removes those messages as well, so a caller that cannot
+/// use `UID EXPUNGE` has to know about them.
+fn is_foreign_deleted(uid: &u32, flags: &[String], uids: &[u32]) -> bool {
+    !uids.contains(uid)
+        && flags
+            .iter()
+            .any(|flag| flag.eq_ignore_ascii_case("\\Deleted"))
+}
+
 fn remote_folder(name: &Name) -> RemoteFolder {
     let attributes: Vec<String> = name.attributes().iter().map(attribute_string).collect();
     RemoteFolder {
@@ -698,6 +741,22 @@ mod tests {
     fn uid_set_is_a_comma_separated_list() {
         assert_eq!(uid_set(&[1, 2, 3]), "1,2,3");
         assert_eq!(uid_set(&[]), "");
+    }
+
+    #[test]
+    fn foreign_deleted_messages_are_detected() {
+        let selected = vec![1, 2];
+        // A selected message is ours: the expunge would remove it anyway.
+        assert!(!is_foreign_deleted(&1, &["\\Deleted".into()], &selected));
+        // Another client's message: the expunge would remove it too.
+        assert!(is_foreign_deleted(&3, &["\\Deleted".into()], &selected));
+        // Not deleted: safe to expunge.
+        assert!(!is_foreign_deleted(&3, &["\\Seen".into()], &selected));
+    }
+
+    #[test]
+    fn the_deleted_flag_is_matched_case_insensitively() {
+        assert!(is_foreign_deleted(&3, &["\\deleted".into()], &[1]));
     }
 
     #[test]
