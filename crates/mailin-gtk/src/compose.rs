@@ -68,11 +68,16 @@ const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 /// Soft warning threshold (raw bytes). Base64 encoding adds ~4/3 on the wire (M3a-6).
 const LARGE_ATTACHMENT_BYTES: usize = 40 * 1024 * 1024;
 
+/// A snapshot either yields the composed message or the reason the composer
+/// state could not be read (a failed JavaScript evaluation must never be
+/// mistaken for an empty document).
+type SnapshotResult = std::result::Result<OutgoingMessage, String>;
+
 /// Collects the composer state and hands a finished message to a one-shot callback.
-type SnapshotFn = Rc<dyn Fn(Box<dyn FnOnce(OutgoingMessage)>)>;
+type SnapshotFn = Rc<dyn Fn(Box<dyn FnOnce(SnapshotResult)>)>;
 
 /// A one-shot message callback shared behind a take-once slot.
-type SnapshotCallback = Rc<RefCell<Option<Box<dyn FnOnce(OutgoingMessage)>>>>;
+type SnapshotCallback = Rc<RefCell<Option<Box<dyn FnOnce(SnapshotResult)>>>>;
 
 /// Extract the Rust string from a JavaScript value returned by
 /// `WebView::evaluate_javascript`. `Value::to_string` may render a JS string as
@@ -1236,7 +1241,7 @@ pub fn present(
         let in_reply_to = draft.in_reply_to.clone();
         let references = draft.references.clone();
         let is_html = Rc::clone(&is_html_mode);
-        Rc::new(move |callback: Box<dyn FnOnce(OutgoingMessage)>| {
+        Rc::new(move |callback: Box<dyn FnOnce(SnapshotResult)>| {
             let html_enabled = is_html.get();
             // Fields that can be read synchronously.
             let to = to_row.text().to_string();
@@ -1258,12 +1263,16 @@ pub fn present(
             // `FnOnce` cannot be cloned, so share it behind a slot that is
             // taken exactly once when both queries have completed.
             let callback: SnapshotCallback = Rc::new(RefCell::new(Some(callback)));
+            // Set when a JS evaluation fails; propagated to the callback so a
+            // capture failure is not silently sent/saved as an empty body.
+            let capture_error = Rc::new(RefCell::new(None::<String>));
 
             let finish: Rc<dyn Fn()> = {
                 let html_result = Rc::clone(&html_result);
                 let text_result = Rc::clone(&text_result);
                 let remaining = Rc::clone(&remaining);
                 let callback = Rc::clone(&callback);
+                let capture_error = Rc::clone(&capture_error);
                 Rc::new(move || {
                     remaining.set(remaining.get() - 1);
                     if remaining.get() > 0 {
@@ -1272,6 +1281,10 @@ pub fn present(
                     let Some(callback) = callback.borrow_mut().take() else {
                         return;
                     };
+                    if let Some(error) = capture_error.borrow().clone() {
+                        callback(Err(error));
+                        return;
+                    }
                     let html_body = html_result.borrow().clone();
                     let text_body = text_result.borrow().clone().unwrap_or_default();
                     let html_body = if html_enabled {
@@ -1280,7 +1293,7 @@ pub fn present(
                     } else {
                         None
                     };
-                    callback(OutgoingMessage {
+                    callback(Ok(OutgoingMessage {
                         from_name: from_name.clone(),
                         from_addr: from_addr.clone(),
                         to: to.clone(),
@@ -1293,7 +1306,7 @@ pub fn present(
                         references: references.clone(),
                         draft_key: Some(draft.clone()),
                         attachments: attachment_list.clone(),
-                    });
+                    }));
                 })
             };
 
@@ -1302,14 +1315,19 @@ pub fn present(
             {
                 let finish = Rc::clone(&finish);
                 let text_result = Rc::clone(&text_result);
+                let capture_error = Rc::clone(&capture_error);
                 webview.evaluate_javascript(
                     "document.body.innerText",
                     None,
                     None,
                     None::<&gio::Cancellable>,
                     move |result| {
-                        if let Ok(value) = result {
-                            *text_result.borrow_mut() = Some(jsc_string(&value));
+                        match result {
+                            Ok(value) => *text_result.borrow_mut() = Some(jsc_string(&value)),
+                            Err(error) => {
+                                *capture_error.borrow_mut() =
+                                    Some(format!("reading the message body failed: {error}"))
+                            }
                         }
                         finish();
                     },
@@ -1319,14 +1337,19 @@ pub fn present(
             if html_enabled {
                 let finish = Rc::clone(&finish);
                 let html_result = Rc::clone(&html_result);
+                let capture_error = Rc::clone(&capture_error);
                 webview.evaluate_javascript(
                     "document.body.innerHTML",
                     None,
                     None,
                     None::<&gio::Cancellable>,
                     move |result| {
-                        if let Ok(value) = result {
-                            *html_result.borrow_mut() = Some(jsc_string(&value));
+                        match result {
+                            Ok(value) => *html_result.borrow_mut() = Some(jsc_string(&value)),
+                            Err(error) => {
+                                *capture_error.borrow_mut() =
+                                    Some(format!("reading the message body failed: {error}"))
+                            }
                         }
                         finish();
                     },
@@ -1357,26 +1380,38 @@ pub fn present(
             let mark_clean = Rc::clone(&mark_clean);
             let mark_dirty = Rc::clone(&mark_dirty);
             let generation = Rc::clone(&generation);
-            snapshot(Box::new(move |outgoing| match outgoing.build_draft() {
-                Ok(_) => {
-                    app.engine.save_draft(account_id, outgoing);
-                    banner_action.set(0);
-                    banner.set_button_label(None::<&str>);
-                    banner.set_title("Draft saved");
-                    banner.set_revealed(true);
-                    // M4-E: the title drops the dirty marker once the draft
-                    // is stored — but only when nothing changed meanwhile.
-                    if generation.get() == captured {
-                        mark_clean();
-                    }
-                    // M4-E: auto-hide transient confirmation.
-                    let banner_hide = banner.clone();
-                    glib::timeout_add_seconds_local_once(3, move || {
-                        if banner_hide.title().as_str() == "Draft saved" {
-                            banner_hide.set_revealed(false);
+            snapshot(Box::new(move |result| match result {
+                Ok(outgoing) => match outgoing.build_draft() {
+                    Ok(_) => {
+                        app.engine.save_draft(account_id, outgoing);
+                        banner_action.set(0);
+                        banner.set_button_label(None::<&str>);
+                        banner.set_title("Draft saved");
+                        banner.set_revealed(true);
+                        // M4-E: the title drops the dirty marker once the draft
+                        // is stored — but only when nothing changed meanwhile.
+                        if generation.get() == captured {
+                            mark_clean();
                         }
-                    });
-                }
+                        // M4-E: auto-hide transient confirmation.
+                        let banner_hide = banner.clone();
+                        glib::timeout_add_seconds_local_once(3, move || {
+                            if banner_hide.title().as_str() == "Draft saved" {
+                                banner_hide.set_revealed(false);
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        banner_action.set(0);
+                        banner.set_button_label(None::<&str>);
+                        banner.set_title(&format!("Could not save the draft: {error}"));
+                        banner.set_revealed(true);
+                        mark_dirty();
+                    }
+                },
+                // The body could not be read from the WebView: skip this save
+                // instead of writing an empty body over the draft, and keep
+                // the composer marked dirty.
                 Err(error) => {
                     banner_action.set(0);
                     banner.set_button_label(None::<&str>);
@@ -1580,7 +1615,31 @@ pub fn present(
         let send_sign = Rc::clone(&send_sign);
         let close_window = close_window.clone();
         let on_sent = on_sent.clone();
-        send_snapshot(Box::new(move |outgoing| {
+        send_snapshot(Box::new(move |result| {
+            let outgoing = match result {
+                Ok(outgoing) => outgoing,
+                // The body could not be read from the WebView: do not send a
+                // message whose content was never captured.
+                Err(error) => {
+                    banner.set_title(&format!("Could not send: {error}"));
+                    banner.set_revealed(true);
+                    send_for_report.set_sensitive(true);
+                    return;
+                }
+            };
+            // Envelope validation only covers sender and recipients; reject
+            // an empty body here instead of silently sending it.
+            if outgoing.body.trim().is_empty()
+                && outgoing
+                    .html_body
+                    .as_deref()
+                    .is_none_or(|html| html.trim().is_empty())
+            {
+                banner.set_title("The message body is empty");
+                banner.set_revealed(true);
+                send_for_report.set_sensitive(true);
+                return;
+            }
             let pgp = PgpOptions {
                 encrypt: send_encrypt.get(),
                 sign: send_sign.get(),
