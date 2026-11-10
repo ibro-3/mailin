@@ -1164,32 +1164,39 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&outbox_edit_action);
 
-        // Notification action: mark as read (accepts "account_id:message_id1,message_id2,..." parameter)
-        let mark_read =
-            gio::SimpleAction::new("notification-mark-read", Some(glib::VariantTy::STRING));
-        mark_read.connect_activate({
-            let this = Rc::clone(this);
-            move |_, parameter| {
+        // Notification actions belong to the *application*: the buttons on a
+        // desktop notification activate `app.notification-mark-read` /
+        // `app.notification-archive` (see `notify_new_mail`), which never
+        // reach a window-scoped action group. The handlers resolve the live
+        // window instead of capturing this one, so the application never
+        // keeps a closed window alive.
+        if let Some(application) = this.widgets.window.application() {
+            let mark_read =
+                gio::SimpleAction::new("notification-mark-read", Some(glib::VariantTy::STRING));
+            mark_read.connect_activate(move |_, parameter| {
                 let Some(param) = parameter.and_then(|v| v.str()) else {
+                    return;
+                };
+                let Some(this) = live_window() else {
                     return;
                 };
                 this.notification_mark_read(param);
-            }
-        });
-        this.widgets.window.add_action(&mark_read);
+            });
+            application.add_action(&mark_read);
 
-        // Notification action: archive (accepts "account_id:message_id1,message_id2,..." parameter)
-        let archive = gio::SimpleAction::new("notification-archive", Some(glib::VariantTy::STRING));
-        archive.connect_activate({
-            let this = Rc::clone(this);
-            move |_, parameter| {
+            let archive =
+                gio::SimpleAction::new("notification-archive", Some(glib::VariantTy::STRING));
+            archive.connect_activate(move |_, parameter| {
                 let Some(param) = parameter.and_then(|v| v.str()) else {
                     return;
                 };
+                let Some(this) = live_window() else {
+                    return;
+                };
                 this.notification_archive(param);
-            }
-        });
-        this.widgets.window.add_action(&archive);
+            });
+            application.add_action(&archive);
+        }
 
         this.widgets.archive_button.connect_clicked({
             let this = Rc::clone(this);
