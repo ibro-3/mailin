@@ -6,15 +6,16 @@ use adw::prelude::*;
 use gtk::glib;
 use libadwaita as adw;
 
-use mailin_core::AccountId;
+use mailin_core::{Account, AccountId};
 
 use crate::app::AppState;
 
 /// Show the key manager for `account`.
-pub fn present(parent: &gtk::Window, app: Rc<AppState>, account: AccountId) {
-    let Some(account_row) = app.mailin.account(&account).ok().flatten() else {
-        return;
-    };
+///
+/// The account is passed in: loading it asks the keyring for the
+/// credentials, which must not happen on the UI thread.
+pub fn present(parent: &gtk::Window, app: Rc<AppState>, account_row: Account) {
+    let account = account_row.id;
 
     let window = adw::Window::builder()
         .title("PGP Keys")

@@ -222,7 +222,13 @@ pub fn handle_mailto_draft() {
     match window {
         Some(window) => {
             window.present();
-            window.open_compose(draft);
+            if window.selection.borrow().account.is_none() {
+                // The accounts are still loading: keep the draft until an
+                // account is selected.
+                set_mailto_draft(draft);
+                return;
+            }
+            window.open_compose_loading(draft);
         }
         None => {
             // No window yet; leave it for MainWindow::new to consume.
@@ -241,6 +247,12 @@ pub fn handle_compose_requested() {
         .and_then(|weak| weak.upgrade());
     if let Some(window) = window {
         window.present();
+        if window.selection.borrow().account.is_none() {
+            // The accounts are still loading: keep the request until an
+            // account is selected.
+            set_compose_requested();
+            return;
+        }
         window.open_compose_new();
     } else {
         // No window yet; MainWindow::new will consume the flag.
@@ -297,6 +309,38 @@ pub struct MainWindow {
     /// Expanded thread roots (thread_root_key) for threaded view.
     expanded_threads: RefCell<std::collections::HashSet<String>>,
     widgets: Widgets,
+}
+
+/// The reader content, prepared off the main thread.
+enum ReaderContent {
+    /// The message is OpenPGP/MIME: the payload still has to be decrypted.
+    Pgp(mailin_core::PgpMime),
+    /// The HTML view is active and the document is ready to load.
+    Html {
+        document: String,
+        /// Number of `cid:` references that could not be resolved.
+        unresolved_cids: usize,
+        /// Whether the document may load remote resources.
+        allow_remote: bool,
+        /// Whether the body refers to remote resources.
+        has_remote: bool,
+        /// The sender's domain, for the "always allow" button.
+        sender_domain: Option<String>,
+    },
+    /// The plain-text view is active.
+    Text {
+        body: String,
+        /// Whether the message also has an HTML part.
+        has_html: bool,
+    },
+    /// The message only has an HTML body, but the reader shows plain text.
+    HtmlOnly,
+    /// The message has no readable body.
+    Empty,
+    /// The body still has to be downloaded.
+    NotFetched,
+    /// The body could not be read.
+    Failed,
 }
 
 /// Search scope for a single-account search result, transferred from the
@@ -945,13 +989,9 @@ impl MainWindow {
         Self::connect(&this);
         this.refresh_accounts();
 
-        // Check for a mailto: draft that was set before window creation
-        if let Some(draft) = take_mailto_draft() {
-            this.open_compose(draft);
-        }
-        if take_compose_requested() {
-            this.open_compose_new();
-        }
+        // A mailto: draft or a "compose" request that arrived before the
+        // window was created is handled once the accounts are loaded and an
+        // account is selected (see `apply_accounts`).
 
         this
     }
@@ -1499,7 +1539,7 @@ impl MainWindow {
         this.widgets.compose_button.connect_clicked({
             let this = Rc::clone(this);
             move |_| {
-                let _ = this.open_compose(this.new_draft());
+                this.open_compose_new();
             }
         });
 
@@ -1692,39 +1732,54 @@ impl MainWindow {
                     history_popover.popup();
                     return;
                 };
-                let history = this.app.mailin.search_history(&account);
-                if history.is_empty() {
-                    let row = adw::ActionRow::builder()
-                        .title("No recent searches")
-                        .subtitle("Searches you run will appear here.")
-                        .build();
-                    history_list.append(&row);
-                    history_popover.popup();
-                    return;
-                }
-                let now = format::now_unix();
-                for entry in history {
-                    let row = adw::ActionRow::builder()
-                        .title(&entry.query)
-                        .subtitle(format!("{} ago", format::list_time(now, entry.timestamp)))
-                        .build();
-                    row.connect_activated({
-                        let this = Rc::clone(&this);
-                        let query = entry.query.clone();
-                        let folder_id = entry.folder_id;
-                        let history_popover = history_popover.clone();
-                        move |_| {
-                            history_popover.popdown();
-                            this.widgets.search.set_text(&query);
-                            if let Some(folder_id) = folder_id {
-                                this.select_folder_by_id(folder_id);
-                            }
-                            this.run_search();
+                // The history comes from the store: read it on a worker.
+                let mailin = std::sync::Arc::clone(&this.app.mailin);
+                let history_list = history_list.clone();
+                let history_popover = history_popover.clone();
+                let this = Rc::clone(&this);
+                background::spawn_result(
+                    move || mailin.search_history(&account),
+                    move |result| {
+                        let Ok(history) = result else {
+                            return;
+                        };
+                        if history.is_empty() {
+                            let row = adw::ActionRow::builder()
+                                .title("No recent searches")
+                                .subtitle("Searches you run will appear here.")
+                                .build();
+                            history_list.append(&row);
+                            history_popover.popup();
+                            return;
                         }
-                    });
-                    history_list.append(&row);
-                }
-                history_popover.popup();
+                        let now = format::now_unix();
+                        for entry in history {
+                            let row = adw::ActionRow::builder()
+                                .title(&entry.query)
+                                .subtitle(format!(
+                                    "{} ago",
+                                    format::list_time(now, entry.timestamp)
+                                ))
+                                .build();
+                            row.connect_activated({
+                                let this = Rc::clone(&this);
+                                let query = entry.query.clone();
+                                let folder_id = entry.folder_id;
+                                let history_popover = history_popover.clone();
+                                move |_| {
+                                    history_popover.popdown();
+                                    this.widgets.search.set_text(&query);
+                                    if let Some(folder_id) = folder_id {
+                                        this.select_folder_by_id(folder_id);
+                                    }
+                                    this.run_search();
+                                }
+                            });
+                            history_list.append(&row);
+                        }
+                        history_popover.popup();
+                    },
+                );
             }
         });
 
@@ -1835,7 +1890,7 @@ impl MainWindow {
         compose_action.connect_activate({
             let this = Rc::clone(this);
             move |_, _| {
-                let _ = this.open_compose(this.new_draft());
+                this.open_compose_new();
             }
         });
         this.widgets.window.add_action(&compose_action);
@@ -1995,13 +2050,38 @@ impl MainWindow {
     // ------------------------------------------------------------- accounts
 
     fn refresh_accounts(&self) {
-        let accounts = match self.app.mailin.list_accounts() {
-            Ok(accounts) => accounts,
-            Err(error) => {
-                self.show_error(&error.to_string());
-                return;
-            }
-        };
+        // Listing the accounts reads the store and asks the keyring for every
+        // account: run it on a worker and fill the dropdown when it arrives.
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let window_id = self.window_id.get();
+        background::spawn_result(
+            move || mailin.list_accounts().map_err(|error| error.to_string()),
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
+                }
+                let accounts = match result {
+                    Ok(Ok(accounts)) => accounts,
+                    Ok(Err(error)) => {
+                        this.show_error(&error);
+                        return;
+                    }
+                    Err(failed) => {
+                        tracing::error!("the account refresh worker failed: {}", failed.message);
+                        return;
+                    }
+                };
+                this.apply_accounts(accounts);
+            },
+        );
+    }
+
+    /// Fill the account dropdown from a freshly loaded account list.
+    fn apply_accounts(&self, accounts: Vec<mailin_core::Account>) {
         let current = self.selection.borrow().account;
         let keep = current.filter(|id| accounts.iter().any(|account| account.id == *id));
 
@@ -2054,6 +2134,14 @@ impl MainWindow {
                 let first = self.accounts.borrow()[0].id;
                 self.select_account(first);
             }
+        }
+
+        // A mailto: draft or a "compose" request that arrived before the
+        // window was created is handled now that an account is selected.
+        if let Some(draft) = take_mailto_draft() {
+            self.open_compose_loading(draft);
+        } else if take_compose_requested() {
+            self.open_compose_new();
         }
     }
 
@@ -2817,12 +2905,23 @@ impl MainWindow {
             selection.query = query.clone();
             selection.search_all_mail = search_all_mail;
         }
-        // Add to search history
+        // Add to search history. The write goes to the store, so it runs on
+        // a worker: the search itself must not wait for it.
         if let Some(account) = self.selection.borrow().account {
-            let _ = self.app.mailin.add_search_history(
-                &account,
-                query.clone(),
-                self.selection.borrow().folder,
+            let mailin = std::sync::Arc::clone(&self.app.mailin);
+            let folder = self.selection.borrow().folder;
+            let query = query.clone();
+            background::spawn_result(
+                move || {
+                    mailin
+                        .add_search_history(&account, query, folder)
+                        .map_err(|error| error.to_string())
+                },
+                |result| {
+                    if let Ok(Err(error)) = result {
+                        tracing::warn!("could not store the search history: {error}");
+                    }
+                },
             );
         }
         self.refresh_messages();
@@ -2864,17 +2963,53 @@ impl MainWindow {
                 window.present();
                 return;
             }
-            let body = self
-                .app
-                .mailin
-                .message_body(message.id)
-                .ok()
-                .flatten()
-                .and_then(|(text, _)| text);
-            let draft = mailin_core::compose::draft_from_header(message, body.as_deref());
-            if let Some(window) = self.open_compose(draft) {
-                *self.last_draft.borrow_mut() = Some((message.id, window));
-            }
+            // Reading the draft body hits the store: do it on a worker.
+            let Some(account_id) = self.selection.borrow().account else {
+                return;
+            };
+            let mailin = std::sync::Arc::clone(&self.app.mailin);
+            let window_id = self.window_id.get();
+            let message_id = message.id;
+            let message = message.clone();
+            background::spawn_result(
+                move || {
+                    // The account is loaded here too: reading it asks the
+                    // keyring for the credentials.
+                    let account = mailin
+                        .account(&account_id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "the account is no longer available".to_owned())?;
+                    let body = mailin
+                        .message_body(message.id)
+                        .map_err(|error| error.to_string())?
+                        .and_then(|(text, _)| text);
+                    let draft = mailin_core::compose::draft_from_header(&message, body.as_deref());
+                    Ok::<_, String>((account, draft))
+                },
+                move |result| {
+                    let Some(this) = live_window() else {
+                        return;
+                    };
+                    if this.window_id.get() != window_id {
+                        // A newer window replaced this one.
+                        return;
+                    }
+                    let (account, draft) = match result {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(error)) => {
+                            this.toast(&format!("Could not open the draft: {error}"));
+                            return;
+                        }
+                        Err(failed) => {
+                            this.toast(&format!("Could not open the draft: {}", failed.message));
+                            return;
+                        }
+                    };
+                    if let Some(window) = this.open_compose(account, draft) {
+                        *this.last_draft.borrow_mut() = Some((message_id, window));
+                    }
+                },
+            );
             return;
         }
 
@@ -2957,32 +3092,15 @@ impl MainWindow {
             .set_text(&format::full_date(timestamp));
     }
 
-    /// Header for `message_id`, preferring the rows already in the list over a
-    /// fresh store lookup.
-    fn header_for(&self, message_id: MessageId) -> Option<MessageHeader> {
+    /// Header for `message_id` from the loaded message list.
+    ///
+    /// This never touches the store, so it is safe to call on the UI thread.
+    fn header_from_list(&self, message_id: MessageId) -> Option<MessageHeader> {
         self.messages
             .borrow()
             .iter()
             .find(|message| message.id == message_id)
             .cloned()
-            .or_else(|| self.app.mailin.message(message_id).ok().flatten())
-    }
-
-    /// Whether the account behind the current selection trusts `domain` for
-    /// remote content. Read from the store so the check stays correct after
-    /// the account dialog or the banner's trust button saved a change.
-    fn sender_domain_allowed(&self, domain: &str) -> bool {
-        let account = self.selection.borrow().account;
-        match account {
-            Some(id) => self
-                .app
-                .mailin
-                .account(&id)
-                .ok()
-                .flatten()
-                .is_some_and(|account| account.remote_domain_allowed(domain)),
-            None => false,
-        }
     }
 
     /// Persist "always allow" for the sender's domain on the current account
@@ -2996,23 +3114,33 @@ impl MainWindow {
             return;
         };
         let Some(domain) = self
-            .header_for(message_id)
+            .header_from_list(message_id)
             .and_then(|header| header.from_domain().map(str::to_owned))
         else {
             return;
         };
-        let Some(mut account) = self.app.mailin.account(&account_id).ok().flatten() else {
-            return;
-        };
-        if !account.allow_remote_domain(&domain) {
-            return;
-        }
-        // Persisting the allowlist writes the account row (and the OAuth
-        // token in the keyring): run it off the main thread.
+        // Reading the account asks the keyring for its credentials and
+        // persisting the allowlist writes the account row (and the OAuth
+        // token in the keyring): both happen off the main thread.
         let mailin = std::sync::Arc::clone(&self.app.mailin);
         let window_id = self.window_id.get();
+        let domain_for_worker = domain.clone();
         background::spawn_result(
-            move || mailin.save_account(&account, None),
+            move || {
+                let account = mailin
+                    .account(&account_id)
+                    .map_err(|error| error.to_string())?;
+                let Some(mut account) = account else {
+                    return Ok::<bool, String>(false);
+                };
+                if !account.allow_remote_domain(&domain_for_worker) {
+                    return Ok(false);
+                }
+                mailin
+                    .save_account(&account, None)
+                    .map_err(|error| error.to_string())?;
+                Ok(true)
+            },
             move |result| {
                 let Some(this) = live_window() else {
                     return;
@@ -3021,7 +3149,7 @@ impl MainWindow {
                     return;
                 }
                 match result {
-                    Ok(Ok(())) => {
+                    Ok(Ok(true)) => {
                         this.remote_allowed.set(Some(message_id));
                         this.widgets.remote_panel.set_reveal_child(false);
                         this.widgets.toast.add_toast(adw::Toast::new(&format!(
@@ -3029,8 +3157,9 @@ impl MainWindow {
                         )));
                         this.render_body(message_id);
                     }
+                    Ok(Ok(false)) => {}
                     Ok(Err(error)) => {
-                        this.show_error(&error.to_string());
+                        this.show_error(&error);
                     }
                     Err(failed) => {
                         this.show_error(&format!(
@@ -3050,182 +3179,245 @@ impl MainWindow {
         self.reader_generation.set(reader_generation);
         clear_box(&self.widgets.reader_body);
         self.widgets.remote_panel.set_reveal_child(false);
-        if let Ok(Some(pgp)) = self.app.mailin.pgp_mime(message_id) {
-            self.render_pgp_body(message_id, &pgp);
-            return;
-        }
-        let Ok(body) = self.app.mailin.message_body(message_id) else {
-            self.widgets
-                .reader_body
-                .append(&notice_body("Could not read this message."));
-            return;
-        };
-        match body {
-            Some((text, html)) => {
-                let has_text = text.as_deref().is_some_and(|text| !text.trim().is_empty());
-                let has_html = html.as_deref().is_some_and(|html| !html.trim().is_empty());
-                let want_html = has_html && self.html_mode.get();
 
-                self.programmatic.set(true);
-                self.widgets.html_button.set_sensitive(has_html);
-                self.widgets.html_button.set_active(want_html);
-                self.programmatic.set(false);
-
-                if !has_html || !want_html {
-                    self.widgets.reader_find_revealer.set_reveal_child(false);
-                    self.widgets.reader_find_entry.set_text("");
-                    self.widgets.reader_find_status.set_text("");
-                    *self.find_target_view.borrow_mut() = None;
-                    if let Some(view) = self.html_view.borrow().as_ref() {
-                        if let Some(fc) = view.find_controller() {
-                            fc.search_finish();
-                        }
-                    }
+        // Reading the body, the inline images and rewriting the HTML are all
+        // expensive: they run on a worker and only the widgets are touched
+        // on the main thread.
+        let account_id = self.selection.borrow().account;
+        // The sender domain is taken from the loaded list; the worker falls
+        // back to the store when the message is not in it.
+        let sender_domain = self
+            .header_from_list(message_id)
+            .and_then(|header| header.from_domain().map(str::to_owned));
+        let html_enabled = self.html_mode.get();
+        let remote_content_enabled = self.app.config.borrow().ui.remote_content_enabled;
+        let remote_allowed = self.remote_allowed.get() == Some(message_id);
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let window_id = self.window_id.get();
+        self.widgets
+            .reader_body
+            .append(&loading_body("Loading message…"));
+        background::spawn_result(
+            move || {
+                Self::fetch_reader_content(
+                    &mailin,
+                    message_id,
+                    account_id,
+                    sender_domain,
+                    html_enabled,
+                    remote_content_enabled,
+                    remote_allowed,
+                )
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
                 }
+                let Ok(content) = result else {
+                    tracing::error!("the reader worker failed");
+                    return;
+                };
+                if this.closed.get()
+                    || this.reader_generation.get() != reader_generation
+                    || this.selection.borrow().message != Some(message_id)
+                {
+                    return;
+                }
+                this.apply_reader_content(message_id, content);
+            },
+        );
+    }
 
-                if want_html {
-                    let html_body = html.as_deref().unwrap_or_default();
-                    let sender_domain = self
-                        .header_for(message_id)
-                        .and_then(|header| header.from_domain().map(str::to_owned));
-                    let trusted = sender_domain
-                        .as_deref()
-                        .is_some_and(|domain| self.sender_domain_allowed(domain));
-                    let allow_remote = self.app.config.borrow().ui.remote_content_enabled
-                        || self.remote_allowed.get() == Some(message_id)
-                        || trusted;
-                    // Inline attachments live in the store: snapshot their
-                    // metadata synchronously (a small indexed query) and defer
-                    // the byte reads + base64 encoding to a background thread
-                    // when any are present. The document is loaded right away
-                    // without them and reloaded once they arrive, so the reader
-                    // never freezes on a message with large embedded images.
-                    let inline_parts: Vec<(String, String, String)> = self
-                        .app
-                        .mailin
-                        .list_attachments(message_id)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|attachment| attachment.is_inline)
-                        .filter_map(|attachment| {
-                            let content_id = attachment.content_id?;
-                            Some((content_id, attachment.part_id, attachment.mime_type))
-                        })
-                        .collect();
-                    let view = self.html_view();
-                    if inline_parts.is_empty() {
-                        let rendered = html::document(html_body, allow_remote, &[]);
-                        view.load_html(&rendered, None);
-                        *self.find_target_view.borrow_mut() = Some(view.clone());
-                        self.widgets.reader_body.append(&view);
-                        // If cid: image sources remain unresolved after rewriting,
-                        // show a small notice (M4-D). The check parses the markup
-                        // instead of grepping for `cid:` so quoted text and
-                        // `data-src` attributes do not raise a false alarm.
-                        let unresolved_cids = mailin_core::cid::references(&rendered);
-                        if !unresolved_cids.is_empty() {
-                            let count = unresolved_cids.len();
-                            self.widgets.reader_body.append(&notice_body(&format!(
-                                "{} couldn't be loaded.",
-                                mailin_core::plural(count, "inline image", "inline images")
-                            )));
+    /// Show the content the reader worker prepared.
+    fn apply_reader_content(&self, message_id: MessageId, content: ReaderContent) {
+        clear_box(&self.widgets.reader_body);
+        match content {
+            ReaderContent::Pgp(pgp) => {
+                self.render_pgp_body(message_id, &pgp);
+            }
+            ReaderContent::Html {
+                document,
+                unresolved_cids,
+                allow_remote,
+                has_remote,
+                sender_domain,
+            } => {
+                self.set_html_button(true, true);
+                let view = self.html_view();
+                view.load_html(&document, None);
+                *self.find_target_view.borrow_mut() = Some(view.clone());
+                self.widgets.reader_body.append(&view);
+                // If cid: image sources remain unresolved after rewriting,
+                // show a small notice (M4-D). The check parses the markup
+                // instead of grepping for `cid:` so quoted text and
+                // `data-src` attributes do not raise a false alarm.
+                if unresolved_cids > 0 {
+                    self.widgets.reader_body.append(&notice_body(&format!(
+                        "{} couldn't be loaded.",
+                        mailin_core::plural(unresolved_cids, "inline image", "inline images")
+                    )));
+                }
+                if !allow_remote && has_remote {
+                    match sender_domain {
+                        Some(domain) => {
+                            self.widgets
+                                .remote_trust
+                                .set_label(&format!("Always allow @{domain}"));
+                            self.widgets.remote_trust.set_visible(true);
                         }
-                    } else {
-                        let provisional = html::document(html_body, allow_remote, &[]);
-                        view.load_html(&provisional, None);
-                        *self.find_target_view.borrow_mut() = Some(view.clone());
-                        self.widgets.reader_body.append(&view);
-                        let images_mailin = std::sync::Arc::clone(&self.app.mailin);
-                        let html_body_for_finish = html_body.to_owned();
-                        let view_for_finish = view.clone();
-                        let allow_remote_for_finish = allow_remote;
-                        let window_id = self.window_id.get();
-                        background::spawn_result(
-                            move || {
-                                Self::fetch_inline_images(&images_mailin, message_id, inline_parts)
-                            },
-                            move |result| {
-                                let Some(this) = live_window() else {
-                                    return;
-                                };
-                                if this.window_id.get() != window_id {
-                                    // A newer window replaced this one.
-                                    return;
-                                }
-                                let Ok(images) = result else {
-                                    tracing::error!("the inline image worker failed");
-                                    return;
-                                };
-                                if this.closed.get()
-                                    || this.reader_generation.get() != reader_generation
-                                    || this.selection.borrow().message != Some(message_id)
-                                    || view_for_finish.parent().is_none()
-                                {
-                                    return;
-                                }
-                                let rendered = html::document(
-                                    &html_body_for_finish,
-                                    allow_remote_for_finish,
-                                    &images,
-                                );
-                                view_for_finish.load_html(&rendered, None);
-                                let unresolved_cids = mailin_core::cid::references(&rendered);
-                                if !unresolved_cids.is_empty() {
-                                    let count = unresolved_cids.len();
-                                    this.widgets.reader_body.append(&notice_body(&format!(
-                                        "{} couldn't be loaded.",
-                                        mailin_core::plural(count, "inline image", "inline images")
-                                    )));
-                                }
-                            },
-                        );
+                        None => self.widgets.remote_trust.set_visible(false),
                     }
-                    if !allow_remote && html::has_remote_content(html_body) {
-                        match sender_domain {
-                            Some(domain) => {
-                                self.widgets
-                                    .remote_trust
-                                    .set_label(&format!("Always allow @{domain}"));
-                                self.widgets.remote_trust.set_visible(true);
-                            }
-                            None => self.widgets.remote_trust.set_visible(false),
-                        }
-                        self.widgets.remote_panel.set_reveal_child(true);
-                    }
-                } else if has_text {
-                    self.widgets
-                        .reader_body
-                        .append(&text_body(text.as_deref().unwrap_or_default()));
-                } else if has_html {
-                    self.widgets.reader_body.append(&notice_body(
-                        "This message only provides an HTML body. Use the HTML button to show it.",
-                    ));
-                } else {
-                    self.widgets
-                        .reader_body
-                        .append(&notice_body("This message has no readable body."));
+                    self.widgets.remote_panel.set_reveal_child(true);
                 }
             }
-            None => {
-                let fetched = self
-                    .app
-                    .mailin
+            ReaderContent::Text { body, has_html } => {
+                self.set_html_button(has_html, false);
+                self.reset_find();
+                self.widgets.reader_body.append(&text_body(&body));
+            }
+            ReaderContent::HtmlOnly => {
+                self.set_html_button(true, false);
+                self.reset_find();
+                self.widgets.reader_body.append(&notice_body(
+                    "This message only provides an HTML body. Use the HTML button to show it.",
+                ));
+            }
+            ReaderContent::Empty => {
+                self.set_html_button(false, false);
+                self.reset_find();
+                self.widgets
+                    .reader_body
+                    .append(&notice_body("This message has no readable body."));
+            }
+            ReaderContent::NotFetched => {
+                self.widgets
+                    .reader_body
+                    .append(&loading_body("Loading message…"));
+                self.app.engine.fetch_body(message_id);
+            }
+            ReaderContent::Failed => {
+                self.widgets
+                    .reader_body
+                    .append(&notice_body("Could not read this message."));
+            }
+        }
+    }
+
+    /// Update the HTML/plain-text toggle without triggering a re-render.
+    fn set_html_button(&self, has_html: bool, active: bool) {
+        self.programmatic.set(true);
+        self.widgets.html_button.set_sensitive(has_html);
+        self.widgets.html_button.set_active(active);
+        self.programmatic.set(false);
+    }
+
+    /// Drop the find-in-message state of the previous body.
+    fn reset_find(&self) {
+        self.widgets.reader_find_revealer.set_reveal_child(false);
+        self.widgets.reader_find_entry.set_text("");
+        self.widgets.reader_find_status.set_text("");
+        *self.find_target_view.borrow_mut() = None;
+        if let Some(view) = self.html_view.borrow().as_ref() {
+            if let Some(fc) = view.find_controller() {
+                fc.search_finish();
+            }
+        }
+    }
+
+    /// Read the message and prepare its reader content off the main thread.
+    ///
+    /// The body, the inline images and the HTML rewrite are all proportional
+    /// to the size of the message, so none of them may run on the UI thread.
+    fn fetch_reader_content(
+        mailin: &std::sync::Arc<mailin_core::client::Mailin>,
+        message_id: MessageId,
+        account_id: Option<AccountId>,
+        sender_domain: Option<String>,
+        html_enabled: bool,
+        remote_content_enabled: bool,
+        remote_allowed: bool,
+    ) -> ReaderContent {
+        if let Ok(Some(pgp)) = mailin.pgp_mime(message_id) {
+            return ReaderContent::Pgp(pgp);
+        }
+        let Ok(body) = mailin.message_body(message_id) else {
+            return ReaderContent::Failed;
+        };
+        let Some((text, html)) = body else {
+            let fetched = mailin
+                .message(message_id)
+                .ok()
+                .flatten()
+                .is_some_and(|message| message.body_fetched);
+            return if fetched {
+                ReaderContent::Empty
+            } else {
+                ReaderContent::NotFetched
+            };
+        };
+        let has_text = text.as_deref().is_some_and(|text| !text.trim().is_empty());
+        let has_html = html.as_deref().is_some_and(|html| !html.trim().is_empty());
+        if has_html && html_enabled {
+            let html_body = html.as_deref().unwrap_or_default();
+            // The sender domain may only be known to the store when the
+            // message is not in the loaded list: look it up here.
+            let sender_domain = sender_domain.or_else(|| {
+                mailin
                     .message(message_id)
                     .ok()
                     .flatten()
-                    .is_some_and(|message| message.body_fetched);
-                if fetched {
-                    self.widgets
-                        .reader_body
-                        .append(&notice_body("This message has no readable body."));
-                } else {
-                    self.widgets
-                        .reader_body
-                        .append(&loading_body("Loading message…"));
-                    self.app.engine.fetch_body(message_id);
-                }
-            }
+                    .and_then(|header| header.from_domain().map(str::to_owned))
+            });
+            // The trusted-sender check reads the account (and its keyring
+            // entry): it happens here, on the worker.
+            let trusted = sender_domain.as_deref().is_some_and(|domain| {
+                account_id.is_some_and(|account_id| {
+                    mailin
+                        .account(&account_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|account| account.remote_domain_allowed(domain))
+                })
+            });
+            let allow_remote = remote_content_enabled || remote_allowed || trusted;
+            // Inline attachments live in the store: read their bytes and
+            // rewrite the `cid:` references to `data:` URLs here.
+            let inline_parts: Vec<(String, String, String)> = mailin
+                .list_attachments(message_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|attachment| attachment.is_inline)
+                .filter_map(|attachment| {
+                    let content_id = attachment.content_id?;
+                    Some((content_id, attachment.part_id, attachment.mime_type))
+                })
+                .collect();
+            let images = Self::fetch_inline_images(mailin, message_id, inline_parts);
+            let document = html::document(html_body, allow_remote, &images);
+            let unresolved_cids = mailin_core::cid::references(&document).len();
+            let has_remote = html::has_remote_content(html_body);
+            return ReaderContent::Html {
+                document,
+                unresolved_cids,
+                allow_remote,
+                has_remote,
+                sender_domain,
+            };
         }
+        if has_text {
+            return ReaderContent::Text {
+                body: text.unwrap_or_default(),
+                has_html,
+            };
+        }
+        if has_html {
+            return ReaderContent::HtmlOnly;
+        }
+        ReaderContent::Empty
     }
 
     /// Render the placeholder for a PGP-protected message and decrypt/verify on demand.
@@ -3976,9 +4168,12 @@ impl MainWindow {
         self.reset_mobile_nav();
     }
 
+    /// The selected message, taken from the loaded list.
+    ///
+    /// This never touches the store, so it is safe to call on the UI thread.
     fn selected_message(&self) -> Option<MessageHeader> {
         let id = self.selection.borrow().message?;
-        self.app.mailin.message(id).ok().flatten()
+        self.header_from_list(id)
     }
 
     /// All messages currently selected in the list, in list order.
@@ -4289,8 +4484,24 @@ impl MainWindow {
             return;
         }
         let id = ids[0];
-        if let Ok(Some(entry)) = this.app.mailin.outbox_entry(id) {
-            if let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) {
+        // Reading the queued message and parsing its MIME structure is
+        // proportional to the message size: run it on a worker.
+        let mailin = std::sync::Arc::clone(&this.app.mailin);
+        let window_id = this.window_id.get();
+        background::spawn_result(
+            move || {
+                // The account is loaded here too: reading it asks the
+                // keyring for the credentials.
+                let account = mailin
+                    .account(&account_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "the account is no longer available".to_owned())?;
+                let entry = mailin.outbox_entry(id).map_err(|error| error.to_string())?;
+                let Some(entry) = entry else {
+                    return Ok::<Option<(Account, OutgoingMessage)>, String>(None);
+                };
+                let env = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json)
+                    .map_err(|error| error.to_string())?;
                 let mut draft = OutgoingMessage {
                     from_name: String::new(),
                     from_addr: env.from,
@@ -4314,15 +4525,40 @@ impl MainWindow {
                         draft.body = text.to_string();
                     }
                 }
+                Ok(Some((account, draft)))
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
+                }
+                let (account, draft) = match result {
+                    Ok(Ok(Some(value))) => value,
+                    Ok(Ok(None)) => return,
+                    Ok(Err(error)) => {
+                        this.toast(&format!("Could not open the queued message: {error}"));
+                        return;
+                    }
+                    Err(failed) => {
+                        this.toast(&format!(
+                            "Could not open the queued message: {}",
+                            failed.message
+                        ));
+                        return;
+                    }
+                };
                 // Open the composer first and only cancel the queued entry
                 // once the draft is safely on screen: cancelling first would
                 // destroy the message whenever opening the composer fails
                 // (e.g. no account selected).
-                if this.open_compose(draft).is_some() {
+                if this.open_compose(account, draft).is_some() {
                     this.app.engine.cancel_outbox(account_id, id);
                 }
-            }
-        }
+            },
+        );
     }
 
     fn selected_outbox_ids(&self) -> Vec<i64> {
@@ -4411,89 +4647,193 @@ impl MainWindow {
     // --------------------------------------------------------------- compose
 
     fn compose_reply(this: &Rc<Self>, all: bool) {
-        let Some(message) = this.selected_message() else {
+        let Some(message_id) = this.selection.borrow().message else {
             return;
         };
         let Some(account_id) = this.selection.borrow().account else {
             return;
         };
-        let Some(account) = this.app.mailin.account(&account_id).ok().flatten() else {
-            return;
-        };
-        let body = this
-            .app
-            .mailin
-            .message_body(message.id)
-            .ok()
-            .flatten()
-            .and_then(|(text, _)| text)
-            .filter(|text| !text.trim().is_empty())
-            .or_else(|| message.snippet.clone());
-        let draft = if all {
-            compose::reply_all(&account, &message, body.as_deref())
-        } else {
-            compose::reply(&account, &message, body.as_deref())
-        };
-        let _ = this.open_compose(draft);
+        // Reading the account asks the keyring for its credentials and the
+        // body comes from the store: both happen on a worker.
+        let mailin = std::sync::Arc::clone(&this.app.mailin);
+        let window_id = this.window_id.get();
+        // The header is usually already in the loaded list; the worker falls
+        // back to the store when it is not.
+        let message_for_worker = this.selected_message();
+        background::spawn_result(
+            move || {
+                let message = match message_for_worker {
+                    Some(message) => message,
+                    None => mailin
+                        .message(message_id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "the message is no longer available".to_owned())?,
+                };
+                let account = mailin
+                    .account(&account_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "the account is no longer available".to_owned())?;
+                let body = mailin
+                    .message_body(message.id)
+                    .map_err(|error| error.to_string())?
+                    .and_then(|(text, _)| text)
+                    .filter(|text| !text.trim().is_empty())
+                    .or_else(|| message.snippet.clone());
+                let draft = if all {
+                    compose::reply_all(&account, &message, body.as_deref())
+                } else {
+                    compose::reply(&account, &message, body.as_deref())
+                };
+                Ok::<_, String>((account, draft))
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
+                }
+                match result {
+                    Ok(Ok((account, draft))) => {
+                        let _ = this.open_compose(account, draft);
+                    }
+                    Ok(Err(error)) => {
+                        this.toast(&format!("Could not start the reply: {error}"));
+                    }
+                    Err(failed) => {
+                        this.toast(&format!("Could not start the reply: {}", failed.message));
+                    }
+                }
+            },
+        );
     }
 
     fn compose_forward(this: &Rc<Self>) {
-        let Some(message) = this.selected_message() else {
+        let Some(message_id) = this.selection.borrow().message else {
             return;
         };
         let Some(account_id) = this.selection.borrow().account else {
             return;
         };
-        let Some(account) = this.app.mailin.account(&account_id).ok().flatten() else {
-            return;
-        };
-        let body = this
-            .app
-            .mailin
-            .message_body(message.id)
-            .ok()
-            .flatten()
-            .and_then(|(text, _)| text)
-            .or_else(|| message.snippet.clone());
-        let draft = compose::forward(&account, &message, body.as_deref());
-        let _ = this.open_compose(draft);
-    }
-
-    /// Draft for a brand-new message: an empty body that already carries the
-    /// selected account's signature, so the caret starts above it.
-    fn new_draft(&self) -> OutgoingMessage {
-        let signature = self
-            .selection
-            .borrow()
-            .account
-            .and_then(|account_id| self.app.mailin.account(&account_id).ok().flatten())
-            .map(|account| mailin_core::compose::signature_block(&account.signature))
-            .unwrap_or_default();
-        OutgoingMessage {
-            body: signature,
-            ..OutgoingMessage::default()
-        }
+        // Reading the account asks the keyring for its credentials and the
+        // body comes from the store: both happen on a worker.
+        let mailin = std::sync::Arc::clone(&this.app.mailin);
+        let window_id = this.window_id.get();
+        // The header is usually already in the loaded list; the worker falls
+        // back to the store when it is not.
+        let message_for_worker = this.selected_message();
+        background::spawn_result(
+            move || {
+                let message = match message_for_worker {
+                    Some(message) => message,
+                    None => mailin
+                        .message(message_id)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| "the message is no longer available".to_owned())?,
+                };
+                let account = mailin
+                    .account(&account_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "the account is no longer available".to_owned())?;
+                let body = mailin
+                    .message_body(message.id)
+                    .map_err(|error| error.to_string())?
+                    .and_then(|(text, _)| text)
+                    .or_else(|| message.snippet.clone());
+                let draft = compose::forward(&account, &message, body.as_deref());
+                Ok::<_, String>((account, draft))
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
+                }
+                match result {
+                    Ok(Ok((account, draft))) => {
+                        let _ = this.open_compose(account, draft);
+                    }
+                    Ok(Err(error)) => {
+                        this.toast(&format!("Could not start the forward: {error}"));
+                    }
+                    Err(failed) => {
+                        this.toast(&format!("Could not start the forward: {}", failed.message));
+                    }
+                }
+            },
+        );
     }
 
     pub fn open_compose_new(&self) {
-        let _ = self.open_compose(self.new_draft());
-    }
-
-    /// Open a compose window with `draft` (also used for mailto: links).
-    pub fn open_compose(&self, draft: OutgoingMessage) -> Option<glib::WeakRef<gtk::Window>> {
         let Some(account_id) = self.selection.borrow().account else {
             self.widgets
                 .toast
                 .add_toast(adw::Toast::new("Add an account before composing mail"));
-            return None;
+            return;
         };
+        // Reading the account asks the keyring for its credentials: the
+        // signature must not be fetched on the UI thread.
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let window_id = self.window_id.get();
+        background::spawn_result(
+            move || {
+                let account = mailin
+                    .account(&account_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "the account is no longer available".to_owned())?;
+                let signature = mailin_core::compose::signature_block(&account.signature);
+                let draft = OutgoingMessage {
+                    body: signature,
+                    ..OutgoingMessage::default()
+                };
+                Ok::<_, String>((account, draft))
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
+                }
+                let (account, draft) = match result {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(error)) => {
+                        this.toast(&format!("Could not start a new message: {error}"));
+                        return;
+                    }
+                    Err(failed) => {
+                        this.toast(&format!(
+                            "Could not start a new message: {}",
+                            failed.message
+                        ));
+                        return;
+                    }
+                };
+                let _ = this.open_compose(account, draft);
+            },
+        );
+    }
+
+    /// Open a compose window with `draft` for `account`.
+    ///
+    /// The account is passed in because loading it asks the keyring for the
+    /// credentials, which must not happen on the UI thread.
+    pub fn open_compose(
+        &self,
+        account: Account,
+        draft: OutgoingMessage,
+    ) -> Option<glib::WeakRef<gtk::Window>> {
         let parent = self.widgets.window.clone().upcast::<gtk::Window>();
         let toast = self.widgets.toast.clone();
         let toast_for_close = self.widgets.toast.clone();
         compose::present(
             &parent,
             Rc::clone(&self.app),
-            account_id,
+            account,
             draft,
             move || {
                 toast.add_toast(adw::Toast::new("Message queued in the outbox"));
@@ -4505,6 +4845,49 @@ impl MainWindow {
             },
         )
         .map(|window| window.upcast::<gtk::Window>().downgrade())
+    }
+
+    /// Open a compose window with `draft`, loading the selected account on a
+    /// worker (also used for mailto: links).
+    pub fn open_compose_loading(&self, draft: OutgoingMessage) {
+        let Some(account_id) = self.selection.borrow().account else {
+            self.widgets
+                .toast
+                .add_toast(adw::Toast::new("Add an account before composing mail"));
+            return;
+        };
+        let mailin = std::sync::Arc::clone(&self.app.mailin);
+        let window_id = self.window_id.get();
+        background::spawn_result(
+            move || {
+                mailin
+                    .account(&account_id)
+                    .map_err(|error| error.to_string())
+            },
+            move |result| {
+                let Some(this) = live_window() else {
+                    return;
+                };
+                if this.window_id.get() != window_id {
+                    // A newer window replaced this one.
+                    return;
+                }
+                match result {
+                    Ok(Ok(Some(account))) => {
+                        let _ = this.open_compose(account, draft);
+                    }
+                    Ok(Ok(None)) => {
+                        this.toast("Add an account before composing mail");
+                    }
+                    Ok(Err(error)) => {
+                        this.toast(&format!("Could not open the composer: {error}"));
+                    }
+                    Err(failed) => {
+                        this.toast(&format!("Could not open the composer: {}", failed.message));
+                    }
+                }
+            },
+        );
     }
 
     // --------------------------------------------------------------- events
@@ -5152,6 +5535,52 @@ impl MainWindow {
     }
 }
 
+/// The outcome of reading an attachment off the main thread.
+enum LoadedAttachment {
+    /// The bytes were written to the requested directory.
+    Written,
+    /// The bytes are ready for the save dialog.
+    Bytes(Vec<u8>),
+}
+
+/// Queue an attachment whose bytes are not cached yet, so it is downloaded
+/// once the body is refreshed.
+#[allow(clippy::too_many_arguments)]
+fn queue_attachment(
+    app: &Rc<AppState>,
+    toast: &adw::ToastOverlay,
+    pending: &Rc<RefCell<Vec<PendingAttachment>>>,
+    message_id: MessageId,
+    attachment: &AttachmentMeta,
+    target_dir: &Option<PathBuf>,
+) {
+    let mut pending = pending.borrow_mut();
+    // Avoid queueing the same attachment twice.
+    if !pending
+        .iter()
+        .any(|p| p.message_id == message_id && p.attachment.part_id == attachment.part_id)
+    {
+        pending.push(PendingAttachment {
+            message_id,
+            attachment: attachment.clone(),
+            target_dir: target_dir.clone(),
+        });
+    } else if let Some(dir) = target_dir {
+        // If already queued (e.g. user requested Download all after a
+        // single save started), prefer saving to the chosen folder.
+        if let Some(p) = pending
+            .iter_mut()
+            .find(|p| p.message_id == message_id && p.attachment.part_id == attachment.part_id)
+        {
+            p.target_dir = Some(dir.clone());
+        }
+    }
+    app.engine.refresh_body(message_id);
+    if target_dir.is_none() {
+        toast.add_toast(adw::Toast::new("Downloading attachment…"));
+    }
+}
+
 /// Start saving an attachment, downloading the body first when only metadata
 /// was cached by an older version. If `target_dir` is set, save there instead
 /// of prompting (used by "Download all" and queued completions).
@@ -5174,62 +5603,60 @@ fn request_save_attachment(
         };
         toast.add_toast(adw::Toast::new(msg));
     };
-    let queue = |app: &Rc<AppState>,
-                 toast: &adw::ToastOverlay,
-                 attachment: &AttachmentMeta,
-                 target_dir: &Option<PathBuf>| {
-        let mut pending = pending.borrow_mut();
-        // Avoid queueing the same attachment twice.
-        if !pending
-            .iter()
-            .any(|p| p.message_id == message_id && p.attachment.part_id == attachment.part_id)
-        {
-            pending.push(PendingAttachment {
-                message_id,
-                attachment: attachment.clone(),
-                target_dir: target_dir.clone(),
-            });
-        } else if let Some(dir) = target_dir {
-            // If already queued (e.g. user requested Download all after a
-            // single save started), prefer saving to the chosen folder.
-            if let Some(p) = pending
-                .iter_mut()
-                .find(|p| p.message_id == message_id && p.attachment.part_id == attachment.part_id)
-            {
-                p.target_dir = Some(dir.clone());
+    // Reading the attachment pulls the whole blob out of the store and
+    // writing it moves the bytes to disk: both happen on a worker so the
+    // window never freezes on a large attachment.
+    let mailin = std::sync::Arc::clone(&app.mailin);
+    let part_id = attachment.part_id.clone();
+    let attachment_for_worker = attachment.clone();
+    let target_dir_for_worker = target_dir.clone();
+    background::spawn_result(
+        move || {
+            let data = mailin
+                .attachment(message_id, &part_id)
+                .map_err(|error| error.to_string())?;
+            let Some(data) = data else {
+                return Ok::<Option<LoadedAttachment>, String>(None);
+            };
+            let Some(bytes) = data.data else {
+                return Ok(None);
+            };
+            match &target_dir_for_worker {
+                Some(dir) => {
+                    save_attachment_to_dir(dir, &attachment_for_worker, &bytes)
+                        .map_err(|error| error.to_string())?;
+                    Ok(Some(LoadedAttachment::Written))
+                }
+                None => Ok(Some(LoadedAttachment::Bytes(bytes))),
             }
-        }
-        app.engine.refresh_body(message_id);
-        if target_dir.is_none() {
-            toast.add_toast(adw::Toast::new("Downloading attachment…"));
-        }
-    };
-    match app.mailin.attachment(message_id, &attachment.part_id) {
-        Ok(Some(data)) => match data.data {
-            Some(bytes) => {
-                if let Some(dir) = target_dir {
-                    match save_attachment_to_dir(&dir, &attachment, &bytes) {
-                        Ok(_) => { /* progress reported by caller for batch saves */ }
-                        Err(e) => toast.add_toast(adw::Toast::new(&format!(
-                            "Could not save {}: {e}",
-                            attachment.display_name()
-                        ))),
-                    }
+        },
+        move |result| match result {
+            Ok(Ok(Some(LoadedAttachment::Written))) => {
+                // Progress reported by caller for batch saves.
+            }
+            Ok(Ok(Some(LoadedAttachment::Bytes(bytes)))) => {
+                save_attachment_dialog(&window, &toast, &attachment, bytes);
+            }
+            Ok(Ok(None)) => {
+                if retry {
+                    unavailable(&toast, &target_dir);
                 } else {
-                    save_attachment_dialog(&window, &toast, &attachment, bytes);
+                    queue_attachment(&app, &toast, &pending, message_id, &attachment, &target_dir);
                 }
             }
-            None if retry => unavailable(&toast, &target_dir),
-            None => queue(&app, &toast, &attachment, &target_dir),
+            Ok(Err(error)) => {
+                toast.add_toast(adw::Toast::new(&format!(
+                    "Could not read the attachment: {error}"
+                )));
+            }
+            Err(failed) => {
+                toast.add_toast(adw::Toast::new(&format!(
+                    "Could not read the attachment: {}",
+                    failed.message
+                )));
+            }
         },
-        Ok(None) if retry => unavailable(&toast, &target_dir),
-        Ok(None) => queue(&app, &toast, &attachment, &target_dir),
-        Err(error) => {
-            toast.add_toast(adw::Toast::new(&format!(
-                "Could not read the attachment: {error}"
-            )));
-        }
-    }
+    );
 }
 
 /// Unread message IDs from the inbox folder of `account`.
@@ -5341,19 +5768,30 @@ fn save_attachment_dialog(
         let Ok(file) = result else {
             return;
         };
-        let result = file.replace_contents(
-            &data,
-            None::<&str>,
-            false,
-            gio::FileCreateFlags::REPLACE_DESTINATION,
-            None::<&gio::Cancellable>,
+        // Writing the attachment moves up to 50 MB to disk: do it on a
+        // worker instead of blocking the UI in the dialog callback.
+        background::spawn_result(
+            move || {
+                file.replace_contents(
+                    &data,
+                    None::<&str>,
+                    false,
+                    gio::FileCreateFlags::REPLACE_DESTINATION,
+                    None::<&gio::Cancellable>,
+                )
+                .map_err(|error| error.to_string())
+            },
+            move |result| match result {
+                Ok(Ok(_)) => toast.add_toast(adw::Toast::new("Attachment saved")),
+                Ok(Err(error)) => toast.add_toast(adw::Toast::new(&format!(
+                    "Could not save the attachment: {error}"
+                ))),
+                Err(failed) => toast.add_toast(adw::Toast::new(&format!(
+                    "Could not save the attachment: {}",
+                    failed.message
+                ))),
+            },
         );
-        match result {
-            Ok(_) => toast.add_toast(adw::Toast::new("Attachment saved")),
-            Err(error) => toast.add_toast(adw::Toast::new(&format!(
-                "Could not save the attachment: {error}"
-            ))),
-        }
     });
 }
 

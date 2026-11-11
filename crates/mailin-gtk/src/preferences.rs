@@ -24,6 +24,7 @@ pub fn show_preferences(
     on_saved: impl Fn() + 'static,
 ) {
     let config = Rc::new(RefCell::new(app.config.borrow().clone()));
+    let on_saved: Rc<dyn Fn()> = Rc::new(on_saved);
     let paths = match Paths::discover() {
         Ok(paths) => paths,
         Err(error) => {
@@ -453,50 +454,71 @@ pub fn show_preferences(
         .description("Manage the keys used to encrypt, sign, decrypt and verify mail.")
         .build();
 
-    let accounts = app.mailin.list_accounts().unwrap_or_default();
-    if accounts.is_empty() {
-        let row = adw::ActionRow::builder()
-            .title("No accounts yet")
-            .subtitle("Add an account to manage its PGP keys.")
-            .build();
-        pgp_group.add(&row);
-    } else {
+    // The account list reads the store and asks the keyring for every
+    // account: do it on a worker and fill the page when it arrives.
+    {
+        let mailin = std::sync::Arc::clone(&app.mailin);
+        let app_for_accounts = Rc::clone(app);
+        let pgp_group = pgp_group.clone();
         let parent_window = parent
             .as_ref()
             .root()
             .and_then(|root| root.downcast::<gtk::Window>().ok());
-        for account in accounts {
-            let key_count = app
-                .mailin
-                .list_pgp_keys(&account.id)
-                .map(|keys| keys.len())
-                .unwrap_or(0);
-            let row = adw::ActionRow::builder()
-                .title(gtk::glib::markup_escape_text(&account.email))
-                .subtitle(match key_count {
-                    1 => "1 key".to_owned(),
-                    count => format!("{count} keys"),
-                })
-                .build();
-            let manage = gtk::Button::with_label("Manage Keys");
-            manage.add_css_class("flat");
-            manage.set_valign(gtk::Align::Center);
-            {
-                use gtk::accessible::Property;
-                let label = format!("Manage PGP keys for {}", account.email);
-                manage.update_property(&[Property::Label(&label)]);
-            }
-            row.add_suffix(&manage);
+        crate::background::spawn_result(
+            move || {
+                mailin
+                    .list_accounts()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|account| {
+                        let key_count = mailin
+                            .list_pgp_keys(&account.id)
+                            .map(|keys| keys.len())
+                            .unwrap_or(0);
+                        (account, key_count)
+                    })
+                    .collect::<Vec<_>>()
+            },
+            move |result| {
+                let Ok(rows) = result else {
+                    return;
+                };
+                if rows.is_empty() {
+                    let row = adw::ActionRow::builder()
+                        .title("No accounts yet")
+                        .subtitle("Add an account to manage its PGP keys.")
+                        .build();
+                    pgp_group.add(&row);
+                    return;
+                }
+                for (account, key_count) in rows {
+                    let row = adw::ActionRow::builder()
+                        .title(gtk::glib::markup_escape_text(&account.email))
+                        .subtitle(match key_count {
+                            1 => "1 key".to_owned(),
+                            count => format!("{count} keys"),
+                        })
+                        .build();
+                    let manage = gtk::Button::with_label("Manage Keys");
+                    manage.add_css_class("flat");
+                    manage.set_valign(gtk::Align::Center);
+                    {
+                        use gtk::accessible::Property;
+                        let label = format!("Manage PGP keys for {}", account.email);
+                        manage.update_property(&[Property::Label(&label)]);
+                    }
+                    row.add_suffix(&manage);
 
-            if let Some(window) = parent_window.clone() {
-                let app = Rc::clone(app);
-                let account_id = account.id;
-                manage.connect_clicked(move |_| {
-                    crate::pgp_keys::present(&window, Rc::clone(&app), account_id);
-                });
-            }
-            pgp_group.add(&row);
-        }
+                    if let Some(window) = parent_window.clone() {
+                        let app = Rc::clone(&app_for_accounts);
+                        manage.connect_clicked(move |_| {
+                            crate::pgp_keys::present(&window, Rc::clone(&app), account.clone());
+                        });
+                    }
+                    pgp_group.add(&row);
+                }
+            },
+        );
     }
     encryption_page.add(&pgp_group);
     dialog.add(&encryption_page);
@@ -513,90 +535,113 @@ pub fn show_preferences(
         )
         .build();
 
-    let app_for_plugins = Rc::clone(app);
     let group_for_plugins = plugins_group.clone();
-    gtk::glib::spawn_future_local(async move {
-        let plugins = app_for_plugins.mailin.list_plugins().await;
-        if plugins.is_empty() {
-            let row = adw::ActionRow::builder()
-                .title("No plugins installed")
-                .subtitle("Place plugin directories in the plugins folder to install them.")
-                .build();
-            group_for_plugins.add(&row);
-        } else {
-            for plugin in plugins {
+    let mailin_for_plugins = std::sync::Arc::clone(&app.mailin);
+    // The plugin list reads the store: run it on a worker.
+    crate::background::spawn_async(
+        {
+            let mailin = std::sync::Arc::clone(&mailin_for_plugins);
+            move |runtime| runtime.block_on(mailin.list_plugins())
+        },
+        move |result| {
+            let Ok(plugins) = result else {
+                return;
+            };
+            if plugins.is_empty() {
                 let row = adw::ActionRow::builder()
-                    .title(gtk::glib::markup_escape_text(&plugin.name))
-                    .subtitle(gtk::glib::markup_escape_text(&format!(
-                        "v{} · {}",
-                        plugin.version, plugin.source_path
-                    )))
+                    .title("No plugins installed")
+                    .subtitle("Place plugin directories in the plugins folder to install them.")
                     .build();
-                let toggle = gtk::Switch::new();
-                toggle.set_active(plugin.enabled);
-                toggle.set_valign(gtk::Align::Center);
-                row.add_suffix(&toggle);
-
-                let app = app_for_plugins.clone();
-                let name = plugin.name.clone();
-                toggle.connect_state_set(move |_, enabled| {
-                    let app = app.clone();
-                    let name = name.clone();
-                    gtk::glib::spawn_future_local(async move {
-                        let _ = app.mailin.set_plugin_enabled(&name, enabled).await;
-                    });
-                    gtk::glib::Propagation::Proceed
-                });
-
                 group_for_plugins.add(&row);
+            } else {
+                for plugin in plugins {
+                    let row = adw::ActionRow::builder()
+                        .title(gtk::glib::markup_escape_text(&plugin.name))
+                        .subtitle(gtk::glib::markup_escape_text(&format!(
+                            "v{} · {}",
+                            plugin.version, plugin.source_path
+                        )))
+                        .build();
+                    let toggle = gtk::Switch::new();
+                    toggle.set_active(plugin.enabled);
+                    toggle.set_valign(gtk::Align::Center);
+                    row.add_suffix(&toggle);
+
+                    let mailin = std::sync::Arc::clone(&mailin_for_plugins);
+                    let name = plugin.name.clone();
+                    toggle.connect_state_set(move |_, enabled| {
+                        // Enabling a plugin writes to the store: keep it off
+                        // the UI thread.
+                        let mailin = std::sync::Arc::clone(&mailin);
+                        let name = name.clone();
+                        crate::background::spawn_async(
+                            move |runtime| {
+                                runtime.block_on(mailin.set_plugin_enabled(&name, enabled))
+                            },
+                            |_| {},
+                        );
+                        gtk::glib::Propagation::Proceed
+                    });
+
+                    group_for_plugins.add(&row);
+                }
             }
-        }
-    });
+        },
+    );
 
     plugins_page.add(&plugins_group);
     dialog.add(&plugins_page);
 
     // Validate, persist and hand the new configuration back to the window.
+    // Writing the configuration file touches the disk, so it happens on a
+    // worker; the new settings are installed when the write succeeded.
     dialog.connect_closed({
         let config = config.clone();
         let paths = paths.clone();
         let app = Rc::clone(app);
-        move |_| match apply_config(&config, &paths, &app) {
-            Ok(()) => on_saved(),
-            Err(message) => {
-                let alert = gtk::AlertDialog::builder()
-                    .message("Couldn't save preferences")
-                    .detail(&message)
-                    .build();
-                alert.set_buttons(&["OK"]);
-                alert.set_default_button(0);
-                gtk::glib::spawn_future_local(async move {
-                    let _ = alert.choose_future(None::<&gtk::Window>).await;
-                });
+        let on_saved = on_saved.clone();
+        move |_| {
+            let candidate = config.borrow().clone();
+            if let Err(error) = candidate.validate() {
+                show_config_error(&error.to_string());
+                return;
             }
+            let paths = paths.clone();
+            let app = Rc::clone(&app);
+            let on_saved = on_saved.clone();
+            let saved = candidate.clone();
+            crate::background::spawn_result(
+                move || {
+                    saved
+                        .save(&paths)
+                        .map_err(|e| format!("Could not write the configuration file: {e}"))
+                },
+                move |result| match result {
+                    Ok(Ok(())) => {
+                        // Apply theme immediately
+                        apply_theme(candidate.ui.theme);
+                        *app.config.borrow_mut() = candidate;
+                        on_saved();
+                    }
+                    Ok(Err(message)) => show_config_error(&message),
+                    Err(failed) => show_config_error(&failed.message),
+                },
+            );
         }
     });
 
     dialog.present(Some(parent));
 }
 
-/// Validate the edited configuration, write it to disk and install it in the
-/// running application. On failure nothing is applied or persisted.
-fn apply_config(
-    edited: &Rc<RefCell<Config>>,
-    paths: &Paths,
-    app: &Rc<AppState>,
-) -> Result<(), String> {
-    let candidate = edited.borrow().clone();
-
-    candidate.validate().map_err(|e| e.to_string())?;
-
-    candidate
-        .save(paths)
-        .map_err(|e| format!("Could not write the configuration file: {e}"))?;
-
-    // Apply theme immediately
-    apply_theme(candidate.ui.theme);
-    *app.config.borrow_mut() = candidate;
-    Ok(())
+/// Show the "could not save preferences" alert.
+fn show_config_error(message: &str) {
+    let alert = gtk::AlertDialog::builder()
+        .message("Couldn't save preferences")
+        .detail(message)
+        .build();
+    alert.set_buttons(&["OK"]);
+    alert.set_default_button(0);
+    gtk::glib::spawn_future_local(async move {
+        let _ = alert.choose_future(None::<&gtk::Window>).await;
+    });
 }

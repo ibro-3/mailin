@@ -321,6 +321,16 @@ impl Engine {
         Ok(id)
     }
 
+    /// Wake the outbox sender after a message was queued outside the engine.
+    ///
+    /// UIs that build the message on a worker thread cannot use
+    /// [`Engine::queue_and_send`] (the engine handle is not `Clone`): they
+    /// store the message with [`Mailin::queue_outgoing`] and wake the sender
+    /// here so it does not sit out the rest of its wait.
+    pub fn wake_outbox(&self) {
+        self.state.outbox.notify_one();
+    }
+
     // Folder management
 
     /// Create a new folder on the server and locally.

@@ -91,3 +91,30 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
         "the worker panicked".to_owned()
     }
 }
+
+/// Run an async core operation on a background thread.
+///
+/// The GTK main loop is not a tokio reactor, so async core calls (network
+/// probes, plugin management) must not be awaited there: they either panic
+/// with "there is no reactor running" or block the UI while they run. This
+/// helper gives the work a short-lived runtime on a worker thread.
+pub fn spawn_async<F, T, D>(work: F, done: D)
+where
+    F: FnOnce(tokio::runtime::Runtime) -> T + Send + 'static,
+    T: Send + 'static,
+    D: FnOnce(WorkerResult<T>) + 'static,
+{
+    spawn_result(
+        move || match tokio::runtime::Runtime::new() {
+            Ok(runtime) => Ok(work(runtime)),
+            Err(error) => Err(WorkerFailed {
+                message: format!("could not start the network runtime: {error}"),
+            }),
+        },
+        move |result| match result {
+            Ok(Ok(value)) => done(Ok(value)),
+            Ok(Err(failed)) => done(Err(failed)),
+            Err(failed) => done(Err(failed)),
+        },
+    );
+}
