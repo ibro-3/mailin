@@ -66,13 +66,14 @@ pub fn present(app: Arc<AppState>, account: AccountId, account_email: String) ->
         let error = error.clone();
         let events = events.clone();
         let email = account_email.clone();
-        events.keep(ui::on_click(&import, move || {
+        let click = ui::on_click(&import, move || {
             if let Err(failure) =
                 import_dialog(&app, account, &email, &list, &window, &error, &events)
             {
                 tracing::error!(%failure, "could not open the PGP import dialog");
             }
-        })?);
+        })?;
+        events.keep(click);
     }
     {
         let app = Arc::clone(&app);
@@ -81,23 +82,31 @@ pub fn present(app: Arc<AppState>, account: AccountId, account_email: String) ->
         let error = error.clone();
         let events = events.clone();
         let email = account_email.clone();
-        events.keep(ui::on_click(&generate, move || {
+        let click = ui::on_click(&generate, move || {
             if let Err(failure) =
                 generate_dialog(&app, account, &email, &list, &window, &error, &events)
             {
                 tracing::error!(%failure, "could not open the PGP generate dialog");
             }
-        })?);
+        })?;
+        events.keep(click);
     }
 
     // Keep the revokers alive for as long as the window is open.
     let token = ui::keep_alive(&window);
     let cleanup = events.clone();
+    // The Closed handler must not release its own subscription: dropping the
+    // revoker from inside the callback frees the delegate while it is still
+    // running. Keep it in a set of its own, which is never cleared.
+    let closed_revokers = ui::Revokers::default();
+    let closed_keepalive = closed_revokers.clone();
     let closed = window.Closed(move |_, _| {
         cleanup.clear();
         ui::release(token);
+        // Hold on to this handler's own subscription for as long as it runs.
+        let _keepalive = &closed_keepalive;
     })?;
-    events.keep(closed);
+    closed_revokers.keep(closed);
 
     window.Activate()?;
     Ok(window)
@@ -164,7 +173,7 @@ fn populate(
         let error = error.clone();
         let events = events.clone();
         let fingerprint = key.fingerprint.clone();
-        events.keep(ui::on_click(&delete, move || {
+        let click = ui::on_click(&delete, move || {
             match app.mailin.delete_pgp_key(&account, &fingerprint) {
                 Ok(_) => {
                     let _ = ui::set_visible(&error, false);
@@ -175,7 +184,8 @@ fn populate(
                     let _ = ui::set_visible(&error, true);
                 }
             }
-        })?);
+        })?;
+        events.keep(click);
     }
     Ok(())
 }

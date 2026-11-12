@@ -1089,11 +1089,18 @@ pub fn present(
 
     let window_token = ui::keep_alive(&window);
     let cleanup = revokers.clone();
+    // The Closed handler must not release its own subscription: dropping the
+    // revoker from inside the callback frees the delegate while it is still
+    // running. Keep it in a set of its own, which is never cleared.
+    let closed_revokers = ui::Revokers::default();
+    let closed_keepalive = closed_revokers.clone();
     let closed = window.Closed(move |_, _| {
         cleanup.clear();
         ui::release(window_token);
+        // Hold on to this handler's own subscription for as long as it runs.
+        let _keepalive = &closed_keepalive;
     })?;
-    revokers.keep(closed);
+    closed_revokers.keep(closed);
     window.Activate()?;
     Ok(window)
 }

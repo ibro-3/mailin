@@ -54,18 +54,47 @@ pub fn release(id: u64) {
 /// Event subscriptions that live as long as their window.
 ///
 /// `EventRevoker::drop` unsubscribes, so the tokens must be stored somewhere
-/// owned by the same UI object. Lists that are rebuilt clear their [`Revokers`]
-/// first; dialogs clear theirs from the `Closed` callback.
+/// owned by the same UI object. Lists that are rebuilt replace their
+/// [`Revokers`] first; dialogs clear theirs from the `Closed` callback.
+///
+/// A subscription must never be released while its handler is running: the
+/// WinRT delegate would be freed underneath the running callback. A rebuild
+/// therefore *replaces* the subscriptions — the old ones are retired and
+/// only dropped by a later replace, once their handlers have returned.
 #[derive(Clone, Default)]
-pub struct Revokers(Rc<RefCell<Vec<EventRevoker>>>);
+pub struct Revokers(Rc<RevokerSet>);
+
+#[derive(Default)]
+struct RevokerSet {
+    /// The subscriptions that are in use.
+    current: RefCell<Vec<EventRevoker>>,
+    /// Subscriptions that a rebuild replaced. They are dropped by the next
+    /// replace, by which time their handlers have returned.
+    retired: RefCell<Vec<EventRevoker>>,
+}
 
 impl Revokers {
     pub fn keep(&self, revoker: EventRevoker) {
-        self.0.borrow_mut().push(revoker);
+        self.0.current.borrow_mut().push(revoker);
     }
 
+    /// Replace the subscriptions with a new set.
+    ///
+    /// The previous ones are retired instead of dropped: the caller may be a
+    /// handler whose own subscription is about to be released.
+    pub fn replace(&self) {
+        let previous = std::mem::take(&mut *self.0.current.borrow_mut());
+        // The subscriptions retired by the last replace are safe to drop
+        // now: their handlers have returned by then.
+        let older = std::mem::take(&mut *self.0.retired.borrow_mut());
+        drop(older);
+        *self.0.retired.borrow_mut() = previous;
+    }
+
+    /// Drop every subscription.
     pub fn clear(&self) {
-        self.0.borrow_mut().clear();
+        self.0.current.borrow_mut().clear();
+        self.0.retired.borrow_mut().clear();
     }
 }
 

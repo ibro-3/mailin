@@ -274,9 +274,10 @@ impl MainWindow {
 
     /// True when the selected folder is Trash (deletes there are permanent).
     fn current_folder_is_trash(&self) -> bool {
-        self.state()
-            .selection
-            .folder
+        // Copy the folder id out of the state first: the store read must not
+        // run while the state is locked.
+        let folder_id = self.state().selection.folder;
+        folder_id
             .and_then(|id| self.app.mailin.folder(id).ok().flatten())
             .is_some_and(|folder| folder.role == FolderRole::Trash)
     }
@@ -505,7 +506,9 @@ impl MainWindow {
                 self.refresh_folders();
             }
             None => {
-                let first = self.state().accounts[0].id;
+                let Some(first) = self.state().accounts.first().map(|account| account.id) else {
+                    return;
+                };
                 self.select_account(first);
             }
         }
@@ -526,12 +529,14 @@ impl MainWindow {
             }
         }
         self.programmatic.store(true, Ordering::Relaxed);
-        if let Some(index) = self
-            .state()
-            .accounts
-            .iter()
-            .position(|account| account.id == id)
-        {
+        // Look the index up in a scoped block: the guard must not be held
+        // while the combo box is updated, which can re-enter Rust code that
+        // locks the state again.
+        let index = {
+            let state = self.state();
+            state.accounts.iter().position(|account| account.id == id)
+        };
+        if let Some(index) = index {
             ui::select_index(&self.widgets.account_combo, index);
         }
         self.programmatic.store(false, Ordering::Relaxed);
@@ -598,7 +603,7 @@ impl MainWindow {
             .or_else(|| (!folders.is_empty()).then_some(0));
 
         let _ = ui::clear(&self.widgets.folder_list);
-        self.folder_events.clear();
+        self.folder_events.replace();
         for folder in &folders {
             if let Ok(row) = folder_row(folder, self) {
                 let this = Rc::clone(self);
@@ -615,7 +620,11 @@ impl MainWindow {
 
         match index {
             Some(index) => {
-                let folder = self.state().folders[index].clone();
+                // Look the folder up without indexing: the list may have
+                // changed in the meantime.
+                let Some(folder) = self.state().folders.get(index).cloned() else {
+                    return;
+                };
                 if self.state().selection.folder != Some(folder.id) {
                     self.select_folder(folder);
                 }
@@ -628,7 +637,7 @@ impl MainWindow {
     }
 
     fn clear_folders(self: &Rc<Self>) {
-        self.folder_events.clear();
+        self.folder_events.replace();
         let _ = ui::clear(&self.widgets.folder_list);
         let _ = ui::set_visible(&self.widgets.folder_empty, true);
         self.state().folders.clear();
@@ -769,7 +778,7 @@ impl MainWindow {
     fn show_outbox_entries(self: &Rc<Self>, entries: Vec<OutboxEntry>, title: String) {
         let now = format::now_unix();
         let empty = entries.is_empty();
-        self.message_events.clear();
+        self.message_events.replace();
         let _ = ui::clear(&self.widgets.message_list);
         // Outbox rows are not messages; drop any message selection behind them.
         self.reset_bulk_selection();
@@ -830,7 +839,7 @@ impl MainWindow {
                 .all(|(i, o)| *o == Some(i));
         let _ = identical_ids; // reserved for incremental fast-path (Windows CI)
 
-        self.message_events.clear();
+        self.message_events.replace();
         let _ = ui::clear(&self.widgets.message_list);
         self.checkboxes.borrow_mut().clear();
         // The ticked set never outlives the rows that are on screen.
@@ -984,7 +993,7 @@ impl MainWindow {
 
         let empty = flat_messages.is_empty();
 
-        self.message_events.clear();
+        self.message_events.replace();
         let _ = ui::clear(&self.widgets.message_list);
         self.checkboxes.borrow_mut().clear();
         self.checkboxes_by_id.borrow_mut().clear();
@@ -1094,7 +1103,7 @@ impl MainWindow {
     }
 
     fn clear_messages(self: &Rc<Self>) {
-        self.message_events.clear();
+        self.message_events.replace();
         let _ = ui::clear(&self.widgets.message_list);
         self.reset_bulk_selection();
         {
@@ -1294,18 +1303,25 @@ impl MainWindow {
 
     // Helper: find the header for a message, preferring cached list over store lookup
     fn header_for(&self, message_id: MessageId) -> Option<MessageHeader> {
-        self.state()
-            .messages
-            .iter()
-            .find(|message| message.id == message_id)
-            .cloned()
-            .or_else(|| self.app.mailin.message(message_id).ok().flatten())
+        // The cached lookup must not hold the state lock while the store is
+        // read, so the list is searched in a scoped block.
+        let cached = {
+            let state = self.state();
+            state
+                .messages
+                .iter()
+                .find(|message| message.id == message_id)
+                .cloned()
+        };
+        cached.or_else(|| self.app.mailin.message(message_id).ok().flatten())
     }
 
     // Whether the account behind the current selection trusts `domain` for
     // remote content. Reads from the store so changes via the account dialog
     // or the banner's trust button are picked up immediately.
     fn sender_domain_allowed(&self, domain: &str) -> bool {
+        // Copy the account id out of the state first: the store read must
+        // not run while the state is locked.
         let account = self.state().selection.account;
         match account {
             Some(id) => self
@@ -1569,7 +1585,7 @@ impl MainWindow {
     }
 
     fn render_attachments(self: &Rc<Self>, message_id: MessageId) {
-        self.attachment_events.clear();
+        self.attachment_events.replace();
         let _ = ui::clear(&self.widgets.attachments_panel);
         let attachments = self
             .app
@@ -2245,8 +2261,7 @@ impl MainWindow {
             }
         };
         let mut state = self.state();
-        if new_idx < state.messages.len() {
-            let msg_id = state.messages[new_idx].id;
+        if let Some(msg_id) = state.messages.get(new_idx).map(|message| message.id) {
             state.selected.clear();
             state.selected.insert(msg_id);
             drop(state);
@@ -2274,7 +2289,7 @@ impl MainWindow {
                     .messages
                     .iter()
                     .position(|m| m.id == last)
-                    .map(|i| (i + 1).min(state.messages.len() - 1))
+                    .map(|i| (i + 1).min(state.messages.len().saturating_sub(1)))
                     .unwrap_or(0)
             } else {
                 // Nothing selected, select the first message
@@ -2282,8 +2297,7 @@ impl MainWindow {
             }
         };
         let mut state = self.state();
-        if new_idx < state.messages.len() {
-            let msg_id = state.messages[new_idx].id;
+        if let Some(msg_id) = state.messages.get(new_idx).map(|message| message.id) {
             state.selected.clear();
             state.selected.insert(msg_id);
             drop(state);
@@ -2424,10 +2438,10 @@ impl MainWindow {
     /// Draft for a brand-new message: an empty body that already carries the
     /// selected account's signature, so the caret starts above it.
     fn new_draft(&self) -> OutgoingMessage {
-        let signature = self
-            .state()
-            .selection
-            .account
+        // Copy the account id out of the state first: the store read must not
+        // run while the state is locked.
+        let account_id = self.state().selection.account;
+        let signature = account_id
             .and_then(|account_id| self.app.mailin.account(&account_id).ok().flatten())
             .map(|account| mailin_core::compose::signature_block(&account.signature))
             .unwrap_or_default();
@@ -2773,8 +2787,11 @@ impl MainWindow {
 
     /// Show the keyboard shortcuts help dialog.
     fn show_shortcuts_help(self: &Rc<Self>) {
-        // Re-activate the help dialog when it is already open.
-        if let Some(existing) = self.widgets.shortcuts_window.borrow().as_ref() {
+        // Re-activate the help dialog when it is already open. The dialog is
+        // cloned out of the cell first: showing it can close it again, and
+        // the close handler needs the cell mutably.
+        let existing = self.widgets.shortcuts_window.borrow().clone();
+        if let Some(existing) = existing {
             let _ = existing.ShowAsync();
             return;
         }
@@ -3851,7 +3868,10 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
         move || {
             let mode = !this.html_mode.load(Ordering::Relaxed);
             this.html_mode.store(mode, Ordering::Relaxed);
-            if let Some(message_id) = this.state().selection.message {
+            // Copy the id out of the state: the guard must not be held
+            // while `render_body` locks the state again.
+            let message_id = this.state().selection.message;
+            if let Some(message_id) = message_id {
                 this.render_body(message_id);
             }
         }
@@ -3859,7 +3879,10 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     this.events.keep(ui::on_click(&this.widgets.pgp_action, {
         let this = Rc::clone(this);
         move || {
-            if let Some(message_id) = this.state().selection.message {
+            // Copy the id out of the state: the guard must not be held
+            // while the body is decrypted.
+            let message_id = this.state().selection.message;
+            if let Some(message_id) = message_id {
                 this.decrypt_pgp_body(message_id);
             }
         }
@@ -4296,7 +4319,7 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
         ui::stretch_horizontal(&error_label)?;
         ui::append(&line, &error_label)?;
     } else {
-        let attempts_label = ui::text(&format!("attempt {}/5", entry.attempts + 1))?;
+        let attempts_label = ui::text(&format!("attempt {}/5", entry.attempts.saturating_add(1)))?;
         ui::append(&line, &attempts_label)?;
     }
     ui::append(&column, &line)?;

@@ -933,14 +933,21 @@ pub fn present(
     let attachments_cleanup = attachment_events.clone();
     let save_for_close = Arc::clone(&save_draft);
     let timer_for_close = timer.clone();
+    // The Closed handler must not release its own subscription: dropping the
+    // revoker from inside the callback frees the delegate while it is still
+    // running. Keep it in a set of its own, which is never cleared.
+    let closed_revokers = ui::Revokers::default();
+    let closed_keepalive = closed_revokers.clone();
     let closed = window.Closed(move |_, _| {
         save_for_close(false);
         let _ = timer_for_close.Stop();
         cleanup.clear();
         attachments_cleanup.clear();
         ui::release(window_token);
+        // Hold on to this handler's own subscription for as long as it runs.
+        let _keepalive = &closed_keepalive;
     })?;
-    revokers.keep(closed);
+    closed_revokers.keep(closed);
     window.Activate()?;
     Ok(window)
 }
@@ -963,7 +970,7 @@ fn rebuild_attachments(
     events: &ui::Revokers,
     mark_dirty: Option<Rc<dyn Fn()>>,
 ) {
-    events.clear();
+    events.replace();
     let _ = ui::set_visible(
         title,
         attachments.lock().map(|a| !a.is_empty()).unwrap_or(false),
