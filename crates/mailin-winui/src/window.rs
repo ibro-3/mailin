@@ -75,6 +75,9 @@ struct State {
     /// count shown in the bulk bar matches what is on screen.
     selected: BTreeSet<MessageId>,
     outbox_entries: Vec<OutboxEntry>,
+    /// The outbox entry the user picked in the list. The outbox actions work
+    /// on this entry, never on an arbitrary one.
+    outbox_selected: Option<i64>,
     show_outbox: bool,
     remote_allowed: Option<MessageId>,
     pending_attachment: Option<PendingAttachment>,
@@ -164,6 +167,13 @@ pub struct MainWindow {
     folder_events: ui::Revokers,
     message_events: ui::Revokers,
     attachment_events: ui::Revokers,
+    /// The modal dialogs that are open. The wrapper owns the only strong
+    /// reference the front-end holds on the XAML object, so it has to
+    /// outlive the call that opened the dialog.
+    dialogs: std::cell::RefCell<Vec<ContentDialog>>,
+    /// The event subscriptions of the open dialogs. They are revoked when
+    /// the dialog closes.
+    dialog_events: ui::Revokers,
     /// The row checkboxes, parallel to `State::messages`, used to tick or
     /// untick the whole list at once (Ctrl+A, Escape, bulk actions).
     checkboxes: std::cell::RefCell<Vec<CheckBox>>,
@@ -305,6 +315,15 @@ impl MainWindow {
                 None
             }
         }
+    }
+
+    /// Keep a modal dialog alive while it is shown. Only one dialog is open
+    /// at a time — a `ContentDialog` is modal — so opening a new one retires
+    /// the previous one.
+    fn keep_dialog(&self, dialog: ContentDialog) {
+        let mut dialogs = self.dialogs.borrow_mut();
+        dialogs.clear();
+        dialogs.push(dialog);
     }
 
     /// Show a simple toast notification with no action buttons.
@@ -847,6 +866,16 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.archive_button, false);
         let _ = ui::set_visible(&self.widgets.trash_button, false);
         let _ = ui::set_visible(&self.widgets.junk_button, false);
+        // The selection survives a refresh as long as the entry is still in
+        // the list; an entry that disappeared is not selected any more.
+        {
+            let mut state = self.state();
+            let selected = state.outbox_selected;
+            let still_there =
+                selected.is_some_and(|id| state.outbox_entries.iter().any(|entry| entry.id == id));
+            state.outbox_selected = if still_there { selected } else { None };
+        }
+        self.update_outbox_actions();
     }
 
     fn show_messages(self: &Rc<Self>, messages: Vec<MessageHeader>, title: String, more: bool) {
@@ -1224,71 +1253,149 @@ impl MainWindow {
 
     // ----------------------------------------------------------- outbox actions
 
+    /// Remember the picked outbox entry and enable the actions that work on
+    /// it. The entry id identifies the entry, so the selection survives a
+    /// refresh as long as the entry is still in the list.
     fn select_outbox_entry(self: &Rc<Self>, entry: OutboxEntry) {
-        // Update selection - could highlight the row or show actions
-        // For now, we just track it
-        let _ = entry;
+        {
+            let mut state = self.state();
+            state.outbox_selected = Some(entry.id);
+        }
+        self.update_outbox_actions();
+    }
+
+    /// Enable or disable the outbox actions. They only make sense with a
+    /// selected entry: acting on an arbitrary one would be a guess.
+    fn update_outbox_actions(&self) {
+        let selected = self.state().outbox_selected.is_some();
+        let _ = ui::set_enabled(&self.widgets.outbox_retry_button, selected);
+        let _ = ui::set_enabled(&self.widgets.outbox_discard_button, selected);
+        let _ = ui::set_enabled(&self.widgets.outbox_edit_button, selected);
+    }
+
+    /// The outbox entry the user picked, if it is still in the list.
+    fn selected_outbox_entry(&self) -> Option<OutboxEntry> {
+        let id = self.state().outbox_selected?;
+        self.state()
+            .outbox_entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .cloned()
     }
 
     fn outbox_retry_selected(self: &Rc<Self>) {
         let Some(account_id) = self.state().selection.account else {
             return;
         };
-        // Get the selected row index from the message_list
-        // For simplicity, we'll retry all selected entries
-        let entries = self.state().outbox_entries.clone();
-        // In a real implementation, we'd track which row is selected
-        // For now, retry the first entry if any
-        if let Some(entry) = entries.first() {
-            self.app.engine.retry_outbox(account_id, entry.id);
-            self.show_banner("Retrying…");
-        }
+        let Some(entry) = self.selected_outbox_entry() else {
+            return;
+        };
+        self.app.engine.retry_outbox(account_id, entry.id);
+        self.show_banner("Retrying…");
     }
 
+    /// Discarding a queued message cannot be undone, so the user has to
+    /// confirm it — and the confirmation names the entry that is about to go.
     fn outbox_discard_selected(self: &Rc<Self>) {
         let Some(account_id) = self.state().selection.account else {
             return;
         };
-        let entries = self.state().outbox_entries.clone();
-        if let Some(entry) = entries.first() {
-            self.app.engine.cancel_outbox(account_id, entry.id);
-            self.show_banner("Discarding…");
+        let Some(entry) = self.selected_outbox_entry() else {
+            return;
+        };
+        let Ok(xaml_root) = ui::window_xaml_root(&self.widgets.window) else {
+            self.show_error("The window is not ready yet");
+            return;
+        };
+        let Some(dialog) = self.require(ContentDialog::new(), "create the confirmation") else {
+            return;
+        };
+        let Some(title) = self.require(ui::text("Discard queued message?"), "write the title")
+        else {
+            return;
+        };
+        let _ = dialog.SetTitle(&title);
+        let Some(body) = self.require(
+            ui::text(&format!(
+                "The queued message to {} will be removed from the outbox. This cannot be undone.",
+                outbox_entry_recipient(&entry)
+            )),
+            "write the confirmation text",
+        ) else {
+            return;
+        };
+        let _ = ui::set_content(&dialog, &body);
+        let _ = dialog.SetPrimaryButtonText("Discard");
+        let _ = dialog.SetCloseButtonText("Cancel");
+        let _ = dialog.SetDefaultButton(ContentDialogButton::Close);
+        // The previous dialog is closed by now: its subscriptions can go.
+        self.dialog_events.replace();
+        let this = Rc::clone(self);
+        let entry_id = entry.id;
+        if let Ok(revoker) = dialog.PrimaryButtonClick(move |_, _| {
+            this.app.engine.cancel_outbox(account_id, entry_id);
+            this.show_banner("Discarding…");
+            // The entry is gone, so the selection must not point at it any
+            // more.
+            this.clear_outbox_selection();
+        }) {
+            self.dialog_events.keep(revoker);
         }
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
+        // The dialog object is shared with the front-end after this call:
+        // keep it alive until the next one replaces it.
+        self.keep_dialog(dialog.clone());
+        let _ = dialog.ShowAsync();
     }
 
     fn outbox_edit_selected(self: &Rc<Self>) {
         let Some(account_id) = self.state().selection.account else {
             return;
         };
-        let entries = self.state().outbox_entries.clone();
-        if let Some(entry) = entries.first()
-            && let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json)
-        {
-            let mut draft = OutgoingMessage {
-                from_name: String::new(),
-                from_addr: env.from,
-                to: env.to.join(", "),
-                cc: env.cc.join(", "),
-                bcc: env.bcc.join(", "),
-                subject: String::new(),
-                body: String::new(),
-                html_body: None,
-                in_reply_to: None,
-                references: Vec::new(),
-                draft_key: None,
-                attachments: Vec::new(),
-            };
-            // Parse the raw message to get subject and body
-            if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
-                draft.subject = parsed.subject().unwrap_or_default().to_owned();
-                if let Some(text) = parsed.body_text(0) {
-                    draft.body = text.to_string();
-                }
+        let Some(entry) = self.selected_outbox_entry() else {
+            return;
+        };
+        let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) else {
+            self.show_error("The queued message has no readable envelope");
+            return;
+        };
+        let mut draft = OutgoingMessage {
+            from_name: String::new(),
+            from_addr: env.from,
+            to: env.to.join(", "),
+            cc: env.cc.join(", "),
+            bcc: env.bcc.join(", "),
+            subject: String::new(),
+            body: String::new(),
+            html_body: None,
+            in_reply_to: None,
+            references: Vec::new(),
+            draft_key: None,
+            attachments: Vec::new(),
+        };
+        // Parse the raw message to get subject and body
+        if let Some(parsed) = mail_parser::MessageParser::default().parse(&entry.raw) {
+            draft.subject = parsed.subject().unwrap_or_default().to_owned();
+            if let Some(text) = parsed.body_text(0) {
+                draft.body = text.to_string();
             }
-            // Cancel the original entry so it doesn't get sent again
-            self.app.engine.cancel_outbox(account_id, entry.id);
-            self.open_compose(draft);
         }
+        // The composer is opened first: cancelling the queued entry before
+        // the draft is on screen would destroy the message whenever opening
+        // the composer fails.
+        if self.open_compose_checked(draft) {
+            self.app.engine.cancel_outbox(account_id, entry.id);
+            self.clear_outbox_selection();
+        }
+    }
+
+    /// Forget the picked outbox entry and disable the actions that need one.
+    fn clear_outbox_selection(&self) {
+        {
+            let mut state = self.state();
+            state.outbox_selected = None;
+        }
+        self.update_outbox_actions();
     }
 
     fn render_headers(&self, message: &MessageHeader) {
@@ -2480,9 +2587,16 @@ impl MainWindow {
     }
 
     fn open_compose(self: &Rc<Self>, draft: OutgoingMessage) {
+        self.open_compose_checked(draft);
+    }
+
+    /// Open the composer and report whether it opened. Callers that move a
+    /// message (the outbox "Edit" action) need the answer: the queued entry
+    /// must only be cancelled once the draft is on screen.
+    fn open_compose_checked(self: &Rc<Self>, draft: OutgoingMessage) -> bool {
         let Some(account_id) = self.state().selection.account else {
             self.show_banner("Add an account before composing mail");
-            return;
+            return false;
         };
         let this = Rc::clone(self);
         match compose::present(Arc::clone(&self.app), account_id, draft, move || {
@@ -2490,8 +2604,11 @@ impl MainWindow {
             // main window is behind other windows.
             this.show_simple_toast("Mailin", "Message queued in the outbox");
         }) {
-            Ok(_) => {}
-            Err(error) => self.show_error(&format!("Could not open the composer: {error:#}")),
+            Ok(_) => true,
+            Err(error) => {
+                self.show_error(&format!("Could not open the composer: {error:#}"));
+                false
+            }
         }
     }
 
@@ -3475,6 +3592,8 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         folder_events: ui::Revokers::default(),
         message_events: ui::Revokers::default(),
         attachment_events: ui::Revokers::default(),
+        dialogs: std::cell::RefCell::new(Vec::new()),
+        dialog_events: ui::Revokers::default(),
         checkboxes: std::cell::RefCell::new(Vec::new()),
         checkboxes_by_id: std::cell::RefCell::new(HashMap::new()),
         widgets: Widgets {
@@ -4348,6 +4467,25 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
     let button = ui::content_button(&column, Some(&format!("Outbox entry: {}", subject)), None)?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
     Ok(button)
+}
+
+/// The recipient of a queued message, used in the discard confirmation so
+/// the user can see which message is about to go.
+fn outbox_entry_recipient(entry: &OutboxEntry) -> String {
+    let Ok(env) = serde_json::from_str::<OutgoingEnvelope>(&entry.envelope_json) else {
+        return "an unknown recipient".to_owned();
+    };
+    let recipients = env
+        .recipients()
+        .into_iter()
+        .filter(|address| !address.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if recipients.is_empty() {
+        "an unknown recipient".to_owned()
+    } else {
+        recipients
+    }
 }
 
 /// Build the keyboard shortcuts help dialog using XAML (ContentDialog for proper modality).
