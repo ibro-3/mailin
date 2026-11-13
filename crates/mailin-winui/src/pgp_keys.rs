@@ -64,12 +64,18 @@ pub fn present(app: Arc<AppState>, account: AccountId, account_email: String) ->
         let list = list.clone();
         let window = window.clone();
         let error = error.clone();
-        let events = events.clone();
+        let events_for_click = events.clone();
         let email = account_email.clone();
         let click = ui::on_click(&import, move || {
-            if let Err(failure) =
-                import_dialog(&app, account, &email, &list, &window, &error, &events)
-            {
+            if let Err(failure) = import_dialog(
+                &app,
+                account,
+                &email,
+                &list,
+                &window,
+                &error,
+                &events_for_click,
+            ) {
                 tracing::error!(%failure, "could not open the PGP import dialog");
             }
         })?;
@@ -80,12 +86,18 @@ pub fn present(app: Arc<AppState>, account: AccountId, account_email: String) ->
         let list = list.clone();
         let window = window.clone();
         let error = error.clone();
-        let events = events.clone();
+        let events_for_click = events.clone();
         let email = account_email.clone();
         let click = ui::on_click(&generate, move || {
-            if let Err(failure) =
-                generate_dialog(&app, account, &email, &list, &window, &error, &events)
-            {
+            if let Err(failure) = generate_dialog(
+                &app,
+                account,
+                &email,
+                &list,
+                &window,
+                &error,
+                &events_for_click,
+            ) {
                 tracing::error!(%failure, "could not open the PGP generate dialog");
             }
         })?;
@@ -171,13 +183,13 @@ fn populate(
         let list = list.clone();
         let window = window.clone();
         let error = error.clone();
-        let events = events.clone();
+        let events_for_populate = events.clone();
         let fingerprint = key.fingerprint.clone();
         let click = ui::on_click(&delete, move || {
             match app.mailin.delete_pgp_key(&account, &fingerprint) {
                 Ok(_) => {
                     let _ = ui::set_visible(&error, false);
-                    let _ = populate(&list, &app, account, &window, &error, &events);
+                    let _ = populate(&list, &app, account, &window, &error, &events_for_populate);
                 }
                 Err(failure) => {
                     let _ = error.SetText(&format!("Could not delete the key: {failure}"));
@@ -218,20 +230,23 @@ fn import_dialog(
     dialog.SetPrimaryButtonText("Import")?;
     dialog.SetCloseButtonText("Cancel")?;
     dialog.SetDefaultButton(ContentDialogButton::Primary)?;
+    let root = ui::window_xaml_root(window)?;
     let element: mailin_winui_sys::IUIElement = dialog.cast()?;
-    element.SetXamlRoot(ui::window_xaml_root(window)?)?;
+    element.SetXamlRoot(&root)?;
 
     let app = Arc::clone(app);
     let list = list.clone();
-    let window = window.clone();
-    let error = error.clone();
-    let events = events.clone();
-    events.keep(dialog.PrimaryButtonClick(move |dialog, _| {
+    let window = window.to_owned();
+    let error = error.to_owned();
+    let events = events.to_owned();
+    // The handler owns its own copy: the revoker set stays with this scope.
+    let events_for_populate = events.clone();
+    events.keep(dialog.PrimaryButtonClick(move |sender, _| {
         let armored = ui::text_value(&view);
         if armored.trim().is_empty() {
             let _ = error.SetText("No key data provided");
             let _ = ui::set_visible(&error, true);
-            return Ok(());
+            return;
         }
         let result = if armored.contains("PRIVATE KEY BLOCK") {
             app.mailin.import_pgp_secret_key(&account, &armored)
@@ -242,15 +257,16 @@ fn import_dialog(
             Ok(key) => {
                 let _ = error.SetText(&format!("Imported key {}", key.fingerprint));
                 let _ = ui::set_visible(&error, true);
-                let _ = populate(&list, &app, account, &window, &error, &events);
+                let _ = populate(&list, &app, account, &window, &error, &events_for_populate);
             }
             Err(failure) => {
                 let _ = error.SetText(&format!("Could not import the key: {failure}"));
                 let _ = ui::set_visible(&error, true);
             }
         }
-        let _ = dialog.Hide();
-        Ok(())
+        if let Some(dialog) = sender.as_ref() {
+            let _ = dialog.Hide();
+        }
     })?);
 
     let _ = dialog.ShowAsync()?;
@@ -281,34 +297,38 @@ fn generate_dialog(
     dialog.SetPrimaryButtonText("Generate")?;
     dialog.SetCloseButtonText("Cancel")?;
     dialog.SetDefaultButton(ContentDialogButton::Primary)?;
+    let root = ui::window_xaml_root(window)?;
     let element: mailin_winui_sys::IUIElement = dialog.cast()?;
-    element.SetXamlRoot(ui::window_xaml_root(window)?)?;
+    element.SetXamlRoot(&root)?;
 
     let app = Arc::clone(app);
     let list = list.clone();
-    let window = window.clone();
-    let error = error.clone();
-    let events = events.clone();
-    events.keep(dialog.PrimaryButtonClick(move |dialog, _| {
+    let window = window.to_owned();
+    let error = error.to_owned();
+    let events = events.to_owned();
+    // The handler owns its own copy: the revoker set stays with this scope.
+    let events_for_populate = events.clone();
+    events.keep(dialog.PrimaryButtonClick(move |sender, _| {
         let user_id = ui::text_value(&entry);
         if user_id.trim().is_empty() {
             let _ = error.SetText("Enter a user ID (name and email)");
             let _ = ui::set_visible(&error, true);
-            return Ok(());
+            return;
         }
         match app.mailin.generate_pgp_key(&account, user_id.trim()) {
             Ok(key) => {
                 let _ = error.SetText(&format!("Generated key {}", key.fingerprint));
                 let _ = ui::set_visible(&error, true);
-                let _ = populate(&list, &app, account, &window, &error, &events);
+                let _ = populate(&list, &app, account, &window, &error, &events_for_populate);
             }
             Err(failure) => {
                 let _ = error.SetText(&format!("Could not generate a key: {failure}"));
                 let _ = ui::set_visible(&error, true);
             }
         }
-        let _ = dialog.Hide();
-        Ok(())
+        if let Some(dialog) = sender.as_ref() {
+            let _ = dialog.Hide();
+        }
     })?);
 
     let _ = dialog.ShowAsync()?;

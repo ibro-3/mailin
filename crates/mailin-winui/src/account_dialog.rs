@@ -9,10 +9,13 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use mailin_core::autoconfig::{self, Suggestion};
 use mailin_core::{
-    Account, AccountId, AuthMethod, Contact, OAuth2Tokens, OAuthProvider, PendingAuthorization,
-    Security, ServerSettings,
+    Account, AccountId, AuthMethod, OAuth2Tokens, OAuthProvider, PendingAuthorization, Security,
+    ServerSettings,
 };
-use mailin_winui_sys::{ComboBox, Grid, PasswordBox, TextBlock, TextBox, Window};
+use mailin_winui_sys::{
+    AutomationProperties, ComboBox, Grid, IFrameworkElement, IListViewBase, IPanel, PasswordBox,
+    TextBlock, TextBox, Window,
+};
 use secrecy::SecretString;
 use windows_core::Interface;
 
@@ -294,7 +297,7 @@ pub fn present(
     )?;
     signature.SetAcceptsReturn(true)?;
     signature.SetTextWrapping(mailin_winui_sys::TextWrapping::Wrap)?;
-    signature.SetHeight(120.0)?;
+    ui::height(&signature, 120.0)?;
     let signature_html_heading = ui::subheading("HTML signature")?;
     let signature_html = ui::text_box("", Some("HTML signature"))?;
     signature_html.SetPlaceholderText(
@@ -302,7 +305,7 @@ pub fn present(
     )?;
     signature_html.SetAcceptsReturn(true)?;
     signature_html.SetTextWrapping(mailin_winui_sys::TextWrapping::Wrap)?;
-    signature_html.SetHeight(120.0)?;
+    ui::height(&signature_html, 120.0)?;
     ui::append(&form, &signature_heading)?;
     ui::append(&form, &signature)?;
     ui::append(&form, &signature_html_heading)?;
@@ -317,8 +320,10 @@ pub fn present(
     ui::append(&form, &trust_desc)?;
     let trust_list =
         mailin_winui_sys::ListView::new().context("could not create the trust list")?;
-    trust_list.SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
-    trust_list.SetHeight(120.0)?;
+    trust_list
+        .cast::<IListViewBase>()?
+        .SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
+    ui::height(&trust_list, 120.0)?;
     ui::append(&form, &trust_list)?;
 
     // Contacts manager: per-account contacts for compose autocomplete.
@@ -330,8 +335,10 @@ pub fn present(
     ui::append(&form, &contacts_desc)?;
     let contacts_list =
         mailin_winui_sys::ListView::new().context("could not create the contacts list")?;
-    contacts_list.SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
-    contacts_list.SetHeight(120.0)?;
+    contacts_list
+        .cast::<IListViewBase>()?
+        .SetSelectionMode(mailin_winui_sys::ListViewSelectionMode::None)?;
+    ui::height(&contacts_list, 120.0)?;
     ui::append(&form, &contacts_list)?;
 
     let scroller = ui::scroll(&form)?;
@@ -406,9 +413,14 @@ pub fn present(
     fn repopulate_trust_list(
         trust_container: &mailin_winui_sys::StackPanel,
         allowlist: &Arc<Mutex<Vec<String>>>,
+        revokers: &ui::Revokers,
     ) -> Result<()> {
+        // The rows are rebuilt from scratch, so the previous handlers go away
+        // with them.
+        revokers.replace();
         let children = trust_container
-            .Children()
+            .cast::<IPanel>()
+            .and_then(|panel| panel.Children())
             .context("could not read the trust list")?;
         let _ = children.Clear();
         for domain in allowlist
@@ -418,7 +430,9 @@ pub fn present(
         {
             let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
             let label = ui::text(domain)?;
-            label.SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
+            label
+                .cast::<IFrameworkElement>()?
+                .SetVerticalAlignment(mailin_winui_sys::VerticalAlignment::Center)?;
             ui::stretch_horizontal(&label)?;
             ui::append(&row, &label)?;
             let remove = ui::button(
@@ -427,29 +441,28 @@ pub fn present(
                 Some(&format!("Remove {domain} from trusted senders")),
             )?;
             let tokens = design_tokens::tokens();
-            remove.SetPadding(mailin_winui_sys::Thickness {
-                left: tokens.spacing.xs,
-                top: 2.0,
-                right: tokens.spacing.xs,
-                bottom: 2.0,
-            })?;
+            ui::padding(&remove, tokens.spacing.xs, 2.0, tokens.spacing.xs, 2.0)?;
             ui::append(&row, &remove)?;
             children.Append(&row)?;
 
             let allowlist = Arc::clone(allowlist);
             let trust_container = trust_container.clone();
+            let revokers_for_handler = revokers.clone();
             let domain = domain.clone();
-            ui::on_click(&remove, move || {
+            revokers.keep(ui::on_click(&remove, move || {
                 allowlist
                     .lock()
                     .unwrap_or_else(|err| err.into_inner())
                     .retain(|entry| entry != &domain);
-                let _ = repopulate_trust_list(&trust_container, &allowlist);
-            })?;
+                let _ = repopulate_trust_list(&trust_container, &allowlist, &revokers_for_handler);
+            })?);
         }
         Ok(())
     }
-    repopulate_trust_list(&trust_container, &allowlist)?;
+    // The trust list is rebuilt whenever a domain is removed. Its handlers
+    // live in a set of their own so a rebuild can replace them.
+    let trust_revokers = ui::Revokers::default();
+    repopulate_trust_list(&trust_container, &allowlist, &trust_revokers)?;
 
     // Contacts container: a vertical stack of rows (email + name + edit/remove buttons)
     let contacts_container = ui::stack_xs(mailin_winui_sys::Orientation::Vertical)?;
@@ -464,7 +477,8 @@ pub fn present(
         revokers: &ui::Revokers,
     ) -> Result<()> {
         let children = contacts_container
-            .Children()
+            .cast::<IPanel>()
+            .and_then(|panel| panel.Children())
             .context("could not read the contacts list")?;
         let _ = children.Clear();
         if let Ok(contacts) = app.mailin.store().list_contacts(&account_id) {
@@ -486,12 +500,7 @@ pub fn present(
                     Some("Edit this contact"),
                 )?;
                 let tokens = design_tokens::tokens();
-                edit.SetPadding(mailin_winui_sys::Thickness {
-                    left: tokens.spacing.xs,
-                    top: 2.0,
-                    right: tokens.spacing.xs,
-                    bottom: 2.0,
-                })?;
+                ui::padding(&edit, tokens.spacing.xs, 2.0, tokens.spacing.xs, 2.0)?;
                 ui::append(&row, &edit)?;
 
                 let remove = ui::button(
@@ -499,44 +508,37 @@ pub fn present(
                     Some(&format!("Remove contact {}", contact.email)),
                     Some("Delete this contact"),
                 )?;
-                remove.SetPadding(mailin_winui_sys::Thickness {
-                    left: tokens.spacing.xs,
-                    top: 2.0,
-                    right: tokens.spacing.xs,
-                    bottom: 2.0,
-                })?;
+                ui::padding(&remove, tokens.spacing.xs, 2.0, tokens.spacing.xs, 2.0)?;
                 ui::append(&row, &remove)?;
 
                 children.Append(&row)?;
 
-                let app = Arc::clone(app);
-                let contacts_container = contacts_container.clone();
-                let window = window.clone();
-                let revokers = revokers.clone();
-                let account_id = account_id;
+                let app_for_edit = Arc::clone(app);
+                let window_for_edit = window.clone();
+                let revokers_for_edit = revokers.clone();
                 let contact_email = contact.email.clone();
                 let contact_name = contact.display_name.clone();
-                ui::on_click(&edit, move || {
+                revokers.keep(ui::on_click(&edit, move || {
                     if let Err(failure) = new_contact_dialog(
-                        &window,
-                        Arc::clone(&app),
+                        &window_for_edit,
+                        &app_for_edit,
                         account_id,
                         &contact_email,
                         &contact_name,
                         true, // is_edit
+                        &revokers_for_edit,
                     ) {
                         tracing::error!(%failure, "could not open edit contact dialog");
                     }
-                })?;
+                })?);
 
-                let app = Arc::clone(app);
+                let app_for_remove = Arc::clone(app);
                 let contacts_container = contacts_container.clone();
                 let window = window.clone();
-                let revokers = revokers.clone();
-                let account_id = account_id;
+                let revokers_for_handler = revokers.clone();
                 let contact_email = contact.email.clone();
-                ui::on_click(&remove, move || {
-                    if let Err(failure) = app
+                revokers.keep(ui::on_click(&remove, move || {
+                    if let Err(failure) = app_for_remove
                         .mailin
                         .store()
                         .delete_contact(&account_id, &contact_email)
@@ -545,18 +547,22 @@ pub fn present(
                     } else {
                         let _ = repopulate_contacts_list(
                             &contacts_container,
-                            &app,
+                            &app_for_remove,
                             account_id,
                             &window,
-                            &revokers,
+                            &revokers_for_handler,
                         );
                     }
-                })?;
+                })?);
             }
         }
         Ok(())
     }
-    repopulate_contacts_list(&contacts_container, &app, account_id, &window, &revokers)?;
+    // Contacts belong to a saved account, so the list is only populated when
+    // an existing account is being edited.
+    if let Some(account) = existing_account.as_ref() {
+        repopulate_contacts_list(&contacts_container, &app, account.id, &window, &revokers)?;
+    }
 
     // Pre-fill form if editing
     if let Some(account) = existing_account.clone() {
@@ -845,6 +851,7 @@ pub fn present(
             signature_html: rows.signature_html.clone(),
             trust_container: rows.trust_container.clone(),
             allowlist: Arc::clone(&rows.allowlist),
+            contacts_container: rows.contacts_container.clone(),
         };
         let error = error.clone();
         move || {
@@ -957,6 +964,7 @@ pub fn present(
             signature_html: rows.signature_html.clone(),
             trust_container: rows.trust_container.clone(),
             allowlist: Arc::clone(&rows.allowlist),
+            contacts_container: rows.contacts_container.clone(),
         };
         let error = error.clone();
         move || {
@@ -1035,7 +1043,7 @@ pub fn present(
             let shown = (|| -> Result<()> {
                 let dialog = mailin_winui_sys::ContentDialog::new()
                     .context("could not create the remove confirmation")?;
-                dialog.SetTitle("Remove account?")?;
+                dialog.SetTitle(&ui::text("Remove account?")?)?;
                 let body = ui::text(&format!(
                     "Are you sure you want to remove '{email}'? This deletes the account and all locally stored mail on this device. This cannot be undone."
                 ))?;
@@ -1058,13 +1066,13 @@ pub fn present(
                         let outcome = mailin.remove_account(&account_id);
                         let closed = window.DispatcherQueue().and_then(|queue| {
                             let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
-                                match outcome {
+                                match &outcome {
                                     Ok(()) => {
                                         let _ = window.Close();
                                     }
-                                    Err(error) => {
+                                    Err(failure) => {
                                         let _ = error.SetText(&format!(
-                                            "Could not remove the account: {error}"
+                                            "Could not remove the account: {failure}"
                                         ));
                                         let _ = ui::set_visible(&error, true);
                                     }
@@ -1173,6 +1181,7 @@ fn new_contact_dialog(
     current_email: &str,
     current_name: &str,
     is_edit: bool,
+    revokers: &ui::Revokers,
 ) -> Result<()> {
     let (title, save_label) = if is_edit {
         ("Edit Contact", "Save")
@@ -1181,7 +1190,7 @@ fn new_contact_dialog(
     };
 
     let dialog = mailin_winui_sys::ContentDialog::new()?;
-    dialog.SetTitle(title)?;
+    dialog.SetTitle(&ui::text(title)?)?;
     dialog.SetPrimaryButtonText(save_label)?;
     dialog.SetCloseButtonText("Cancel")?;
     dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Primary)?;
@@ -1202,18 +1211,20 @@ fn new_contact_dialog(
 
     ui::set_content(&dialog, &panel)?;
 
+    // A content dialog needs the parent's XAML root before it can be shown.
+    let element: mailin_winui_sys::IUIElement = dialog.cast()?;
+    element.SetXamlRoot(&ui::window_xaml_root(parent)?)?;
+
     let app = Arc::clone(app);
-    let parent = parent.clone();
-    let account_id = account_id;
     let current_email = current_email.to_owned();
 
-    dialog.PrimaryButtonClick({
+    // The revoker keeps both the handler and the dialog alive while it is
+    // shown: the handler owns a reference to the dialog.
+    revokers.keep(dialog.PrimaryButtonClick({
         let dialog = dialog.clone();
         let email_box = email_box.clone();
         let name_box = name_box.clone();
         let app = Arc::clone(&app);
-        let parent = parent.clone();
-        let account_id = account_id;
         let current_email = current_email.clone();
         move |_, _| {
             let email = ui::text_value(&email_box).trim().to_owned();
@@ -1233,7 +1244,7 @@ fn new_contact_dialog(
             }
             let _ = dialog.Hide();
         }
-    })?;
+    })?);
 
     let _ = dialog.ShowAsync()?;
     Ok(())
@@ -1272,6 +1283,8 @@ mod tests {
         draft.auth_method = AuthMethod::OAuth2;
         assert!(draft.build(true).is_err());
         draft.oauth2.access_token = "token".into();
+        // An OAuth2 account also needs the client id the tokens belong to.
+        draft.oauth2.client_id = "client-id".into();
         let account = draft.build(true).expect("OAuth2 draft");
         assert_eq!(account.imap.auth_method, AuthMethod::OAuth2);
         assert_eq!(account.smtp.auth_method, AuthMethod::OAuth2);

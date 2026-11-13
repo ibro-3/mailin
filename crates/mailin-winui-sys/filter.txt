@@ -158,6 +158,7 @@ Windows.UI.Notifications.ToastDismissalReason
 Windows.UI.Notifications.ToastFailedEventArgs
 Windows.Data.Xml.Dom.XmlDocument
 Windows.Data.Xml.Dom.IXmlDocument
+Windows.Data.Xml.Dom.IXmlNode
 Windows.ApplicationModel.Activation.ToastNotificationActivatedEventArgs
 Windows.ApplicationModel.Activation.IToastNotificationActivatedEventArgs
 Windows.ApplicationModel.Activation.ProtocolActivatedEventArgs
@@ -169,6 +170,8 @@ Windows.Foundation.IUriRuntimeClass
 Microsoft.UI.Xaml.Input.KeyboardAccelerator
 Microsoft.UI.Xaml.Input.IKeyboardAccelerator
 Microsoft.UI.Xaml.Input.IKeyboardAcceleratorFactory
+Microsoft.UI.Xaml.Input.KeyRoutedEventArgs
+Microsoft.UI.Xaml.Input.IKeyRoutedEventArgs
 Windows.System.VirtualKeyModifiers
 Windows.System.VirtualKey
 
@@ -205,14 +208,13 @@ Windows.Data.Xml.Dom.IXmlNodeList::Item
 
 Microsoft.UI.Xaml.Automation.AutomationProperties
 Microsoft.UI.Xaml.Automation.IAutomationPropertiesStatics
-Microsoft.UI.Xaml.Controls.ToolTipService
-Microsoft.UI.Xaml.Controls.IToolTipService
 Windows.UI.ViewManagement.AccessibilitySettings
 
 
 Microsoft.UI.Xaml.Controls.ListView
 Microsoft.UI.Xaml.Controls.IListView
 Microsoft.UI.Xaml.Controls.IListViewFactory
+Microsoft.UI.Xaml.Controls.IListViewBase
 Microsoft.UI.Xaml.Controls.ListViewItem
 Microsoft.UI.Xaml.Controls.IListViewItem
 Microsoft.UI.Xaml.Controls.IListViewItemFactory
@@ -224,6 +226,7 @@ Microsoft.UI.Xaml.Media.ImageSource
 Microsoft.UI.Xaml.Media.Imaging.BitmapImage
 Microsoft.UI.Xaml.Media.Imaging.IBitmapImage
 Microsoft.UI.Xaml.Media.Imaging.IBitmapImageFactory
+Microsoft.UI.Xaml.Media.Imaging.IBitmapSource
 Microsoft.UI.Xaml.Style
 Microsoft.UI.Xaml.IStyle
 Microsoft.UI.Xaml.IStyleFactory
@@ -240,9 +243,14 @@ Microsoft.UI.Xaml.DependencyProperty
 Windows.UI.Color
 
 Windows.Storage.Streams.InMemoryRandomAccessStream
+Windows.Storage.Streams.IRandomAccessStream
+Windows.Storage.Streams.IOutputStream
 Windows.Storage.Streams.DataWriter
+Windows.Storage.Streams.IDataWriter
+Windows.Storage.Streams.IDataWriterFactory
 Windows.Storage.Streams.IBuffer
 Windows.Storage.Streams.Buffer
 Windows.Storage.StorageFile
 Windows.UI.Core.CorePhysicalKeyStatus
 Windows.UI.ViewManagement.IAccessibilitySettings
+Windows.Data.Xml.Dom.IXmlDocumentIO

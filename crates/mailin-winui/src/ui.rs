@@ -6,6 +6,10 @@
 //! activation can fail (for example when the Windows App SDK runtime is
 //! missing); callers can then decide whether to abort window creation.
 
+// The helpers form a small design-system API: some of them are not used by
+// every screen, but they belong together.
+#![allow(dead_code)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -298,11 +302,11 @@ pub fn on_toggle(
     handler: impl Fn(bool) + 'static,
 ) -> Result<EventRevoker> {
     let toggle: mailin_winui_sys::IToggleSwitch = toggle.cast()?;
-    Ok(toggle.Toggled(move |_, args| {
-        if let Ok(args) = args {
-            handler(args.IsOn().unwrap_or(false));
-        }
-        Ok(())
+    // The `Toggled` sender is a plain `IInspectable`; read the new state from
+    // the switch itself instead.
+    let switch = toggle.clone();
+    Ok(toggle.Toggled(move |_, _| {
+        handler(switch.IsOn().unwrap_or(false));
     })?)
 }
 
@@ -632,10 +636,24 @@ pub fn min_height(element: &impl Interface, height: f64) -> Result<()> {
     Ok(())
 }
 
+/// Set an explicit height on a framework element.
+pub fn height(element: &impl Interface, height: f64) -> Result<()> {
+    let element: FrameworkElement = element.cast()?;
+    element.SetHeight(height)?;
+    Ok(())
+}
+
 /// Stretch a framework element horizontally in its parent.
 pub fn stretch_horizontal(element: &impl Interface) -> Result<()> {
     let element: FrameworkElement = element.cast()?;
     element.SetHorizontalAlignment(HorizontalAlignment::Stretch)?;
+    Ok(())
+}
+
+/// Attach an element to a XAML root so dialogs and popups can find it.
+pub fn set_xaml_root(element: &impl Interface, root: &XamlRoot) -> Result<()> {
+    let element: IUIElement = element.cast()?;
+    element.SetXamlRoot(root)?;
     Ok(())
 }
 
@@ -726,8 +744,10 @@ pub fn field(label: &str, control: &impl Interface) -> Result<StackPanel> {
     append(&row, &caption)?;
     append(&row, control)?;
     // Associate the caption (label) with the control for accessibility.
-    let caption_element: IUIElement = caption.cast()?;
-    let control_element: IUIElement = control.cast()?;
+    // `SetLabeledBy` takes a `DependencyObject`/`UIElement`; QI-cast the two
+    // elements to the concrete classes the projection accepts.
+    let control_element: mailin_winui_sys::UIElement = control.cast()?;
+    let caption_element: mailin_winui_sys::UIElement = caption.cast()?;
     AutomationProperties::SetLabeledBy(&control_element, &caption_element)?;
     Ok(row)
 }
@@ -816,15 +836,10 @@ pub fn window_xaml_root(window: &Window) -> Result<XamlRoot> {
 
 /// Attach a keyboard accelerator to an element. Attach it to the window's
 /// content root so the shortcut works wherever focus is inside the window.
-/// `description` sets the KeyboardAccelerator.String for key tips / help.
 pub fn add_keyboard_accelerator(
     element: &impl Interface,
     accelerator: &KeyboardAccelerator,
-    description: Option<&str>,
 ) -> Result<()> {
-    if let Some(desc) = description {
-        accelerator.SetDescription(desc)?;
-    }
     let element: IUIElement = element.cast()?;
     element.KeyboardAccelerators()?.Append(accelerator)?;
     Ok(())

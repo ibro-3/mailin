@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use mailin_core::compose::{
     PgpOptions, new_draft_key, recipient_addresses, with_html_signature_prefix,
     with_signature_prefix,
@@ -19,20 +20,24 @@ use mailin_core::compose::{
 use mailin_core::html::sanitize_html;
 use mailin_core::{Account, AccountId, ComposeAttachment, MessageHeader, OutgoingMessage};
 use mailin_winui_sys::{
-    AutomationLiveSetting, AutomationProperties, CoreWebView2WebMessageReceivedEventArgs,
-    DispatcherQueue, Grid, ListView, ListViewItem, Orientation, StackPanel, TextBlock,
-    TextWrapping, Thickness, ToggleSwitch, TypedEventHandler, VerticalAlignment, Visibility,
-    WebView2, Window,
+    AutomationLiveSetting, AutomationProperties, DispatcherQueue, Grid, IControl,
+    IFrameworkElement, IPanel, IUIElement, Orientation, StackPanel, TextBlock, ToggleSwitch,
+    Visibility, WebView2, Window,
 };
 use windows_core::Interface;
 
 use crate::app::AppState;
+use crate::design_tokens;
 use crate::format;
 use crate::platform;
 use crate::ui;
 
 /// Maximum size of a single attached file.
 const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The callback that receives the captured editor content: the HTML body
+/// (when it was requested) and the plain-text body.
+type CaptureDone = Box<dyn FnOnce(Option<String>, String)>;
 
 /// Open the composer for `account_id`, prefilled with `draft`.
 pub fn present(
@@ -134,7 +139,7 @@ pub fn present(
         want_html: bool,
         html: Option<String>,
         text: Option<String>,
-        on_done: Option<Box<dyn FnOnce(Option<String>, String)>>,
+        on_done: Option<CaptureDone>,
     }
 
     let pending_capture = Rc::new(RefCell::new(PendingCapture::default()));
@@ -153,97 +158,94 @@ pub fn present(
     let attachments_for_paste = attachments.clone();
     let mark_dirty_for_paste = Rc::clone(&mark_dirty);
 
-    let message_token = webview.WebMessageReceived(&TypedEventHandler::new(move |_sender, args| {
-        if let Ok(args) = args {
-            // Try to get the message as string
-            // Note: TryGetWebMessageAsString should be available after bindings regeneration
-            if let Ok(message) = args.TryGetWebMessageAsString() {
-                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&message) {
-                    if let Some(msg_type) = payload.get("type").and_then(|v| v.as_str()) {
-                        match msg_type {
-                            // M4-E: body edits mark the draft dirty.
-                            "input" => {
-                                mark_dirty_for_paste();
+    let message_token = webview.WebMessageReceived(move |_sender, args| {
+        // Try to get the message as string
+        // The handler argument is an `InRef`, which only hands out a
+        // reference: `as_ref()` turns it into an `Option` to test.
+        if let Some(message) = args
+            .as_ref()
+            .and_then(|args| args.TryGetWebMessageAsString().ok())
+            && let Ok(payload) = serde_json::from_str::<serde_json::Value>(&message)
+            && let Some(msg_type) = payload.get("type").and_then(|v| v.as_str())
+        {
+            match msg_type {
+                // M4-E: body edits mark the draft dirty.
+                "input" => {
+                    mark_dirty_for_paste();
+                }
+                "pasteHtml" => {
+                    if let Some(html) = payload.get("html").and_then(|v| v.as_str()) {
+                        let sanitized = sanitize_html(html);
+                        let script = format!(
+                            "__mailinInsert({});",
+                            serde_json::to_string(&sanitized).unwrap_or_else(|_| "\"\"".to_owned())
+                        );
+                        let _ = webview_for_messages.ExecuteScriptAsync(&script);
+                    }
+                }
+                "imagePaste" => {
+                    // We need to rebuild attachments list, but we don't have access to
+                    // attachment_list and attachment_events here. They'll be set up later.
+                    // For now, just handle the image data and store it.
+                    // The actual attachment list rebuild will happen when the UI is ready.
+                    if let (Some(name), Some(mime), Some(data_url)) = (
+                        payload.get("name").and_then(|v| v.as_str()),
+                        payload.get("mime").and_then(|v| v.as_str()),
+                        payload.get("data").and_then(|v| v.as_str()),
+                    ) && let Some((_, encoded)) = data_url.split_once(',')
+                        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded)
+                        && bytes.len() as u64 <= MAX_ATTACHMENT_BYTES
+                    {
+                        let attachment = ComposeAttachment::inline_image(name, mime, bytes);
+                        if let Some(cid) = attachment.cid.clone() {
+                            if let Ok(mut items) = attachments_for_paste.lock() {
+                                items.push(attachment);
                             }
-                            "pasteHtml" => {
-                                if let Some(html) = payload.get("html").and_then(|v| v.as_str()) {
-                                    let sanitized = sanitize_html(html);
-                                    let script = format!(
-                                        "__mailinInsert({});",
-                                        serde_json::to_string(&sanitized).unwrap_or_else(|_| "\"\"".to_owned())
-                                    );
-                                    let _ = webview_for_messages.ExecuteScriptAsync(&script);
-                                }
-                            }
-                            "imagePaste" => {
-                                // We need to rebuild attachments list, but we don't have access to
-                                // attachment_list and attachment_events here. They'll be set up later.
-                                // For now, just handle the image data and store it.
-                                // The actual attachment list rebuild will happen when the UI is ready.
-                                if let (Some(name), Some(mime), Some(data_url)) = (
-                                    payload.get("name").and_then(|v| v.as_str()),
-                                    payload.get("mime").and_then(|v| v.as_str()),
-                                    payload.get("data").and_then(|v| v.as_str()),
-                                ) {
-                                    if let Some((_, encoded)) = data_url.split_once(',') {
-                                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) {
-                                            if bytes.len() as u64 <= MAX_ATTACHMENT_BYTES {
-                                                let attachment = ComposeAttachment::inline_image(name, mime, bytes);
-                                                if let Some(cid) = attachment.cid.clone() {
-                                                    if let Ok(mut items) = attachments_for_paste.lock() {
-                                                        items.push(attachment);
-                                                    }
-                                                    mark_dirty_for_paste();
-                                                    // Note: attachment list rebuild will be triggered by UI setup
-                                                    let script = format!(
-                                                        "__mailinInsert({});",
-                                                        serde_json::to_string(&format!("<img src=\"cid:{cid}\" alt=\"pasted image\">")).unwrap_or_else(|_| "\"\"".to_owned())
-                                                    );
-                                                    let _ = webview_for_messages.ExecuteScriptAsync(&script);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            "contentResponse" => {
-                                if let (Some(request_id), Some(content)) = (
-                                    payload.get("requestId").and_then(|v| v.as_u64()),
-                                    payload.get("content").and_then(|v| v.as_str()),
-                                ) {
-                                    let want_html = payload
-                                        .get("wantHtml")
-                                        .and_then(|v| v.as_bool())
-                                        .unwrap_or(false);
-                                    let mut cap = pending_capture_clone.borrow_mut();
-                                    if request_id == cap.request_id && cap.on_done.is_some() {
-                                        if want_html {
-                                            cap.html = Some(content.to_owned());
-                                        } else {
-                                            cap.text = Some(content.to_owned());
-                                        }
-                                        if cap.text.is_some()
-                                            && (!cap.want_html || cap.html.is_some())
-                                        {
-                                            let done = cap.on_done.take();
-                                            let html = cap.html.take();
-                                            let text = cap.text.take().unwrap_or_default();
-                                            drop(cap);
-                                            if let Some(done) = done {
-                                                done(html, text);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
+                            mark_dirty_for_paste();
+                            // Note: attachment list rebuild will be triggered by UI setup
+                            let script = format!(
+                                "__mailinInsert({});",
+                                serde_json::to_string(&format!(
+                                    "<img src=\"cid:{cid}\" alt=\"pasted image\">"
+                                ))
+                                .unwrap_or_else(|_| "\"\"".to_owned())
+                            );
+                            let _ = webview_for_messages.ExecuteScriptAsync(&script);
                         }
                     }
                 }
+                "contentResponse" => {
+                    if let (Some(request_id), Some(content)) = (
+                        payload.get("requestId").and_then(|v| v.as_u64()),
+                        payload.get("content").and_then(|v| v.as_str()),
+                    ) {
+                        let want_html = payload
+                            .get("wantHtml")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let mut cap = pending_capture_clone.borrow_mut();
+                        if request_id == cap.request_id && cap.on_done.is_some() {
+                            if want_html {
+                                cap.html = Some(content.to_owned());
+                            } else {
+                                cap.text = Some(content.to_owned());
+                            }
+                            if cap.text.is_some() && (!cap.want_html || cap.html.is_some()) {
+                                let done = cap.on_done.take();
+                                let html = cap.html.take();
+                                let text = cap.text.take().unwrap_or_default();
+                                drop(cap);
+                                if let Some(done) = done {
+                                    done(html, text);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        Ok(())
-    }))?;
+    })?;
     revokers.keep(message_token);
 
     // Initialize the contenteditable editor
@@ -359,13 +361,16 @@ pub fn present(
 
     // ---------------------------------------------------------------- layout
     let root = Grid::new().context("could not create the compose layout")?;
+    // Row 0: title, row 1: status, row 2: action bar, row 3: recipient
+    // fields, row 4: the editor (which takes the remaining space).
+    ui::auto_row(&root)?;
     ui::auto_row(&root)?;
     ui::auto_row(&root)?;
     ui::auto_row(&root)?;
     ui::star_row(&root)?;
     // M4-E: the composer needs room for the recipient fields; below this
     // width the header controls would clip.
-    root.SetMinWidth(720.0)?;
+    root.cast::<IFrameworkElement>()?.SetMinWidth(720.0)?;
 
     // M4-E: the title gets its own row so the action bar can stay compact.
     let title = ui::heading2(&format!("New Message — {}", account.email))?;
@@ -380,7 +385,7 @@ pub fn present(
     ui::margin_vertical(&header, 8.0)?;
 
     // Place WebView2 in the last (star) row.
-    ui::set_row(&webview, 3)?;
+    ui::set_row(&webview, 4)?;
     ui::append(&root, &webview)?;
 
     let error: TextBlock = ui::text("")?;
@@ -419,11 +424,16 @@ pub fn present(
     // Format popover (using a StackPanel as a simple dropdown)
     let format_popover = StackPanel::new().context("could not create format popover")?;
     format_popover.SetOrientation(Orientation::Vertical)?;
-    format_popover.SetVisibility(Visibility::Collapsed)?;
-    format_popover.SetBackground(&ui::solid_brush(
-        design_tokens::Colors::default().on_accent,
-    )?)?;
+    ui::set_visible(&format_popover, false)?;
+    // A `StackPanel` is not a `Control`, so its background lives on `IPanel`.
+    format_popover
+        .cast::<IPanel>()?
+        .SetBackground(&ui::solid_brush(
+            design_tokens::Colors::default().on_accent,
+        )?)?;
     ui::margin_all(&format_popover, 8.0)?;
+    // The popover drops out of the action bar when it is shown.
+    ui::set_row(&format_popover, 2)?;
     ui::append(&root, &format_popover)?;
 
     let formatting_actions = [
@@ -457,7 +467,7 @@ pub fn present(
             };
             let _ = webview_clone.ExecuteScriptAsync(script);
             // Close popover after action
-            let _ = popover_clone.SetVisibility(Visibility::Collapsed);
+            let _ = ui::set_visible(&popover_clone, false);
         })?);
         ui::append(&format_popover, &btn)?;
     }
@@ -466,18 +476,17 @@ pub fn present(
     let format_popover_for_toggle = format_popover.clone();
     let format_btn_for_toggle = format_btn.clone();
     revokers.keep(ui::on_click(&format_btn, move || {
+        // `Visibility` lives on `IUIElement`, one interface up from the
+        // popover's primary interface.
         let is_visible = format_popover_for_toggle
-            .Visibility()
+            .cast::<IUIElement>()
+            .and_then(|element| element.Visibility())
             .unwrap_or(Visibility::Collapsed)
             == Visibility::Visible;
-        let _ = format_popover_for_toggle.SetVisibility(if is_visible {
-            Visibility::Collapsed
-        } else {
-            Visibility::Visible
-        });
+        let _ = ui::set_visible(&format_popover_for_toggle, !is_visible);
         // Position popover below the format button
-        if !is_visible {
-            let _ = format_popover_for_toggle.SetMargin(margin_for_popover(&format_btn_for_toggle));
+        if !is_visible && let Ok(element) = format_popover_for_toggle.cast::<IFrameworkElement>() {
+            let _ = element.SetMargin(margin_for_popover(&format_btn_for_toggle));
         }
     })?);
 
@@ -492,11 +501,9 @@ pub fn present(
 
     // HTML toggle handler
     let is_html_mode_clone = is_html_mode.clone();
-    revokers.keep(html_toggle.Toggled(move |_, args| {
-        if let Ok(args) = args {
-            is_html_mode_clone.store(args.IsOn().unwrap_or(false), Ordering::Relaxed);
-        }
-        Ok(())
+    let html_toggle_clone = html_toggle.clone();
+    revokers.keep(html_toggle.Toggled(move |_, _| {
+        is_html_mode_clone.store(html_toggle_clone.IsOn().unwrap_or(false), Ordering::Relaxed);
     })?);
 
     // PGP options
@@ -563,7 +570,10 @@ pub fn present(
     let attachment_list = ui::stack_xs(Orientation::Vertical)?;
     ui::append(&form, &attachment_list)?;
 
+    // The recipient fields live in a scroll viewer above the editor.
     let scroller = ui::scroll(&form)?;
+    ui::set_row(&scroller, 3)?;
+    ui::append(&root, &scroller)?;
 
     let window = Window::new().context("could not create the compose window")?;
     window.SetTitle("New Message")?;
@@ -581,24 +591,6 @@ pub fn present(
         Some(Rc::clone(&mark_dirty)),
     );
 
-    // Ctrl+Enter to send message
-    let window_element: mailin_winui_sys::UIElement = window.Content()?.cast()?;
-    let send_weak = Rc::downgrade(&send);
-    revokers.keep(window_element.KeyDown(move |_, args| {
-        if let Ok(key) = args.Key() {
-            if key == mailin_winui_sys::VirtualKey::Enter {
-                let modifiers = args.KeyStatus().ok().and_then(|s| s.KeyModifiers());
-                if matches!(modifiers, Some(m) if m.contains(mailin_winui_sys::VirtualKeyModifiers::Control)) {
-                    if let Some(send) = send_weak.upgrade() {
-                        let _ = send.Click();
-                        let _ = args.SetHandled(true);
-                    }
-                }
-            }
-        }
-        Ok(())
-    })?);
-
     // Start an asynchronous content capture. The WebView answers every
     // `__mailinGetContent` request with a `contentResponse` message on this
     // (UI) thread, where the handler finalizes the outgoing message.
@@ -606,7 +598,7 @@ pub fn present(
     let start_capture = {
         let webview = webview.clone();
         let pending_capture = pending_capture.clone();
-        move |want_html: bool, on_done: Box<dyn FnOnce(Option<String>, String)>| -> bool {
+        move |want_html: bool, on_done: CaptureDone| -> bool {
             let request_id = {
                 let mut cap = pending_capture.borrow_mut();
                 if cap.on_done.is_some() {
@@ -637,6 +629,9 @@ pub fn present(
         let mark_dirty = Rc::clone(&mark_dirty);
         let banner = error.clone();
         let account_id = account.id;
+        // The account is copied in: the closure owns it, but the send action
+        // below still needs the original.
+        let account = account.clone();
         let draft_key = Arc::clone(&draft_key);
         let attachments = Arc::clone(&attachments);
         let to = to.clone();
@@ -676,47 +671,50 @@ pub fn present(
             let references = references.clone();
             let from_name = account.display_name.clone();
             let from_addr = account.email.clone();
-            let on_done: Box<dyn FnOnce(Option<String>, String)> =
-                Box::new(move |html_body, body_text: String| {
-                    let snapshot = attachments
-                        .lock()
-                        .map(|items| items.clone())
-                        .unwrap_or_default();
-                    let outgoing = OutgoingMessage {
-                        from_name,
-                        from_addr,
-                        to: ui::text_value(&to),
-                        cc: ui::text_value(&cc),
-                        bcc: ui::text_value(&bcc),
-                        subject: ui::text_value(&subject),
-                        body: body_text,
-                        html_body: prune_unresolved_cid_images(html_body, &snapshot),
-                        in_reply_to,
-                        references,
-                        draft_key: draft_key.lock().map(|key| key.clone()).ok(),
-                        attachments: snapshot,
-                    };
+            // The completion callback owns its own copies: the caller still
+            // needs the dirty marker when the capture could not start.
+            let dirty_for_done = Arc::clone(&dirty);
+            let mark_dirty_for_done = Rc::clone(&mark_dirty);
+            let on_done: CaptureDone = Box::new(move |html_body, body_text: String| {
+                let snapshot = attachments
+                    .lock()
+                    .map(|items| items.clone())
+                    .unwrap_or_default();
+                let outgoing = OutgoingMessage {
+                    from_name,
+                    from_addr,
+                    to: ui::text_value(&to),
+                    cc: ui::text_value(&cc),
+                    bcc: ui::text_value(&bcc),
+                    subject: ui::text_value(&subject),
+                    body: body_text,
+                    html_body: prune_unresolved_cid_images(html_body, &snapshot),
+                    in_reply_to,
+                    references,
+                    draft_key: draft_key.lock().map(|key| key.clone()).ok(),
+                    attachments: snapshot,
+                };
 
-                    match outgoing.build_draft() {
-                        Ok(_) => {
-                            app.engine.save_draft(account_id, outgoing);
-                            let _ = banner.SetText("Draft saved");
-                            let _ = ui::set_visible(&banner, true);
-                            // M4-E: the title drops the dirty marker once the
-                            // draft is stored — but only when nothing changed
-                            // meanwhile.
-                            if generation.load(Ordering::Relaxed) == captured {
-                                mark_clean();
-                            }
-                        }
-                        Err(failure) => {
-                            dirty.store(true, Ordering::Relaxed);
-                            mark_dirty();
-                            let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
-                            let _ = ui::set_visible(&banner, true);
+                match outgoing.build_draft() {
+                    Ok(_) => {
+                        app.engine.save_draft(account_id, outgoing);
+                        let _ = banner.SetText("Draft saved");
+                        let _ = ui::set_visible(&banner, true);
+                        // M4-E: the title drops the dirty marker once the
+                        // draft is stored — but only when nothing changed
+                        // meanwhile.
+                        if generation.load(Ordering::Relaxed) == captured {
+                            mark_clean();
                         }
                     }
-                });
+                    Err(failure) => {
+                        dirty_for_done.store(true, Ordering::Relaxed);
+                        mark_dirty_for_done();
+                        let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
+                        let _ = ui::set_visible(&banner, true);
+                    }
+                }
+            });
             if !start_capture(want_html, on_done) {
                 // A capture is already in flight; restore the dirty marker so
                 // the next autosave or close retries this save.
@@ -782,7 +780,10 @@ pub fn present(
     let send_sign = sign_toggle.clone();
     let is_html_mode_for_send = is_html_mode.clone();
     let start_capture_for_send = start_capture.clone();
-    revokers.keep(ui::on_click(&send, {
+    // The send action is shared between the Send button and the Ctrl+Enter
+    // accelerator: `IButtonBase::Click` is the event subscription, not a way
+    // to invoke the button.
+    let send_action: Rc<dyn Fn() + 'static> = Rc::new({
         let send = send.clone();
         let window = window.clone();
         let app = Arc::clone(&app);
@@ -847,68 +848,85 @@ pub fn present(
             let window = window.clone();
             let send_for_done = send.clone();
             let banner = banner.clone();
+            // The completion callback owns its own copy of the banner: the
+            // caller still needs it when the capture could not start.
+            let banner_for_done = banner.clone();
             let draft_key = Arc::clone(&draft_key);
             let attachments = Arc::clone(&attachments);
             let sent = Arc::clone(&sent);
             let in_reply_to = in_reply_to.clone();
             let references = references.clone();
-            let on_done: Box<dyn FnOnce(Option<String>, String)> =
-                Box::new(move |html_body, body_text: String| {
-                    let snapshot = attachments
-                        .lock()
-                        .map(|items| items.clone())
-                        .unwrap_or_default();
-                    let outgoing = OutgoingMessage {
-                        from_name,
-                        from_addr,
-                        to: to_value,
-                        cc: cc_value,
-                        bcc: bcc_value,
-                        subject: subject_value,
-                        body: body_text,
-                        html_body: prune_unresolved_cid_images(html_body, &snapshot),
-                        in_reply_to,
-                        references,
-                        draft_key: draft_key.lock().map(|key| key.clone()).ok(),
-                        attachments: snapshot,
-                    };
+            let on_done: CaptureDone = Box::new(move |html_body, body_text: String| {
+                let snapshot = attachments
+                    .lock()
+                    .map(|items| items.clone())
+                    .unwrap_or_default();
+                let outgoing = OutgoingMessage {
+                    from_name,
+                    from_addr,
+                    to: to_value,
+                    cc: cc_value,
+                    bcc: bcc_value,
+                    subject: subject_value,
+                    body: body_text,
+                    html_body: prune_unresolved_cid_images(html_body, &snapshot),
+                    in_reply_to,
+                    references,
+                    draft_key: draft_key.lock().map(|key| key.clone()).ok(),
+                    attachments: snapshot,
+                };
 
-                    match app.mailin.build_outgoing(&account_id, &outgoing, pgp) {
-                        Ok((raw, envelope)) => {
-                            match app.engine.queue_and_send(account_id, raw, envelope) {
-                                Ok(_) => {
-                                    sent.store(true, Ordering::Relaxed);
-                                    if let Ok(key) = draft_key.lock()
-                                        && !key.is_empty()
-                                    {
-                                        app.engine.discard_draft(account_id, key.clone());
-                                    }
-                                    on_sent();
-                                    let _ = window.Close();
+                match app.mailin.build_outgoing(&account_id, &outgoing, pgp) {
+                    Ok((raw, envelope)) => {
+                        match app.engine.queue_and_send(account_id, raw, envelope) {
+                            Ok(_) => {
+                                sent.store(true, Ordering::Relaxed);
+                                if let Ok(key) = draft_key.lock()
+                                    && !key.is_empty()
+                                {
+                                    app.engine.discard_draft(account_id, key.clone());
                                 }
-                                Err(failure) => {
-                                    let _ = banner.SetText(&format!(
-                                        "Could not queue the message: {failure}"
-                                    ));
-                                    let _ = ui::set_visible(&banner, true);
-                                    let _ = ui::set_enabled(&send_for_done, true);
-                                }
+                                on_sent();
+                                let _ = window.Close();
+                            }
+                            Err(failure) => {
+                                let _ = banner_for_done
+                                    .SetText(&format!("Could not queue the message: {failure}"));
+                                let _ = ui::set_visible(&banner_for_done, true);
+                                let _ = ui::set_enabled(&send_for_done, true);
                             }
                         }
-                        Err(failure) => {
-                            let _ = banner.SetText(&format!("Could not send: {failure}"));
-                            let _ = ui::set_visible(&banner, true);
-                            let _ = ui::set_enabled(&send_for_done, true);
-                        }
                     }
-                });
+                    Err(failure) => {
+                        let _ = banner_for_done.SetText(&format!("Could not send: {failure}"));
+                        let _ = ui::set_visible(&banner_for_done, true);
+                        let _ = ui::set_enabled(&send_for_done, true);
+                    }
+                }
+            });
             if !start_capture_for_send(want_html, on_done) {
                 let _ = banner.SetText("Still finishing the previous capture — try again.");
                 let _ = ui::set_visible(&banner, true);
                 let _ = ui::set_enabled(&send, true);
             }
         }
+    });
+    revokers.keep(ui::on_click(&send, {
+        let send_action = send_action.clone();
+        move || send_action()
     })?);
+
+    // Ctrl+Enter to send message. A keyboard accelerator carries the
+    // modifier, so the shortcut works no matter which control has focus.
+    let window_element: mailin_winui_sys::UIElement = window.Content()?.cast()?;
+    let accelerator = mailin_winui_sys::KeyboardAccelerator::new()
+        .context("could not create the send accelerator")?;
+    accelerator.SetKey(mailin_winui_sys::VirtualKey::Enter)?;
+    accelerator.SetModifiers(mailin_winui_sys::VirtualKeyModifiers::Control)?;
+    revokers.keep(accelerator.Invoked(move |_, _| {
+        send_action();
+    })?);
+    ui::add_keyboard_accelerator(&window_element, &accelerator)?;
 
     // Auto-save every 30 seconds while the composer is open.
     let queue =
@@ -953,7 +971,7 @@ pub fn present(
 }
 
 // Helper function to calculate margin for popover positioning
-fn margin_for_popover(button: &mailin_winui_sys::Button) -> mailin_winui_sys::Thickness {
+fn margin_for_popover(_button: &mailin_winui_sys::Button) -> mailin_winui_sys::Thickness {
     // Simple fixed margin for now
     mailin_winui_sys::Thickness {
         left: 0.0,
@@ -1113,6 +1131,7 @@ fn reply_with(
         bcc: String::new(),
         subject: reply_subject(&message.subject),
         body: with_signature_prefix(&account.signature, &quoted_reply(message, body)),
+        html_body: None,
         in_reply_to: message.message_id.clone(),
         references,
         draft_key: None,
@@ -1231,14 +1250,26 @@ fn setup_contact_autocomplete(
         })?);
     }
 
-    // TextChanged event to show/filter suggestions
-    revokers.keep(
-        text_box.TextChanged(&TypedEventHandler::new(move |_sender, _args| {
+    // TextChanged event to show/filter suggestions. The handler owns its own
+    // clone: the subscription borrows the text box for the call, and the
+    // handler needs its own revoker set to keep the suggestion buttons.
+    let text_box_for_event = text_box.clone();
+    let text_box_for_handler = text_box.clone();
+    let revokers_for_handler = revokers.clone();
+    revokers.keep(text_box_for_event.TextChanged(move |_sender, _args| {
+        let text_box = text_box_for_handler.clone();
+        // The rebuild returns `Result` for the many UI builders it calls; a
+        // failure just means no suggestions are shown for this keystroke.
+        let rebuild = || -> Result<()> {
             let query = ui::text_value(&text_box);
             let query = query.trim();
 
-            // Clear existing suggestions
-            let children = match suggestions_panel.Children() {
+            // Clear existing suggestions. `Children` lives on `IPanel`, one
+            // interface up from the panel's primary interface.
+            let children = match suggestions_panel
+                .cast::<IPanel>()
+                .and_then(|panel| panel.Children())
+            {
                 Ok(children) => children,
                 Err(error) => {
                     tracing::warn!(%error, "could not read the suggestion list");
@@ -1275,21 +1306,20 @@ fn setup_contact_autocomplete(
                     let email = contact.email.clone();
                     let contact_name = contact.display_name.clone();
                     let button = Button::new()?;
-                    button.SetContent(&labels)?;
+                    ui::set_content(&button, &labels)?;
+                    ui::stretch_horizontal(&button)?;
                     button
-                        .SetHorizontalAlignment(mailin_winui_sys::HorizontalAlignment::Stretch)?;
-                    button.SetVerticalAlignment(VerticalAlignment::Stretch)?;
-                    button.SetPadding(mailin_winui_sys::Thickness {
-                        left: 8.0,
-                        top: 4.0,
-                        right: 8.0,
-                        bottom: 4.0,
-                    })?;
+                        .cast::<IFrameworkElement>()?
+                        .SetVerticalAlignment(VerticalAlignment::Stretch)?;
+                    ui::padding(&button, 8.0, 4.0, 8.0, 4.0)?;
 
-                    // Use a transparent background directly instead of a Style
-                    button.SetBackground(mailin_winui_sys::SolidColorBrush::CreateInstance(
-                        &mailin_winui_sys::color_from_argb(0, 0, 0, 0),
-                    )?)?;
+                    // Use a transparent background directly instead of a Style.
+                    // `Background` is a `Control` member, so the button casts
+                    // to `IControl` before setting it.
+                    let brush = mailin_winui_sys::SolidColorBrush::CreateInstanceWithColor(
+                        mailin_winui_sys::color_from_argb(0, 0, 0, 0),
+                    )?;
+                    button.cast::<IControl>()?.SetBackground(&brush)?;
                     AutomationProperties::SetName(
                         &button,
                         &if contact_name.is_empty() {
@@ -1298,7 +1328,7 @@ fn setup_contact_autocomplete(
                             format!("Insert {contact_name} <{email}>")
                         },
                     )?;
-                    revokers.keep(ui::on_click(&button, move || {
+                    revokers_for_handler.keep(ui::on_click(&button, move || {
                         let current = ui::text_value(&text_box);
                         let new_text = if current.trim().is_empty() {
                             email.clone()
@@ -1322,27 +1352,32 @@ fn setup_contact_autocomplete(
                 let _ = ui::set_visible(&suggestions_panel, true);
             }
             Ok(())
-        }))?,
-    );
+        };
+        if let Err(error) = rebuild() {
+            tracing::warn!(%error, "could not rebuild the contact suggestions");
+        }
+    })?);
 
     // Hide suggestions when the text box loses focus (the timer fires from
     // the UI thread, so the focused button's Click still gets to run first).
-    revokers.keep(text_box.LostFocus(&TypedEventHandler::new({
+    // The focus events live on `IUIElement`.
+    revokers.keep(text_box.cast::<IUIElement>()?.LostFocus({
         let hide_timer = hide_timer.clone();
         move |_sender, _args| {
             let _ = hide_timer.Start();
-            Ok(())
         }
-    }))?);
+    })?);
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use mailin_core::compose::OutgoingMessage;
     use mailin_core::model::MessageHeader;
+
+    // The tests drive the real draft builders: a stand-in would only prove
+    // that the stand-in behaves like itself.
+    use super::{forward, reply};
 
     fn account() -> mailin_core::Account {
         mailin_core::Account::new(
@@ -1368,34 +1403,14 @@ mod tests {
             from_addr: Some("bob@example.com".into()),
             to_addrs: "ada@example.com".into(),
             cc_addrs: "".into(),
-            sent_at: 0,
+            sent_at: Some(0),
             received_at: 0,
-            snippet: "Hello".into(),
-            size: 100,
+            snippet: Some("Hello".into()),
+            size: Some(100),
             flags: vec![],
             has_attachments: false,
             body_fetched: false,
         }
-    }
-
-    fn reply(
-        account: &mailin_core::Account,
-        message: &MessageHeader,
-        body: Option<&str>,
-    ) -> OutgoingMessage {
-        let mut draft = OutgoingMessage::default();
-        draft.from_name = account.display_name.clone();
-        draft.from_addr = account.email.clone();
-        draft.to = format!(
-            "{} <{}>",
-            message.from_name.as_deref().unwrap_or(""),
-            message.from_addr.as_deref().unwrap_or("")
-        );
-        draft.subject = format!("Re: {}", message.subject);
-        draft.body = body.unwrap_or("").into();
-        draft.in_reply_to = message.message_id.clone();
-        draft.references = message.message_id.clone().into_iter().collect();
-        draft
     }
 
     #[test]
@@ -1404,19 +1419,14 @@ mod tests {
         let msg = message();
         let draft = reply(&acc, &msg, Some("Hello"));
         assert_eq!(draft.in_reply_to, Some("<test@example.com>".into()));
-        assert_eq!(draft.references, vec!["<test@example.com>".into()]);
+        assert_eq!(draft.references, vec!["<test@example.com>".to_owned()]);
     }
 
     #[test]
     fn forward_sets_subject_prefix() {
         let acc = account();
         let msg = message();
-        let mut draft = OutgoingMessage::default();
-        draft.from_name = acc.display_name.clone();
-        draft.from_addr = acc.email.clone();
-        draft.to = "charlie@example.com".into();
-        draft.subject = format!("Fwd: {}", msg.subject);
-        draft.body = "FYI".into();
+        let draft = forward(&acc, &msg, Some("FYI"));
         assert!(draft.subject.starts_with("Fwd: "));
     }
 

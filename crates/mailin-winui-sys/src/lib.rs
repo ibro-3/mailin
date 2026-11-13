@@ -26,6 +26,11 @@
 #[rustfmt::skip]
 mod bindings;
 
+/// Interface-to-interface `Deref` chains, generated from the same metadata
+/// by `cargo xtask winui-deref`.
+#[rustfmt::skip]
+mod deref;
+
 /// Extension traits and helpers for ergonomic WinUI usage.
 /// These bridge the gap between the minimal projection and the full
 /// Windows crate API, and survive projection regeneration.

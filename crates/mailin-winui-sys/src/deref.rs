@@ -5,9 +5,34 @@
 //!
 //! The `Deref` target is the parent interface, so a value of a
 //! derived interface exposes the members of every ancestor.
+//!
+//! The interfaces come from `bindings.rs`, so they are in scope
+//! through the crate root.
+use super::*;
+
+impl core::ops::Deref for IInputStream {
+    type Target = IClosable;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+
+impl core::ops::Deref for IOutputStream {
+    type Target = IClosable;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
 
 impl core::ops::Deref for IProtocolActivatedEventArgs {
     type Target = IActivatedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+
+impl core::ops::Deref for IRandomAccessStream {
+    type Target = IClosable;
     fn deref(&self) -> &Self::Target {
         unsafe { core::mem::transmute(self) }
     }
@@ -27,41 +52,6 @@ impl core::ops::Deref for IXmlAttribute {
     }
 }
 
-impl core::ops::Deref for IXmlAttribute {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlAttribute {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlCDataSection {
-    type Target = IXmlNode;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlCDataSection {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlCDataSection {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
 impl core::ops::Deref for IXmlCDataSection {
     type Target = IXmlText;
     fn deref(&self) -> &Self::Target {
@@ -76,36 +66,8 @@ impl core::ops::Deref for IXmlComment {
     }
 }
 
-impl core::ops::Deref for IXmlComment {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlComment {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
 impl core::ops::Deref for IXmlDocument {
     type Target = IXmlNode;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlDocument {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlDocument {
-    type Target = IXmlNodeSerializer;
     fn deref(&self) -> &Self::Target {
         unsafe { core::mem::transmute(self) }
     }
@@ -118,36 +80,8 @@ impl core::ops::Deref for IXmlDocumentFragment {
     }
 }
 
-impl core::ops::Deref for IXmlDocumentFragment {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlDocumentFragment {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
 impl core::ops::Deref for IXmlDocumentType {
     type Target = IXmlNode;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlDocumentType {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlDocumentType {
-    type Target = IXmlNodeSerializer;
     fn deref(&self) -> &Self::Target {
         unsafe { core::mem::transmute(self) }
     }
@@ -160,36 +94,8 @@ impl core::ops::Deref for IXmlElement {
     }
 }
 
-impl core::ops::Deref for IXmlElement {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlElement {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
 impl core::ops::Deref for IXmlEntityReference {
     type Target = IXmlNode;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlEntityReference {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlEntityReference {
-    type Target = IXmlNodeSerializer;
     fn deref(&self) -> &Self::Target {
         unsafe { core::mem::transmute(self) }
     }
@@ -202,13 +108,6 @@ impl core::ops::Deref for IXmlNode {
     }
 }
 
-impl core::ops::Deref for IXmlNode {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
 impl core::ops::Deref for IXmlProcessingInstruction {
     type Target = IXmlNode;
     fn deref(&self) -> &Self::Target {
@@ -216,36 +115,8 @@ impl core::ops::Deref for IXmlProcessingInstruction {
     }
 }
 
-impl core::ops::Deref for IXmlProcessingInstruction {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlProcessingInstruction {
-    type Target = IXmlNodeSerializer;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
 impl core::ops::Deref for IXmlText {
     type Target = IXmlNode;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlText {
-    type Target = IXmlNodeSelector;
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::mem::transmute(self) }
-    }
-}
-
-impl core::ops::Deref for IXmlText {
-    type Target = IXmlNodeSerializer;
     fn deref(&self) -> &Self::Target {
         unsafe { core::mem::transmute(self) }
     }

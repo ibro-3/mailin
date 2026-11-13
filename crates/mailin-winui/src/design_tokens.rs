@@ -7,6 +7,10 @@
 //! Pure color/contrast helpers compile on all targets (M3b-2) so Linux tests can
 //! enforce WCAG contrast ratios.
 
+// The token set is a complete palette: not every token is used by the current
+// screens, but the palette is the contract the UI is written against.
+#![allow(dead_code)]
+
 #[cfg(windows)]
 use mailin_winui_sys::FontWeight;
 
@@ -222,6 +226,8 @@ impl DesignTokens {
 
     #[cfg(windows)]
     pub fn solid_brush(&self, hex: &str) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        use windows_core::Interface as _;
+
         use mailin_winui_sys::XamlReader;
         const XMLNS: &str = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
         let value = XamlReader::Load(&format!(
@@ -296,9 +302,15 @@ pub enum ThemeMode {
 
 #[cfg(windows)]
 pub fn apply_theme(mode: ThemeMode) {
-    let high_contrast = mailin_winui_sys::AccessibilitySettings::new()
-        .map(|s| s.HighContrast().unwrap_or(false))
-        .unwrap_or(false);
+    // The projection has no factory for `AccessibilitySettings`; the class
+    // still has a default constructor, reached through the generic
+    // activation factory.
+    let high_contrast = mailin_winui_sys::activate::<
+        mailin_winui_sys::AccessibilitySettings,
+        mailin_winui_sys::IAccessibilitySettings,
+    >()
+    .map(|settings| settings.HighContrast().unwrap_or(false))
+    .unwrap_or(false);
 
     let new_tokens = if high_contrast {
         DesignTokens::high_contrast()

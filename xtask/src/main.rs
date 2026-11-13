@@ -321,41 +321,7 @@ fn winui_bindgen() -> Result<()> {
     // Patch the generated bindings.rs directly
     let bindings_path = root.join("crates/mailin-winui-sys/src/bindings.rs");
 
-    // 1. Add public new() method to TypedEventHandler
-    let typed_handler_def = r#"pub struct TypedEventHandler<TSender, TResult>(
-    windows_core::IUnknown,
-    core::marker::PhantomData<TSender>,
-    core::marker::PhantomData<TResult>,
-)
-where
-    TSender: windows_core::RuntimeType + 'static,
-    TResult: windows_core::RuntimeType + 'static;
-"#;
-    let new_method = r#"
-impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::RuntimeType + 'static>
-    TypedEventHandler<TSender, TResult>
-{
-    /// Create a new `TypedEventHandler` from a closure.
-    pub fn new<F>(handler: F) -> Self
-    where
-        F: Fn(windows_core::Ref<TSender>, windows_core::Ref<TResult>) + 'static,
-    {
-        let delegate = windows_core::imp::DelegateBox::<Self, F>::new(
-            &TypedEventHandlerBox::<TSender, TResult, F>::VTABLE,
-            handler,
-        );
-        unsafe { core::mem::transmute(windows_core::imp::box_new(delegate)) }
-    }
-}
-"#;
-    let content = fs::read_to_string(&bindings_path)?;
-    let content = content.replace(
-        typed_handler_def,
-        &format!("{typed_handler_def}\n{new_method}"),
-    );
-    fs::write(&bindings_path, content)?;
-
-    // 2. Fix PropertyPath::CreateInstance to use HSTRING::from
+    // 1. Fix PropertyPath::CreateInstance to use HSTRING::from
     let content = fs::read_to_string(&bindings_path)?;
     let content = content.replace(
         "core::mem::transmute_copy(&path.into())",
@@ -368,22 +334,6 @@ impl<TSender: windows_core::RuntimeType + 'static, TResult: windows_core::Runtim
     let content = content.replace(
         "core::mem::transmute_copy::<Src, *mut c_void>(&path.into())",
         "core::mem::transmute_copy::<Src, *mut c_void>(&windows_core::HSTRING::from(path))",
-    );
-    fs::write(&bindings_path, content)?;
-
-    // 3. Make TypedEventHandlerBox::VTABLE public
-    let content = fs::read_to_string(&bindings_path)?;
-    let content = content.replace(
-        "const VTABLE : TypedEventHandler_Vtbl",
-        "pub const VTABLE : TypedEventHandler_Vtbl",
-    );
-    fs::write(&bindings_path, content)?;
-
-    // 4. Make TypedEventHandlerBox public
-    let content = fs::read_to_string(&bindings_path)?;
-    let content = content.replace(
-        "struct TypedEventHandlerBox<",
-        "pub struct TypedEventHandlerBox<",
     );
     fs::write(&bindings_path, content)?;
 
@@ -930,28 +880,6 @@ fn winui_deref() -> Result<()> {
     let bindings = fs::read_to_string(root.join("crates/mailin-winui-sys/src/bindings.rs"))?;
     let projected = projected_interfaces(&bindings);
 
-    if std::env::var_os("WINUI_DEREF_DEBUG").is_some() {
-        for (namespace, name, item) in index.iter_items() {
-            let Item::Type(def) = item else { continue };
-            if !matches!(
-                name,
-                "IControl" | "ITextBox" | "IFrameworkElement" | "IUIElement" | "Control" | "Button"
-            ) {
-                continue;
-            }
-            println!(
-                "{namespace}.{name}: category={:?} extends={:?} impls={:?}",
-                def.category(),
-                def.extends()
-                    .map(|e| (e.namespace().to_string(), e.name().to_string())),
-                def.interface_impls()
-                    .map(|i| i.interface(&[]))
-                    .map(|t| format!("{t:?}"))
-                    .collect::<Vec<_>>(),
-            );
-        }
-    }
-
     // Map every projected (flat) name back to its metadata entry. The flat
     // projection cannot express two types with the same name from different
     // namespaces, so an ambiguous name is dropped rather than guessed.
@@ -967,8 +895,13 @@ fn winui_deref() -> Result<()> {
         }
     }
 
-    // Walk the parent chain of every projected interface and emit one `Deref`
-    // per edge whose parent is projected too.
+    // Walk the parent chain of every projected interface and emit a single
+    // `Deref` per interface: the edge to its first projected parent. An
+    // interface can list several parents in the metadata, but `Deref` has
+    // one target, so the remaining ancestors are reached through the chain.
+    // The edge is keyed by the interface at the current level — keying it by
+    // the type the walk started at would give one type conflicting impls for
+    // every ancestor it reaches.
     let mut edges: Vec<(String, String)> = Vec::new();
     let mut emitted: HashSet<(String, String)> = HashSet::new();
     for name in &projected {
@@ -982,24 +915,18 @@ fn winui_deref() -> Result<()> {
                 Some(parents) => parents,
                 None => break,
             };
-            for parent in parents {
-                let short = &parent.1;
-                if !projected.contains(short) || !full_of.contains_key(short) {
-                    continue;
-                }
-                if emitted.insert((name.clone(), short.clone())) {
-                    edges.push((name.clone(), short.clone()));
-                }
-            }
             // WinUI interfaces form a single chain, but guard against a
             // metadata cycle by following the first projected parent only.
-            match parents
+            let Some(next) = parents
                 .iter()
                 .find(|parent| projected.contains(&parent.1) && full_of.contains_key(&parent.1))
-            {
-                Some(next) => current = next.clone(),
-                None => break,
+            else {
+                break;
+            };
+            if emitted.insert((current.1.clone(), next.1.clone())) {
+                edges.push((current.1.clone(), next.1.clone()));
             }
+            current = next.clone();
         }
     }
     edges.sort();
@@ -1012,7 +939,11 @@ fn winui_deref() -> Result<()> {
          //! metadata; see [`winui_ext`] for the hand-written helpers.\n\
          //!\n\
          //! The `Deref` target is the parent interface, so a value of a\n\
-         //! derived interface exposes the members of every ancestor.\n\n",
+         //! derived interface exposes the members of every ancestor.\n\
+         //!\n\
+         //! The interfaces come from `bindings.rs`, so they are in scope\n\
+         //! through the crate root.\n\
+         use super::*;\n\n",
     );
     for (from, to) in &edges {
         text.push_str(&format!(

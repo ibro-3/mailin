@@ -13,19 +13,35 @@ use windows_core::Result;
 
 /// Create a `TypedEventHandler<TSender, TResult>` from a closure.
 ///
-/// The Windows crate provides `TypedEventHandler::new(|sender, args| { ... })`
-/// but the minimal projection only generates the struct without constructors.
+/// The projection generates the delegate constructor directly, so this is a
+/// thin alias that keeps the call sites readable.
 pub fn typed_handler<TSender, TResult, F>(handler: F) -> TypedEventHandler<TSender, TResult>
 where
     TSender: windows_core::RuntimeType + 'static,
     TResult: windows_core::RuntimeType + 'static,
     F: Fn(windows_core::Ref<TSender>, windows_core::Ref<TResult>) + 'static,
 {
-    let delegate = windows_core::imp::DelegateBox::<TypedEventHandler<TSender, TResult>, F>::new(
-        &TypedEventHandlerBox::<TSender, TResult, F>::VTABLE,
-        handler,
-    );
-    unsafe { core::mem::transmute(windows_core::imp::box_new(delegate)) }
+    TypedEventHandler::new(handler)
+}
+
+// ============================================================================
+// Activation factory helper
+// ============================================================================
+
+/// Create a runtime class instance through the generic activation factory.
+///
+/// Classes whose metadata has a default constructor but no projected
+/// `*Factory` interface (for example `Image`, `BitmapImage`, `XmlDocument`,
+/// `InMemoryRandomAccessStream` or `AccessibilitySettings`) can still be
+/// created with `IGenericFactory::ActivateInstance`.
+pub fn activate<C, I>() -> windows_core::Result<I>
+where
+    C: windows_core::RuntimeName,
+    I: windows_core::Interface,
+{
+    let factory: windows_core::imp::IGenericFactory =
+        windows_core::imp::load_factory::<C, windows_core::imp::IGenericFactory>()?;
+    factory.ActivateInstance::<I>()
 }
 
 // ============================================================================
@@ -75,6 +91,17 @@ pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
             windows_core::Error::new(windows_core::HRESULT(0x80004005u32 as i32), e.to_string())
         })
 }
+
+// ============================================================================
+// Toast helpers
+// ============================================================================
+
+/// The `ToastGeneric` toast template.
+///
+/// The pinned metadata exposes the generic template as a static property
+/// instead of an enum member, so the generated `ToastTemplateType` has no
+/// constant for it. The runtime value is `8`.
+pub const TOAST_TEMPLATE_GENERIC: ToastTemplateType = ToastTemplateType(8);
 
 // ============================================================================
 // Style / Setter / TypeName / DependencyProperty helpers

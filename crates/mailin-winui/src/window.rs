@@ -5,6 +5,7 @@
 //! channel on the UI thread and refreshes the panes that changed. Widgets are
 //! composed from Rust; there is no XAML compiler in a plain Cargo build.
 
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,11 +19,11 @@ use mailin_core::{
 };
 use mailin_winui_sys::{
     Application, AutomationProperties, Button, CheckBox, ComboBox, ContentDialog,
-    ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType, IToggleButton,
-    IXmlNodeSerializer, KeyboardAccelerator, MenuFlyout, MenuFlyoutItem, Orientation,
-    ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox, ToastNotification,
-    ToastNotificationManager, ToastTemplateType, TypedEventHandler, VerticalAlignment, VirtualKey,
-    VirtualKeyModifiers, Visibility, WebView2, Window, XamlRoot,
+    ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType, IFrameworkElement,
+    IPanel, IToggleButton, IUIElement, IXmlNodeSerializer, KeyboardAccelerator, MenuFlyout,
+    MenuFlyoutItem, Orientation, ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox,
+    ToastNotification, ToastNotificationManager, VerticalAlignment, VirtualKey,
+    VirtualKeyModifiers, WebView2, Window, XamlRoot,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -85,7 +86,6 @@ struct Widgets {
     window: Window,
     title: TextBlock,
     banner: TextBlock,
-    hamburger: Button,
     account_combo: ComboBox,
     add_account: Button,
     edit_account: Button,
@@ -143,7 +143,7 @@ struct Widgets {
     undo_banner: StackPanel,
     undo_button: Button,
     /// Keyboard shortcuts help window (created on demand)
-    shortcuts_window: std::cell::RefCell<Option<Window>>,
+    shortcuts_window: std::cell::RefCell<Option<ContentDialog>>,
 }
 
 pub struct MainWindow {
@@ -190,14 +190,16 @@ impl MainWindow {
     fn show_undo_banner(&self, text: &str, pairs: Vec<(MessageId, FolderId)>) {
         let _ = ui::set_visible(&self.widgets.undo_banner, true);
         // Update the text in the undo banner (first child is the text block)
-        if let Ok(children) = self.widgets.undo_banner.Children() {
-            if children.Size().unwrap_or(0) > 0 {
-                if let Ok(child) = children.GetAt(0) {
-                    if let Ok(text_block) = child.cast::<TextBlock>() {
-                        let _ = text_block.SetText(text);
-                    }
-                }
-            }
+        if let Ok(children) = self
+            .widgets
+            .undo_banner
+            .cast::<IPanel>()
+            .and_then(|p| p.Children())
+            && children.Size().unwrap_or(0) > 0
+            && let Ok(child) = children.GetAt(0)
+            && let Ok(text_block) = child.cast::<TextBlock>()
+        {
+            let _ = text_block.SetText(text);
         }
         *self.last_move.lock().unwrap_or_else(|err| err.into_inner()) = Some(pairs);
 
@@ -248,7 +250,7 @@ impl MainWindow {
 
     /// Restore whatever the last undoable action moved, grouped by the
     /// folder each message came from.
-    fn undo_last_move(&self) {
+    fn undo_last_move(self: &Rc<Self>) {
         let pending = self
             .last_move
             .lock()
@@ -292,6 +294,19 @@ impl MainWindow {
         tracing::debug!(%message, "account error surfaced in the UI");
     }
 
+    /// Unwrap a UI-building result, surfacing the failure through
+    /// [`Self::show_error`] and giving the caller an early exit instead of
+    /// swallowing it.
+    fn require<T, E: std::fmt::Display>(&self, result: Result<T, E>, what: &str) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.show_error(&format!("Could not {what}: {error}"));
+                None
+            }
+        }
+    }
+
     /// Show a simple toast notification with no action buttons.
     fn show_simple_toast(&self, title: &str, body: &str) {
         if !self.app.config().ui.notifications {
@@ -300,14 +315,15 @@ impl MainWindow {
         let Some(notifier) = &self.app.toast_notifier else {
             return;
         };
-        let xml =
-            match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastGeneric) {
-                Ok(xml) => xml,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to get the toast template");
-                    return;
-                }
-            };
+        let xml = match ToastNotificationManager::GetTemplateContent(
+            mailin_winui_sys::TOAST_TEMPLATE_GENERIC,
+        ) {
+            Ok(xml) => xml,
+            Err(error) => {
+                tracing::warn!(%error, "failed to get the toast template");
+                return;
+            }
+        };
         let text_nodes = match xml.GetElementsByTagName("text") {
             Ok(nodes) => nodes,
             Err(error) => {
@@ -334,7 +350,7 @@ impl MainWindow {
     }
 
     fn show_toast_notification(
-        &self,
+        self: &Rc<Self>,
         account_id: AccountId,
         text: &str,
         message_ids: &[MessageId],
@@ -348,14 +364,15 @@ impl MainWindow {
             return;
         };
         // Use ToastGeneric template to support custom action buttons
-        let xml =
-            match ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastGeneric) {
-                Ok(xml) => xml,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to get the toast template");
-                    return;
-                }
-            };
+        let xml = match ToastNotificationManager::GetTemplateContent(
+            mailin_winui_sys::TOAST_TEMPLATE_GENERIC,
+        ) {
+            Ok(xml) => xml,
+            Err(error) => {
+                tracing::warn!(%error, "failed to get the toast template");
+                return;
+            }
+        };
 
         // Set up the visual content (title and body)
         let text_nodes = match xml.GetElementsByTagName("text") {
@@ -388,12 +405,25 @@ impl MainWindow {
         );
 
         // Parse the actions XML and append to the toast XML
-        if let Ok(actions_doc) = mailin_winui_sys::XmlDocument::new() {
-            let _ = actions_doc.LoadXml(&actions_xml);
+        if let Ok(actions_doc) = mailin_winui_sys::activate::<
+            mailin_winui_sys::XmlDocument,
+            mailin_winui_sys::XmlDocument,
+        >() {
+            // `LoadXml` lives on `IXmlDocumentIO`, one interface up from the
+            // document's primary interface.
+            if let Ok(io) = actions_doc.cast::<mailin_winui_sys::IXmlDocumentIO>() {
+                let _ = io.LoadXml(&actions_xml);
+            }
             if let Ok(actions_element) = actions_doc.DocumentElement() {
                 match xml.DocumentElement() {
                     Ok(doc_element) => {
-                        let _ = doc_element.AppendChild(&actions_element);
+                        // `AppendChild` takes an `IXmlNode`.
+                        if let (Ok(doc_node), Ok(action_node)) = (
+                            doc_element.cast::<mailin_winui_sys::IXmlNode>(),
+                            actions_element.cast::<mailin_winui_sys::IXmlNode>(),
+                        ) {
+                            let _ = doc_node.AppendChild(&action_node);
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(%error, "failed to read the toast document root")
@@ -412,7 +442,7 @@ impl MainWindow {
 
         // Handle toast activation (button clicks)
         let this = Rc::clone(self);
-        let _activated_token = toast.Activated(&TypedEventHandler::new(move |_sender, args| {
+        let _activated_token = toast.Activated(move |_sender, args| {
             fn parse_action(prefix: &str, argument: &str) -> Option<(AccountId, Vec<MessageId>)> {
                 let rest = argument.strip_prefix(prefix)?;
                 let mut parts = rest.splitn(2, ':');
@@ -427,26 +457,31 @@ impl MainWindow {
                     .unwrap_or_default();
                 Some((account_id, ids))
             }
-            if let Ok(args) = args {
-                if let Ok(argument) = args.Argument() {
-                    let arg_str = argument.to_string();
-                    if let Some((account_id, ids)) = parse_action("mark-read:", &arg_str) {
-                        this.notification_mark_read(account_id, ids);
-                    } else if let Some((account_id, ids)) = parse_action("archive:", &arg_str) {
-                        this.notification_archive(account_id, ids);
-                    } else if let Some((account_id, ids)) = parse_action("open:", &arg_str) {
-                        // M4-I: per-message activation (scaffold). Full window/message
-                        // navigation requires UI-thread dispatch + selection plumbing.
-                        tracing::info!(
-                            %account_id,
-                            ?ids,
-                            "toast open activation received (scaffold)"
-                        );
-                    }
+            // The activation carries the arguments interface behind the
+            // plain `IInspectable` the handler receives.
+            let activated = args
+                .as_ref()
+                .and_then(|args| {
+                    args.cast::<mailin_winui_sys::IToastNotificationActivatedEventArgs>()
+                        .ok()
+                })
+                .and_then(|toast_args| toast_args.Argument().ok());
+            if let Some(argument) = activated {
+                if let Some((account_id, ids)) = parse_action("mark-read:", &argument) {
+                    this.notification_mark_read(account_id, ids);
+                } else if let Some((account_id, ids)) = parse_action("archive:", &argument) {
+                    this.notification_archive(account_id, ids);
+                } else if let Some((account_id, ids)) = parse_action("open:", &argument) {
+                    // M4-I: per-message activation (scaffold). Full window/message
+                    // navigation requires UI-thread dispatch + selection plumbing.
+                    tracing::info!(
+                        %account_id,
+                        ?ids,
+                        "toast open activation received (scaffold)"
+                    );
                 }
             }
-            Ok(())
-        }));
+        });
 
         if let Err(error) = notifier.Show(&toast) {
             tracing::warn!(%error, "failed to show the toast notification");
@@ -879,42 +914,36 @@ impl MainWindow {
                     }
                 }
                 // Quick actions: populate the bar and wire hover handlers.
-                if quick_actions_enabled {
-                    if let Some(actions_bar) = &actions_bar {
-                        for action in &quick_action_items {
-                            if let Ok(btn) = ui::button(
-                                action.label(),
-                                Some(action.label()),
-                                Some(action.label()),
-                            ) {
-                                let this = Rc::clone(self);
-                                let action = *action;
-                                let mid = id;
-                                if let Ok(revoker) = ui::on_click(&btn, move || {
-                                    this.run_quick_action(action, mid);
-                                }) {
-                                    self.message_events.keep(revoker);
-                                }
-                                let _ = ui::append(actions_bar, &btn);
+                if quick_actions_enabled && let Some(actions_bar) = &actions_bar {
+                    for action in &quick_action_items {
+                        if let Ok(btn) =
+                            ui::button(action.label(), Some(action.label()), Some(action.label()))
+                        {
+                            let this = Rc::clone(self);
+                            let action = *action;
+                            let mid = id;
+                            if let Ok(revoker) = ui::on_click(&btn, move || {
+                                this.run_quick_action(action, mid);
+                            }) {
+                                self.message_events.keep(revoker);
                             }
+                            let _ = ui::append(actions_bar, &btn);
                         }
-                        // PointerEntered → show actions bar.
-                        if let Ok(element) = row.cast::<mailin_winui_sys::IUIElement>() {
-                            let bar = actions_bar.clone();
-                            if let Ok(revoker) = element.PointerEntered(move |_, _| {
-                                let _ = ui::set_visible(&bar, true);
-                                Ok(())
-                            }) {
-                                self.message_events.keep(revoker);
-                            }
-                            // PointerExited → hide actions bar.
-                            let bar = actions_bar.clone();
-                            if let Ok(revoker) = element.PointerExited(move |_, _| {
-                                let _ = ui::set_visible(&bar, false);
-                                Ok(())
-                            }) {
-                                self.message_events.keep(revoker);
-                            }
+                    }
+                    // PointerEntered → show actions bar.
+                    if let Ok(element) = row.cast::<mailin_winui_sys::IUIElement>() {
+                        let bar = actions_bar.clone();
+                        if let Ok(revoker) = element.PointerEntered(move |_, _| {
+                            let _ = ui::set_visible(&bar, true);
+                        }) {
+                            self.message_events.keep(revoker);
+                        }
+                        // PointerExited → hide actions bar.
+                        let bar = actions_bar.clone();
+                        if let Ok(revoker) = element.PointerExited(move |_, _| {
+                            let _ = ui::set_visible(&bar, false);
+                        }) {
+                            self.message_events.keep(revoker);
                         }
                     }
                 }
@@ -978,15 +1007,14 @@ impl MainWindow {
         for root in &roots {
             flat_messages.push(root.clone());
             let root_key = root.thread_root_key.as_ref().or(root.message_id.as_ref());
-            if let Some(key) = root_key {
-                if expanded.contains(key) {
-                    // Fetch replies for this thread
-                    if let Ok(replies) = self.app.mailin.store().list_thread_replies(key) {
-                        for mut reply in replies {
-                            reply.thread_depth = 1; // All replies at depth 1 for flat view
-                            flat_messages.push(reply);
-                        }
-                    }
+            if let Some(key) = root_key
+                && expanded.contains(key)
+                && let Ok(replies) = self.app.mailin.store().list_thread_replies(key)
+            {
+                // Fetch replies for this thread
+                for mut reply in replies {
+                    reply.thread_depth = 1; // All replies at depth 1 for flat view
+                    flat_messages.push(reply);
                 }
             }
         }
@@ -1034,42 +1062,36 @@ impl MainWindow {
                     }
                 }
                 // Quick actions: populate the bar and wire hover handlers.
-                if quick_actions_enabled {
-                    if let Some(actions_bar) = &actions_bar {
-                        for action in &quick_action_items {
-                            if let Ok(btn) = ui::button(
-                                action.label(),
-                                Some(action.label()),
-                                Some(action.label()),
-                            ) {
-                                let this = Rc::clone(self);
-                                let action = *action;
-                                let mid = id;
-                                if let Ok(revoker) = ui::on_click(&btn, move || {
-                                    this.run_quick_action(action, mid);
-                                }) {
-                                    self.message_events.keep(revoker);
-                                }
-                                let _ = ui::append(actions_bar, &btn);
+                if quick_actions_enabled && let Some(actions_bar) = &actions_bar {
+                    for action in &quick_action_items {
+                        if let Ok(btn) =
+                            ui::button(action.label(), Some(action.label()), Some(action.label()))
+                        {
+                            let this = Rc::clone(self);
+                            let action = *action;
+                            let mid = id;
+                            if let Ok(revoker) = ui::on_click(&btn, move || {
+                                this.run_quick_action(action, mid);
+                            }) {
+                                self.message_events.keep(revoker);
                             }
+                            let _ = ui::append(actions_bar, &btn);
                         }
-                        // PointerEntered → show actions bar.
-                        if let Ok(element) = row.cast::<mailin_winui_sys::IUIElement>() {
-                            let bar = actions_bar.clone();
-                            if let Ok(revoker) = element.PointerEntered(move |_, _| {
-                                let _ = ui::set_visible(&bar, true);
-                                Ok(())
-                            }) {
-                                self.message_events.keep(revoker);
-                            }
-                            // PointerExited → hide actions bar.
-                            let bar = actions_bar.clone();
-                            if let Ok(revoker) = element.PointerExited(move |_, _| {
-                                let _ = ui::set_visible(&bar, false);
-                                Ok(())
-                            }) {
-                                self.message_events.keep(revoker);
-                            }
+                    }
+                    // PointerEntered → show actions bar.
+                    if let Ok(element) = row.cast::<mailin_winui_sys::IUIElement>() {
+                        let bar = actions_bar.clone();
+                        if let Ok(revoker) = element.PointerEntered(move |_, _| {
+                            let _ = ui::set_visible(&bar, true);
+                        }) {
+                            self.message_events.keep(revoker);
+                        }
+                        // PointerExited → hide actions bar.
+                        let bar = actions_bar.clone();
+                        if let Ok(revoker) = element.PointerExited(move |_, _| {
+                            let _ = ui::set_visible(&bar, false);
+                        }) {
+                            self.message_events.keep(revoker);
                         }
                     }
                 }
@@ -1250,6 +1272,7 @@ impl MainWindow {
                 bcc: env.bcc.join(", "),
                 subject: String::new(),
                 body: String::new(),
+                html_body: None,
                 in_reply_to: None,
                 references: Vec::new(),
                 draft_key: None,
@@ -1337,7 +1360,7 @@ impl MainWindow {
 
     // Persist "always allow" for the sender's domain on the current account
     // and re-render the message with remote content enabled.
-    fn trust_current_sender(&self) {
+    fn trust_current_sender(self: &Rc<Self>) {
         let (message_id, account_id) = {
             let state = self.state();
             (state.selection.message, state.selection.account)
@@ -1598,31 +1621,31 @@ impl MainWindow {
             .collect();
 
         // "Download all" button when multiple attachments
-        if visible.len() > 1 {
-            if let Ok(download_all_row) = ui::stack(Orientation::Horizontal, 8.0) {
-                let build_download_all = || -> anyhow::Result<()> {
-                    ui::padding(&download_all_row, 4.0, 4.0, 4.0, 4.0)?;
-                    let download_all = ui::button(
-                        "Download all",
-                        Some("Download all"),
-                        Some("Download all attachments"),
-                    )?;
-                    let this = Rc::clone(self);
-                    let mid = message_id;
-                    let visible_clone = visible.clone();
-                    let revoker = ui::on_click(&download_all, move || {
-                        for att in &visible_clone {
-                            let _ = this.save_attachment(mid, att.clone());
-                        }
-                    })?;
-                    self.attachment_events.keep(revoker);
-                    ui::append(&download_all_row, &download_all)?;
-                    let _ = ui::append(&self.widgets.attachments_panel, &download_all_row);
-                    Ok(())
-                };
-                if let Err(error) = build_download_all() {
-                    tracing::warn!(%error, "could not build the download-all attachment row");
-                }
+        if visible.len() > 1
+            && let Ok(download_all_row) = ui::stack(Orientation::Horizontal, 8.0)
+        {
+            let build_download_all = || -> anyhow::Result<()> {
+                ui::padding(&download_all_row, 4.0, 4.0, 4.0, 4.0)?;
+                let download_all = ui::button(
+                    "Download all",
+                    Some("Download all"),
+                    Some("Download all attachments"),
+                )?;
+                let this = Rc::clone(self);
+                let mid = message_id;
+                let visible_clone = visible.clone();
+                let revoker = ui::on_click(&download_all, move || {
+                    for att in &visible_clone {
+                        this.save_attachment(mid, att.clone());
+                    }
+                })?;
+                self.attachment_events.keep(revoker);
+                ui::append(&download_all_row, &download_all)?;
+                let _ = ui::append(&self.widgets.attachments_panel, &download_all_row);
+                Ok(())
+            };
+            if let Err(error) = build_download_all() {
+                tracing::warn!(%error, "could not build the download-all attachment row");
             }
         }
 
@@ -1639,22 +1662,18 @@ impl MainWindow {
         message_id: MessageId,
         attachment: AttachmentMeta,
     ) -> Result<StackPanel> {
-        let is_image = attachment
-            .mime_type
-            .as_deref()
-            .map(|m| m.starts_with("image/"))
-            .unwrap_or(false);
-        let is_pdf = attachment.mime_type.as_deref() == Some("application/pdf");
+        let is_image = attachment.mime_type.starts_with("image/");
+        let is_pdf = attachment.mime_type == "application/pdf";
         let is_large = attachment.size.map(|s| s > 40_000_000).unwrap_or(false);
 
         let row = ui::stack(Orientation::Horizontal, 8.0)?;
         ui::padding(&row, 4.0, 4.0, 4.0, 4.0)?;
 
         // Preview for images and PDFs
-        if is_image || is_pdf {
-            if let Ok(preview) = self.attachment_preview(message_id, attachment.clone()) {
-                ui::append(&row, &preview)?;
-            }
+        if (is_image || is_pdf)
+            && let Ok(preview) = self.attachment_preview(message_id, attachment.clone())
+        {
+            ui::append(&row, &preview)?;
         }
 
         let name = ui::text(&attachment.display_name())?;
@@ -1680,8 +1699,8 @@ impl MainWindow {
 
         let save = ui::button(
             "Save",
-            Some(&format!("Save {}", attachment.display_name)),
-            Some(&format!("Save attachment {}", attachment.display_name)),
+            Some(&format!("Save {}", attachment.display_name())),
+            Some(&format!("Save attachment {}", attachment.display_name())),
         )?;
         let this = Rc::clone(self);
         let attachment = attachment.clone();
@@ -1702,26 +1721,27 @@ impl MainWindow {
         ui::min_width(&container, 60.0)?;
         ui::min_height(&container, 60.0)?;
 
-        let is_image = attachment
-            .mime_type
-            .as_deref()
-            .map(|m| m.starts_with("image/"))
-            .unwrap_or(false);
-        let is_pdf = attachment.mime_type.as_deref() == Some("application/pdf");
+        let is_image = attachment.mime_type.starts_with("image/");
+        let is_pdf = attachment.mime_type == "application/pdf";
 
         if is_image {
             // Image preview - show thumbnail
-            if let Ok(data) = self.app.mailin.attachment(message_id, &attachment.part_id) {
-                if let Some(bytes) = data.data {
-                    if let Ok(bitmap) = Self::bytes_to_bitmap(&bytes) {
-                        let image = mailin_winui_sys::Image::new()?;
-                        image.SetSource(&bitmap)?;
-                        image.SetStretch(mailin_winui_sys::Stretch::Uniform)?;
-                        image.SetMaxWidth(80.0)?;
-                        image.SetMaxHeight(80.0)?;
-                        ui::append(&container, &image)?;
-                    }
+            if let Ok(Some(data)) = self.app.mailin.attachment(message_id, &attachment.part_id)
+                && let Some(bytes) = data.data
+                && let Ok(bitmap) = Self::bytes_to_bitmap(&bytes)
+            {
+                let image =
+                    mailin_winui_sys::activate::<mailin_winui_sys::Image, mailin_winui_sys::Image>(
+                    )?;
+                image.SetSource(&bitmap)?;
+                image.SetStretch(mailin_winui_sys::Stretch::Uniform)?;
+                // `MaxWidth`/`MaxHeight` live on `IFrameworkElement`,
+                // one interface up from the image's primary interface.
+                if let Ok(element) = image.cast::<IFrameworkElement>() {
+                    element.SetMaxWidth(80.0)?;
+                    element.SetMaxHeight(80.0)?;
                 }
+                ui::append(&container, &image)?;
             }
         } else if is_pdf {
             // PDF preview - show icon with page count
@@ -1737,19 +1757,27 @@ impl MainWindow {
     }
 
     fn bytes_to_bitmap(bytes: &[u8]) -> Result<mailin_winui_sys::BitmapImage> {
-        use mailin_winui_sys::{BitmapImage, InMemoryRandomAccessStream};
-        use windows::Storage::Streams::DataWriter;
+        use mailin_winui_sys::{
+            BitmapImage, IBitmapSource, IOutputStream, InMemoryRandomAccessStream,
+        };
         use windows_core::Interface;
 
-        let stream = InMemoryRandomAccessStream::new()?;
-        let writer = DataWriter::CreateDataWriter(&stream)?;
+        // The image bytes go straight into an in-memory stream: the write
+        // side of `IRandomAccessStream` is `IOutputStream`.
+        let stream =
+            mailin_winui_sys::activate::<InMemoryRandomAccessStream, InMemoryRandomAccessStream>()?;
+        let output: IOutputStream = stream.cast()?;
+        // `IOutputStream` only offers asynchronous writes; `DataWriter` is
+        // the synchronous writer on top of it.
+        let writer = mailin_winui_sys::DataWriter::CreateDataWriter(&output)?;
         writer.WriteBytes(bytes)?;
-        writer.StoreAsync()?.get()?;
-        writer.FlushAsync()?.get()?;
+        // Detaching flushes the bytes into the underlying stream.
+        let _ = writer.DetachStream()?;
         stream.Seek(0)?;
 
-        let bitmap = BitmapImage::new()?;
-        bitmap.SetSource(&stream)?;
+        let bitmap = mailin_winui_sys::activate::<BitmapImage, BitmapImage>()?;
+        let source: IBitmapSource = bitmap.cast()?;
+        source.SetSource(&stream)?;
         Ok(bitmap)
     }
 
@@ -2326,14 +2354,14 @@ impl MainWindow {
             let checkboxes = self.checkboxes.borrow().clone();
             let mut target: Option<(usize, MessageId, bool)> = None;
             for (i, checkbox) in checkboxes.iter().enumerate() {
-                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
-                    if let Ok(Some(true)) = toggle.IsChecked() {
-                        if i < state.messages.len() {
-                            let msg = &state.messages[i];
-                            target = Some((i, msg.id, state.selected.contains(&msg.id)));
-                        }
-                        break;
+                if let Ok(toggle) = checkbox.cast::<IToggleButton>()
+                    && let Ok(true) = toggle.IsChecked()
+                {
+                    if i < state.messages.len() {
+                        let msg = &state.messages[i];
+                        target = Some((i, msg.id, state.selected.contains(&msg.id)));
                     }
+                    break;
                 }
             }
             target
@@ -2355,16 +2383,16 @@ impl MainWindow {
             let checkboxes = self.checkboxes.borrow();
             checkboxes.get(index).cloned()
         };
-        if let Some(checkbox) = checkbox {
-            if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
-                let _ = toggle.SetIsChecked(Some(!selected_before));
-            }
+        if let Some(checkbox) = checkbox
+            && let Ok(toggle) = checkbox.cast::<IToggleButton>()
+        {
+            let _ = toggle.SetIsChecked(Some(!selected_before));
         }
         self.update_bulk_bar();
     }
 
     /// Open the currently selected message (Enter).
-    fn open_selected_message(&self) {
+    fn open_selected_message(self: &Rc<Self>) {
         // Copy the target message out and drop the state guard first:
         // open_message() locks `state` again, which would deadlock here.
         let target = {
@@ -2486,45 +2514,49 @@ impl MainWindow {
             }
         };
         // Use a simple text input dialog for folder name
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
-            self.show_error(&format!("Could not create dialog: {error}"));
+        let Some(dialog) = self.require(mailin_winui_sys::ContentDialog::new(), "create dialog")
+        else {
             return;
-        });
-        let title = ui::text("New Folder").unwrap_or_else(|error| {
-            self.show_error(&format!("Could not build dialog text: {error}"));
+        };
+        let Some(title) = self.require(ui::text("New Folder"), "build dialog text") else {
             return;
-        });
+        };
         let _ = dialog.SetTitle(&title);
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not lay out dialog: {error}"));
+        let Some(panel) = self.require(
+            ui::stack_sm(mailin_winui_sys::Orientation::Vertical),
+            "lay out dialog",
+        ) else {
             return;
-        });
+        };
         ui::margin_lg(&panel).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
-        let input = ui::text_box("Folder name", Some("Folder name")).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not create text box: {error}"));
+        let Some(input) = self.require(
+            ui::text_box("Folder name", Some("Folder name")),
+            "create text box",
+        ) else {
             return;
-        });
+        };
         ui::append(&panel, &input).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetPrimaryButtonText("Create");
         let _ = dialog.SetCloseButtonText("Cancel");
         let this_clone = this.clone();
-        let _ =
-            dialog.PrimaryButtonClick(&mailin_winui_sys::TypedEventHandler::new(move |_, _| {
-                let name = ui::text_value(&input).trim().to_string();
-                if !name.is_empty() {
-                    this_clone.app.engine.create_folder(account_id, &name);
-                    this_clone.refresh_folders();
-                }
-                Ok(())
-            }));
-        let _ = dialog.SetXamlRoot(&xaml_root);
+        let _ = dialog.PrimaryButtonClick(move |_, _| {
+            let name = ui::text_value(&input).trim().to_string();
+            if !name.is_empty() {
+                this_clone.app.engine.create_folder(
+                    account_id,
+                    name,
+                    "/".to_owned(),
+                    FolderRole::Other,
+                );
+                this_clone.refresh_folders();
+            }
+        });
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
         let _ = dialog.ShowAsync();
     }
 
@@ -2545,53 +2577,50 @@ impl MainWindow {
         let Some(folder) = folders.iter().find(|f| f.id.0 == folder_id) else {
             return;
         };
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
-            self.show_error(&format!("Could not create dialog: {error}"));
+        let Some(dialog) = self.require(mailin_winui_sys::ContentDialog::new(), "create dialog")
+        else {
             return;
-        });
-        let title = ui::text("Rename Folder").unwrap_or_else(|error| {
-            self.show_error(&format!("Could not build dialog text: {error}"));
+        };
+        let Some(title) = self.require(ui::text("Rename Folder"), "build dialog text") else {
             return;
-        });
+        };
         let _ = dialog.SetTitle(&title);
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not lay out dialog: {error}"));
+        let Some(panel) = self.require(
+            ui::stack_sm(mailin_winui_sys::Orientation::Vertical),
+            "lay out dialog",
+        ) else {
             return;
-        });
+        };
         ui::margin_lg(&panel).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
-        let input =
-            ui::text_box("New folder name", Some("New folder name")).unwrap_or_else(|error| {
-                self.show_error(&format!("Could not create text box: {error}"));
-                return;
-            });
+        let Some(input) = self.require(
+            ui::text_box("New folder name", Some("New folder name")),
+            "create text box",
+        ) else {
+            return;
+        };
         input.SetText(&folder.name).unwrap_or_else(|error| {
             self.show_error(&format!("Could not fill dialog text box: {error}"));
-            return;
         });
         ui::append(&panel, &input).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetPrimaryButtonText("Rename");
         let _ = dialog.SetCloseButtonText("Cancel");
         let this_clone = this.clone();
-        let _ =
-            dialog.PrimaryButtonClick(&mailin_winui_sys::TypedEventHandler::new(move |_, _| {
-                let name = ui::text_value(&input).trim().to_string();
-                if !name.is_empty() {
-                    this_clone
-                        .app
-                        .engine
-                        .rename_folder(FolderId(folder_id), &name);
-                    this_clone.refresh_folders();
-                }
-                Ok(())
-            }));
-        let _ = dialog.SetXamlRoot(&xaml_root);
+        let _ = dialog.PrimaryButtonClick(move |_, _| {
+            let name = ui::text_value(&input).trim().to_string();
+            if !name.is_empty() {
+                this_clone
+                    .app
+                    .engine
+                    .rename_folder(FolderId(folder_id), name);
+                this_clone.refresh_folders();
+            }
+        });
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
         let _ = dialog.ShowAsync();
     }
 
@@ -2607,46 +2636,42 @@ impl MainWindow {
                 return;
             }
         };
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
-            self.show_error(&format!("Could not create dialog: {error}"));
+        let Some(dialog) = self.require(mailin_winui_sys::ContentDialog::new(), "create dialog")
+        else {
             return;
-        });
-        let title = ui::text("Delete Folder").unwrap_or_else(|error| {
-            self.show_error(&format!("Could not build dialog text: {error}"));
+        };
+        let Some(title) = self.require(ui::text("Delete Folder"), "build dialog text") else {
             return;
-        });
+        };
         let _ = dialog.SetTitle(&title);
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not lay out dialog: {error}"));
+        let Some(panel) = self.require(
+            ui::stack_sm(mailin_winui_sys::Orientation::Vertical),
+            "lay out dialog",
+        ) else {
             return;
-        });
+        };
         ui::margin_lg(&panel).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
-        let msg = ui::text(&format!(
-            "Are you sure you want to delete this folder? This action cannot be undone."
-        ))
-        .unwrap_or_else(|error| {
-            self.show_error(&format!("Could not build dialog text: {error}"));
+        let Some(msg) = self.require(
+            ui::text("Are you sure you want to delete this folder? This action cannot be undone."),
+            "build dialog text",
+        ) else {
             return;
-        });
+        };
         ui::append(&panel, &msg).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetPrimaryButtonText("Delete");
         let _ = dialog.SetCloseButtonText("Cancel");
         let _ = dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Close);
         let this_clone = this.clone();
-        let _ =
-            dialog.PrimaryButtonClick(&mailin_winui_sys::TypedEventHandler::new(move |_, _| {
-                this_clone.app.engine.delete_folder(FolderId(folder_id));
-                this_clone.refresh_folders();
-                Ok(())
-            }));
-        let _ = dialog.SetXamlRoot(&xaml_root);
+        let _ = dialog.PrimaryButtonClick(move |_, _| {
+            this_clone.app.engine.delete_folder(FolderId(folder_id));
+            this_clone.refresh_folders();
+        });
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
         let _ = dialog.ShowAsync();
     }
 
@@ -2655,11 +2680,9 @@ impl MainWindow {
             return;
         };
         let this = Rc::clone(self);
-        if subscribe {
-            this.app.engine.subscribe_folder(FolderId(folder_id));
-        } else {
-            this.app.engine.unsubscribe_folder(FolderId(folder_id));
-        }
+        this.app
+            .engine
+            .subscribe_folder(FolderId(folder_id), subscribe);
         this.refresh_folders();
     }
 
@@ -2679,38 +2702,36 @@ impl MainWindow {
         let Some(folder) = folders.iter().find(|f| f.id.0 == folder_id) else {
             return;
         };
-        let dialog = mailin_winui_sys::ContentDialog::new().unwrap_or_else(|error| {
-            self.show_error(&format!("Could not create dialog: {error}"));
+        let Some(dialog) = self.require(mailin_winui_sys::ContentDialog::new(), "create dialog")
+        else {
             return;
-        });
-        let title = ui::text("Folder Properties").unwrap_or_else(|error| {
-            self.show_error(&format!("Could not build dialog text: {error}"));
+        };
+        let Some(title) = self.require(ui::text("Folder Properties"), "build dialog text") else {
             return;
-        });
+        };
         let _ = dialog.SetTitle(&title);
-        let panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not lay out dialog: {error}"));
+        let Some(panel) = self.require(
+            ui::stack_sm(mailin_winui_sys::Orientation::Vertical),
+            "lay out dialog",
+        ) else {
             return;
-        });
+        };
         ui::margin_lg(&panel).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
         let info = format!(
             "Name: {}\nRole: {:?}\nSubscribed: {}\nUnread: {}\nTotal messages: {}",
             folder.name, folder.role, folder.subscribed, folder.unread_count, folder.message_count
         );
-        let msg = ui::text(&info).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not build dialog text: {error}"));
+        let Some(msg) = self.require(ui::text(&info), "build dialog text") else {
             return;
-        });
+        };
         ui::append(&panel, &msg).unwrap_or_else(|error| {
             self.show_error(&format!("Could not lay out dialog: {error}"));
-            return;
         });
         let _ = ui::set_content(&dialog, &panel);
         let _ = dialog.SetCloseButtonText("Close");
-        let _ = dialog.SetXamlRoot(&xaml_root);
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
         let _ = dialog.ShowAsync();
     }
 
@@ -2880,6 +2901,12 @@ impl MainWindow {
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                     Ok(Event::OutboxChanged) => outbox_changed = true,
                     Ok(Event::AccountError { message, .. }) => account_error = Some(message),
+                    Ok(Event::ScheduledActionRan { .. }) => {
+                        // A scheduled action moved messages around: refresh the
+                        // folders and the message list.
+                        folders_changed = true;
+                        messages_changed = true;
+                    }
                     Ok(Event::ActionFailed { message, .. }) => {
                         self.show_error(&message);
                     }
@@ -3290,12 +3317,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         Some("Always load remote content from this sender"),
     )?;
     let remote_dismiss = ui::button("×", Some("Dismiss"), Some("Not now"))?;
-    remote_dismiss.SetPadding(mailin_winui_sys::Thickness {
-        left: 8.0,
-        top: 2.0,
-        right: 8.0,
-        bottom: 2.0,
-    })?;
+    ui::padding(&remote_dismiss, 8.0, 2.0, 8.0, 2.0)?;
     ui::append(&remote_panel, &remote_text)?;
     ui::append(&remote_panel, &remote_once)?;
     ui::append(&remote_panel, &remote_trust)?;
@@ -3350,81 +3372,89 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     window.SetTitle("Mailin")?;
     window.SetContent(&root)?;
 
-    // Responsive layout handler
-    let mail_grid = mail.clone();
-    let sidebar = folder_scroller.clone();
-    let list_pane = message_scroll.clone();
-    let reader_host = reader_host.clone();
+    // Responsive layout handler.
+    //
+    // On narrow windows the folder list collapses into the hamburger menu.
+    // The size handler and the hamburger button share the state, so they
+    // always agree on whether the list is open.
+    let sidebar_for_layout = sidebar.clone();
     let hamburger_btn = hamburger.clone();
-    let root_grid = root.clone();
-    let toolbar_panel = toolbar.clone();
+    let sidebar_open = Rc::new(Cell::new(true));
+    let was_mobile = Rc::new(Cell::new(false));
+    let sidebar_open_for_size = sidebar_open.clone();
+    let was_mobile_for_size = was_mobile.clone();
 
-    let size_changed_token = window.SizeChanged(&TypedEventHandler::new(move |_sender, args| {
-        if let Ok(args) = args {
-            let width = args.NewSize().unwrap_or_default().Width;
-            let is_mobile = width < BREAKPOINT_MOBILE;
-            let is_tablet = width < BREAKPOINT_TABLET && width >= BREAKPOINT_MOBILE;
-            let is_desktop = width >= BREAKPOINT_TABLET;
+    let size_changed_token = window.SizeChanged(move |_sender, args| {
+        // `NewSize` lives on `ISizeChangedEventArgs`; the window's own event
+        // args type only carries the (empty) window-specific interface.
+        let width = args
+            .as_ref()
+            .and_then(|args| {
+                args.cast::<mailin_winui_sys::ISizeChangedEventArgs>()
+                    .ok()
+                    .and_then(|args| args.NewSize().ok())
+            })
+            .unwrap_or_default()
+            .width as f64;
+        let is_mobile = width < BREAKPOINT_MOBILE;
+        let is_tablet = (BREAKPOINT_MOBILE..BREAKPOINT_TABLET).contains(&width);
 
-            // Show/hide hamburger menu
-            let _ = hamburger_btn.SetVisibility(if is_mobile || is_tablet {
-                Visibility::Visible
-            } else {
-                Visibility::Collapsed
-            });
+        // Show/hide hamburger menu
+        let _ = ui::set_visible(&hamburger_btn, is_mobile || is_tablet);
 
-            // On mobile: collapse sidebar (column 0), show overlay when hamburger clicked
-            // On tablet: narrow sidebar
-            // On desktop: full three-pane layout
-
-            // The Grid with star_column_min automatically handles min/max widths
-            // We just need to handle the hamburger overlay logic
+        // On mobile the folder list is hidden until the hamburger opens it.
+        // On tablet and desktop the grid's star columns size themselves, so
+        // the list is always shown.
+        if is_mobile {
+            if !was_mobile_for_size.replace(true) {
+                // The window just became narrow: collapse the folder list.
+                sidebar_open_for_size.set(false);
+                let _ = ui::set_visible(&sidebar_for_layout, false);
+            }
+        } else {
+            was_mobile_for_size.set(false);
+            sidebar_open_for_size.set(true);
+            let _ = ui::set_visible(&sidebar_for_layout, true);
         }
-        Ok(())
-    }));
+    });
 
     // Store the token to keep the handler alive
     let _ = size_changed_token;
 
     // Hamburger click handler for mobile sidebar toggle
-    let mail_grid_for_hamburger = mail.clone();
     let hamburger_btn_click = hamburger.clone();
-    let sidebar_scroller = folder_scroller.clone();
+    let sidebar_for_hamburger = sidebar.clone();
+    let sidebar_open_for_hamburger = sidebar_open.clone();
     let _hamburger_token = ui::on_click(&hamburger_btn_click, move || {
-        // Toggle sidebar visibility on mobile
-        let is_visible =
-            sidebar_scroller.Visibility().unwrap_or(Visibility::Visible) == Visibility::Visible;
-        let _ = sidebar_scroller.SetVisibility(if is_visible {
-            Visibility::Collapsed
-        } else {
-            Visibility::Visible
-        });
+        let open = !sidebar_open_for_hamburger.get();
+        sidebar_open_for_hamburger.set(open);
+        let _ = ui::set_visible(&sidebar_for_hamburger, open);
     })?;
 
     // Open links in the system browser/mail client instead of navigating
     // the reader WebView. Anything that is not About/HTTP(S)/mailto is
     // cancelled outright.
-    let link_token = body_html.NavigationStarting(&TypedEventHandler::new(move |_, args| {
-        if let Ok(args) = args {
-            if let Ok(uri) = args.Uri() {
-                let lower = uri.to_ascii_lowercase();
-                if lower.starts_with("about:") {
-                    // Initial document from NavigateToString — leave alone.
-                } else if lower.starts_with("http://")
-                    || lower.starts_with("https://")
-                    || lower.starts_with("mailto:")
-                {
-                    let _ = args.SetCancel(true);
-                    let _ = std::process::Command::new("cmd")
-                        .args(["/C", "start", "", &uri])
-                        .spawn();
-                } else {
-                    let _ = args.SetCancel(true);
-                }
+    let link_token = body_html.NavigationStarting(move |_, args| {
+        let Some(args) = args.as_ref() else {
+            return;
+        };
+        if let Ok(uri) = args.Uri() {
+            let lower = uri.to_ascii_lowercase();
+            if lower.starts_with("about:") {
+                // Initial document from NavigateToString — leave alone.
+            } else if lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("mailto:")
+            {
+                let _ = args.SetCancel(true);
+                let _ = std::process::Command::new("cmd")
+                    .args(["/C", "start", "", &uri])
+                    .spawn();
+            } else {
+                let _ = args.SetCancel(true);
             }
         }
-        Ok(())
-    }))?;
+    })?;
 
     let this = Rc::new(MainWindow {
         app: Arc::clone(state),
@@ -3451,7 +3481,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             window: window.clone(),
             title,
             banner,
-            hamburger,
             account_combo,
             add_account,
             edit_account,
@@ -3528,42 +3557,34 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &root,
         VirtualKey::F,
         Some(VirtualKeyModifiers::Control),
-        Some("Focus search (Ctrl+F)"),
         {
             let this = Rc::downgrade(&this);
             move || {
                 if let Some(this) = this.upgrade() {
                     // Focus-first, like Windows: Enter in the search box runs
                     // the search, the button triggers it too.
-                    let _ = this
-                        .widgets
-                        .search
-                        .Focus(mailin_winui_sys::FocusState::Programmatic);
+                    if let Ok(search) = this.widgets.search.cast::<IUIElement>() {
+                        let _ = search.Focus(mailin_winui_sys::FocusState::Programmatic);
+                    }
                 }
             }
         },
     )?);
-    this.events.keep(add_accelerator(
-        &root,
-        VirtualKey::F5,
-        None,
-        Some("Synchronize (F5)"),
-        {
+    this.events
+        .keep(add_accelerator(&root, VirtualKey::F5, None, {
             let this = Rc::downgrade(&this);
             move || {
                 if let Some(this) = this.upgrade() {
                     this.sync_now();
                 }
             }
-        },
-    )?);
+        })?);
     // M3b-3: register Ctrl+N (new message) and Ctrl+R (reply) so they
     // match the advertised tooltips and the help table.
     this.events.keep(add_accelerator(
         &root,
         VirtualKey::N,
         Some(VirtualKeyModifiers::Control),
-        Some("Create a new message (Ctrl+N)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3577,7 +3598,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &root,
         VirtualKey::R,
         Some(VirtualKeyModifiers::Control),
-        Some("Reply to selected message (Ctrl+R)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3591,7 +3611,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &root,
         VirtualKey::A,
         Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
-        Some("Add account (Ctrl+Shift+A)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3606,7 +3625,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &root,
         VirtualKey::R,
         Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
-        Some("Reply all (Ctrl+Shift+R)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3620,7 +3638,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &root,
         VirtualKey::F,
         Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
-        Some("Forward message (Ctrl+Shift+F)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3630,20 +3647,15 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             }
         },
     )?);
-    this.events.keep(add_accelerator(
-        &root,
-        VirtualKey::F1,
-        None,
-        Some("Show shortcuts help (F1)"),
-        {
+    this.events
+        .keep(add_accelerator(&root, VirtualKey::F1, None, {
             let this = Rc::downgrade(&this);
             move || {
                 if let Some(this) = this.upgrade() {
                     this.show_shortcuts_help();
                 }
             }
-        },
-    )?);
+        })?);
     // Bulk-selection shortcuts live on the message list itself rather than
     // the window: scoping them to the pane keeps Ctrl+A working as
     // "select all text" inside the search box and keeps Escape available to
@@ -3652,7 +3664,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &this.widgets.message_scroll,
         VirtualKey::A,
         Some(VirtualKeyModifiers::Control),
-        Some("Select all messages (Ctrl+A)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3666,7 +3677,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &this.widgets.message_scroll,
         VirtualKey::Escape,
         None,
-        Some("Clear selection (Escape)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3683,7 +3693,6 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         &root,
         VirtualKey::P,
         Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
-        Some("Preferences (Ctrl+Shift+P)"),
         {
             let this = Rc::downgrade(&this);
             move || {
@@ -3726,12 +3735,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
 /// pane to keep a shortcut scoped to that pane's focus. The returned revoker
 /// must be kept alive for as long as the shortcut should work; callers store
 /// it alongside their other window event revokers.
-/// `description` sets the KeyboardAccelerator.String for key tips / help.
 fn add_accelerator(
     element: &impl Interface,
     key: VirtualKey,
     modifiers: Option<VirtualKeyModifiers>,
-    description: Option<&str>,
     handler: impl Fn() + 'static,
 ) -> Result<EventRevoker> {
     let accelerator =
@@ -3741,7 +3748,7 @@ fn add_accelerator(
         accelerator.SetModifiers(modifiers)?;
     }
     let revoker = accelerator.Invoked(move |_, _| handler())?;
-    ui::add_keyboard_accelerator(element, &accelerator, description)?;
+    ui::add_keyboard_accelerator(element, &accelerator)?;
     Ok(revoker)
 }
 
@@ -3807,22 +3814,22 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     })?);
     // Enter in the search box runs the search.
     this.events
-        .keep(this.widgets.search.KeyDown(&TypedEventHandler::new({
-            let this = Rc::downgrade(&this);
+        .keep(this.widgets.search.cast::<IUIElement>()?.KeyDown({
+            let this = Rc::downgrade(this);
             move |_, args| {
-                if let Ok(args) = args {
-                    if let Ok(key) = args.Key() {
-                        if key == mailin_winui_sys::VirtualKey::Enter {
-                            if let Some(this) = this.upgrade() {
-                                this.run_search();
-                            }
-                            let _ = args.SetHandled(true);
-                        }
+                let Some(args) = args.as_ref() else {
+                    return;
+                };
+                if let Ok(key) = args.Key()
+                    && key == mailin_winui_sys::VirtualKey::Enter
+                {
+                    if let Some(this) = this.upgrade() {
+                        this.run_search();
                     }
+                    let _ = args.SetHandled(true);
                 }
-                Ok(())
             }
-        }))?);
+        })?);
     this.events.keep(ui::on_click(&this.widgets.load_more, {
         let this = Rc::clone(this);
         move || this.request_more()
@@ -3952,9 +3959,15 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     // selection, Enter to open message.
     let message_scroll = this.widgets.message_scroll.clone();
     let this_weak = Rc::downgrade(this);
-    let key_down_revoker = message_scroll.KeyDown(move |_, args| {
-        if let Some(this) = this_weak.upgrade() {
-            if let Ok(key) = args.Key() {
+    let key_down_revoker = message_scroll
+        .cast::<IUIElement>()?
+        .KeyDown(move |_, args| {
+            let Some(args) = args.as_ref() else {
+                return;
+            };
+            if let Some(this) = this_weak.upgrade()
+                && let Ok(key) = args.Key()
+            {
                 let handled = match key {
                     VirtualKey::Up => {
                         this.select_previous_message();
@@ -3978,8 +3991,7 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
                     let _ = args.SetHandled(true);
                 }
             }
-        }
-    })?;
+        })?;
     this.events.keep(key_down_revoker);
 
     Ok(())
@@ -4025,6 +4037,7 @@ fn role_marker(role: FolderRole) -> &'static str {
         FolderRole::Trash => "🗑",
         FolderRole::Junk => "!",
         FolderRole::Archive => "▣",
+        FolderRole::Snoozed => "⏰",
         FolderRole::Other => "•",
     }
 }
@@ -4082,10 +4095,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let new_folder_item = MenuFlyoutItem::new()?;
     new_folder_item.SetText("New Folder")?;
     let this_clone = this.clone();
-    let new_folder_revoker = new_folder_item.Click(&TypedEventHandler::new(move |_, _| {
-        let _ = this_clone.new_folder_action();
-        Ok(())
-    }))?;
+    let new_folder_revoker = new_folder_item.Click(move |_, _| {
+        this_clone.new_folder_action();
+    })?;
     this.folder_events.keep(new_folder_revoker);
     flyout.Items()?.Append(&item_base(new_folder_item)?)?;
 
@@ -4094,10 +4106,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     rename_item.SetText("Rename Folder")?;
     let this_clone = this.clone();
     let folder_id_clone = folder_id.clone();
-    let rename_revoker = rename_item.Click(&TypedEventHandler::new(move |_, _| {
-        let _ = this_clone.rename_folder_action(&folder_id_clone);
-        Ok(())
-    }))?;
+    let rename_revoker = rename_item.Click(move |_, _| {
+        this_clone.rename_folder_action(&folder_id_clone);
+    })?;
     this.folder_events.keep(rename_revoker);
     flyout.Items()?.Append(&item_base(rename_item)?)?;
 
@@ -4106,10 +4117,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     delete_item.SetText("Delete Folder")?;
     let this_clone = this.clone();
     let folder_id_clone = folder_id.clone();
-    let delete_revoker = delete_item.Click(&TypedEventHandler::new(move |_, _| {
-        let _ = this_clone.delete_folder_action(&folder_id_clone);
-        Ok(())
-    }))?;
+    let delete_revoker = delete_item.Click(move |_, _| {
+        this_clone.delete_folder_action(&folder_id_clone);
+    })?;
     this.folder_events.keep(delete_revoker);
     flyout.Items()?.Append(&item_base(delete_item)?)?;
 
@@ -4124,10 +4134,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let this_clone = this.clone();
     let folder_id_clone = folder_id.clone();
     let sub_scribed = folder.subscribed;
-    let sub_revoker = sub_item.Click(&TypedEventHandler::new(move |_, _| {
-        let _ = this_clone.subscribe_folder_action(&folder_id_clone, !sub_scribed);
-        Ok(())
-    }))?;
+    let sub_revoker = sub_item.Click(move |_, _| {
+        this_clone.subscribe_folder_action(&folder_id_clone, !sub_scribed);
+    })?;
     this.folder_events.keep(sub_revoker);
     flyout.Items()?.Append(&item_base(sub_item)?)?;
 
@@ -4136,10 +4145,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     props_item.SetText("Properties")?;
     let this_clone = this.clone();
     let folder_id_clone = folder_id.clone();
-    let props_revoker = props_item.Click(&TypedEventHandler::new(move |_, _| {
-        let _ = this_clone.folder_properties_action(&folder_id_clone);
-        Ok(())
-    }))?;
+    let props_revoker = props_item.Click(move |_, _| {
+        this_clone.folder_properties_action(&folder_id_clone);
+    })?;
     this.folder_events.keep(props_revoker);
     flyout.Items()?.Append(&item_base(props_item)?)?;
 
@@ -4232,12 +4240,10 @@ fn message_row(
     }
     ui::append(&column, &subject)?;
 
-    if show_snippet {
-        if let Some(snippet) = message.snippet.as_deref() {
-            let text = format::one_line(snippet, 140);
-            if !text.is_empty() {
-                ui::append(&column, &ui::text(&text)?)?;
-            }
+    if show_snippet && let Some(snippet) = message.snippet.as_deref() {
+        let text = format::one_line(snippet, 140);
+        if !text.is_empty() {
+            ui::append(&column, &ui::text(&text)?)?;
         }
     }
 
@@ -4347,10 +4353,10 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
 /// Build the keyboard shortcuts help dialog using XAML (ContentDialog for proper modality).
 fn build_shortcuts_window(xaml_root: &XamlRoot) -> Result<ContentDialog> {
     let dialog = ContentDialog::new().context("could not create shortcuts dialog")?;
-    dialog.SetTitle("Keyboard Shortcuts")?;
+    dialog.SetTitle(&ui::text("Keyboard Shortcuts")?)?;
     dialog.SetPrimaryButtonText("Close")?;
     dialog.SetDefaultButton(ContentDialogButton::Primary)?;
-    dialog.SetXamlRoot(xaml_root)?;
+    ui::set_xaml_root(&dialog, xaml_root)?;
 
     // Build content from XAML
     let content = ui::load::<StackPanel>(
@@ -4502,7 +4508,7 @@ fn build_shortcuts_window(xaml_root: &XamlRoot) -> Result<ContentDialog> {
     // Give the content a floor so the shortcut list does not collapse.
     ui::min_width(&content, 420.0)?;
     ui::min_height(&content, 320.0)?;
-    dialog.SetContent(&content)?;
+    ui::set_content(&dialog, &content)?;
 
     Ok(dialog)
 }

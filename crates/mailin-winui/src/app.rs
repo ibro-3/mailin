@@ -108,7 +108,7 @@ pub fn run() -> Result<()> {
         .unwrap_or_default();
     tracing::info!(
         accounts,
-        page_size = state.config.ui.page_size,
+        page_size = state.config().ui.page_size,
         "starting the WinUI client"
     );
 

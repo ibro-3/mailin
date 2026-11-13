@@ -107,7 +107,6 @@ pub fn show_preferences(
         let dialog = dialog.clone();
         let config = Arc::clone(&config);
         let paths = paths.clone();
-        let state = Arc::clone(state);
         let error_text = error_text.clone();
         let on_saved = Box::new(on_saved) as Box<dyn Fn()>;
         move |_, args| {
@@ -170,15 +169,15 @@ pub fn show_preferences(
                     tracing::error!(%error, "preferences rejected by validation");
                     let _ = error_text.SetText(&format!("Preferences were not saved: {error}"));
                     let _ = ui::set_visible(&error_text, true);
-                    let _ = args.SetCancel(true);
-                    return Ok(());
+                    let _ = args.as_ref().and_then(|args| args.SetCancel(true).ok());
+                    return;
                 }
                 if let Err(error) = guard.save(&paths) {
                     tracing::error!(%error, "could not save the configuration");
                     let _ = error_text.SetText(&format!("Could not save the preferences: {error}"));
                     let _ = ui::set_visible(&error_text, true);
-                    let _ = args.SetCancel(true);
-                    return Ok(());
+                    let _ = args.as_ref().and_then(|args| args.SetCancel(true).ok());
+                    return;
                 }
                 guard.clone()
             };
@@ -474,13 +473,10 @@ fn create_plugins_section(state: &Arc<AppState>, events: &ui::Revokers) -> Resul
         )?,
     )?;
 
-    let state_clone = Arc::clone(state);
     let events_clone = events.clone();
-    let panel_clone = panel.clone();
 
     // Load plugins asynchronously
     let state_for_load = Arc::clone(state);
-    let panel_for_load = panel.clone();
 
     // Since we can't easily do async here, we'll load plugins synchronously for now
     // In a full implementation, this would be async
