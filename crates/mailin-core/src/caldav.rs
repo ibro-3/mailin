@@ -36,6 +36,20 @@ impl CalDavClient {
         body: Option<&str>,
         content_type: Option<&str>,
     ) -> Result<String> {
+        self.request_with_depth(method, url, body, content_type, None)
+    }
+
+    /// Make a WebDAV/CalDAV request with basic auth and a `Depth` header.
+    /// WebDAV PROPFIND defaults to `Depth: 0`, which would hide the child
+    /// collections a calendar listing needs.
+    fn request_with_depth(
+        &self,
+        method: &str,
+        url: &str,
+        body: Option<&str>,
+        content_type: Option<&str>,
+        depth: Option<&str>,
+    ) -> Result<String> {
         let method = method
             .parse::<Method>()
             .map_err(|e| Error::Config(format!("invalid CalDAV HTTP method {method:?}: {e}")))?;
@@ -45,6 +59,9 @@ impl CalDavClient {
             .header("Authorization", basic_auth(&self.username, &self.password));
         if let Some(ct) = content_type {
             req = req.header("Content-Type", ct);
+        }
+        if let Some(depth) = depth {
+            req = req.header("Depth", depth);
         }
         let req = if let Some(b) = body {
             req.body(b.to_string())
@@ -72,26 +89,38 @@ impl CalDavClient {
     }
 
     /// Discover calendar home set for the current user.
+    ///
+    /// RFC 6764 §5: the well-known URI answers with a redirect to the
+    /// calendar home. The agent follows it, so the *final* URI of the
+    /// response is the discovery result — not a `Location:` header inside
+    /// the body.
     pub fn discover_calendar_home(&self) -> Result<String> {
         let url = format!("{}/.well-known/caldav", self.base_url);
-        let body = self.request("GET", &url, None, None)?;
-        // Follow redirect if present (simple handling)
-        if body.contains("Location:") {
-            for line in body.lines() {
-                if let Some(loc) = line.strip_prefix("Location:") {
-                    let loc = loc.trim();
-                    if loc.starts_with("http") {
-                        return Ok(loc.to_string());
-                    }
-                    return Ok(format!(
-                        "{}/{}",
-                        self.base_url.trim_end_matches('/'),
-                        loc.trim_start_matches('/')
-                    ));
-                }
-            }
+        let method = "GET".parse::<Method>().ok();
+        let Some(method) = method else {
+            return Err(Error::Protocol("invalid CalDAV method GET".into()));
+        };
+        let req = http::Request::builder()
+            .method(method)
+            .uri(&url)
+            .header("Authorization", basic_auth(&self.username, &self.password))
+            .body(String::new())
+            .map_err(|e| Error::Protocol(format!("could not build CalDAV request: {e}")))?;
+        let resp = self
+            .agent
+            .run(req)
+            .map_err(|e| Error::Protocol(format!("HTTP error: {e}")))?;
+        let status = resp.status();
+        if !(200..300).contains(&status.as_u16()) {
+            return Err(Error::Protocol(format!(
+                "CalDAV discovery error {status}"
+            )));
         }
-        Ok(format!("{}/calendars/{}", self.base_url, self.username))
+        let final_uri = ureq::ResponseExt::get_uri(&resp).to_string();
+        if final_uri.is_empty() {
+            return Err(Error::Protocol("could not discover CalDAV home".into()));
+        }
+        Ok(final_uri)
     }
 
     /// List all calendars for the current user.
@@ -106,44 +135,64 @@ impl CalDavClient {
     <D:getctag/>
   </D:prop>
 </D:propfind>"#;
-        let xml = self.request(
+        let xml = self.request_with_depth(
             "PROPFIND",
             home_url,
             Some(body),
             Some("application/xml; charset=utf-8"),
+            Some("1"),
         )?;
         parse_calendar_multistatus(&xml, home_url)
     }
 
     /// Sync a calendar (get events with ETag support).
+    ///
+    /// A PROPFIND for the collection tag runs first: when the stored ctag
+    /// still matches the server's, the calendar is unchanged and the full
+    /// event download is skipped entirely.
     pub fn sync_calendar(&self, calendar_url: &str, ctag: Option<&str>) -> Result<Vec<EventInfo>> {
-        let body = if let Some(_ctag_val) = ctag {
-            r#"<?xml version="1.0" encoding="utf-8"?>
+        let server_ctag = self.current_ctag(calendar_url)?;
+        if let Some(stored) = ctag
+            && let Some(server) = &server_ctag
+            && stored == server
+        {
+            tracing::debug!(calendar = %calendar_url, "ctag unchanged; skipping event fetch");
+            return Ok(Vec::new());
+        }
+
+        let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:prop>
     <D:getetag/>
     <C:calendar-data/>
   </D:prop>
-</D:propfind>"#
-                .to_string()
-        } else {
-            // Full sync: request all events
-            r#"<?xml version="1.0" encoding="utf-8"?>
-<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
-  <D:prop>
-    <D:getetag/>
-    <C:calendar-data/>
-  </D:prop>
-</D:propfind>"#
-                .to_string()
-        };
+</D:propfind>"#;
         let xml = self.request(
             "REPORT",
             calendar_url,
-            Some(&body),
+            Some(body),
             Some("application/xml; charset=utf-8"),
         )?;
         parse_event_multistatus(&xml)
+    }
+
+    /// The calendar collection tag (`getctag`) currently reported by the
+    /// server, or `None` when the server does not support it.
+    fn current_ctag(&self, calendar_url: &str) -> Result<Option<String>> {
+        let body = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:propfind xmlns:D="DAV:">
+  <D:prop>
+    <D:getctag/>
+  </D:prop>
+</D:propfind>"#;
+        let xml = self.request_with_depth(
+            "PROPFIND",
+            calendar_url,
+            Some(body),
+            Some("application/xml; charset=utf-8"),
+            Some("0"),
+        )?;
+        Ok(parse_first_prop(&xml, "getctag"))
     }
 }
 
@@ -302,89 +351,97 @@ fn parse_event_multistatus(xml: &str) -> Result<Vec<EventInfo>> {
     Ok(events)
 }
 
-/// Parse iCalendar data into a CalendarEvent.
-pub fn parse_ical_event(ical_data: &str, calendar_id: i64) -> Result<CalendarEvent> {
+/// Parse iCalendar data into one `CalendarEvent` per VEVENT.
+///
+/// An ICS entity may contain several events (for example recurring instances
+/// exported as a series); malformed events are skipped with a warning.
+pub fn parse_ical_events(ical_data: &str, calendar_id: i64) -> Result<Vec<CalendarEvent>> {
     let lines: Vec<&str> = ical_data.lines().collect();
+    let mut events = Vec::new();
     let mut i = 0;
-    let mut in_vevent = false;
-    let mut uid = String::new();
-    let mut summary = String::new();
-    let mut description = String::new();
-    let mut location = String::new();
-    let mut start = 0i64;
-    let mut end = 0i64;
-    let mut dtstart_params: HashMap<String, Vec<String>> = HashMap::new();
-    let mut params: HashMap<String, Vec<String>>;
 
     while i < lines.len() {
-        let line = lines[i];
-        // Handle line folding
-        let mut full_line = line.to_string();
-        i += 1;
-        while i < lines.len() && (lines[i].starts_with(' ') || lines[i].starts_with('\t')) {
-            full_line.push_str(&lines[i][1..]);
+        // Fast-forward to the next VEVENT.
+        while i < lines.len() && lines[i].trim() != "BEGIN:VEVENT" {
             i += 1;
         }
-
-        if full_line == "BEGIN:VEVENT" {
-            in_vevent = true;
-            continue;
-        }
-        if full_line == "END:VEVENT" {
+        if i >= lines.len() {
             break;
         }
-        if !in_vevent {
+        i += 1; // consume BEGIN:VEVENT
+
+        let mut uid = String::new();
+        let mut summary = String::new();
+        let mut description = String::new();
+        let mut location = String::new();
+        let mut start = 0i64;
+        let mut end = 0i64;
+        let mut dtstart_params: HashMap<String, Vec<String>> = HashMap::new();
+
+        while i < lines.len() {
+            // Handle line folding (RFC 5545 §3.1)
+            let mut full_line = lines[i].to_string();
+            i += 1;
+            while i < lines.len() && (lines[i].starts_with(' ') || lines[i].starts_with('\t')) {
+                full_line.push_str(&lines[i][1..]);
+                i += 1;
+            }
+
+            if full_line.trim_end() == "END:VEVENT" {
+                break;
+            }
+
+            // Parse property with parameters
+            let (name, value, params) = parse_ical_property(&full_line);
+
+            match name.as_str() {
+                "UID" => uid = value,
+                "SUMMARY" => summary = value,
+                "DESCRIPTION" => description = value,
+                "LOCATION" => location = value,
+                "DTSTART" => {
+                    start = parse_datetime(&value, &params).unwrap_or(0);
+                    dtstart_params = params;
+                }
+                "DTEND" => end = parse_datetime(&value, &params).unwrap_or(0),
+                _ => {}
+            }
+        }
+
+        if uid.is_empty() || start == 0 {
+            tracing::debug!("skipping VEVENT without UID or DTSTART");
             continue;
         }
 
-        // Parse property with parameters
-        let (name, value, prop_params) = parse_ical_property(&full_line);
-        params = prop_params;
+        // Determine if all-day
+        let all_day = dtstart_params
+            .get("VALUE")
+            .is_some_and(|v| v.iter().any(|val| val == "DATE"));
 
-        match name.as_str() {
-            "UID" => uid = value,
-            "SUMMARY" => summary = value,
-            "DESCRIPTION" => description = value,
-            "LOCATION" => location = value,
-            "DTSTART" => {
-                start = parse_datetime(&value, &params).unwrap_or(0);
-                dtstart_params = params.clone();
-            }
-            "DTEND" => end = parse_datetime(&value, &params).unwrap_or(0),
-            _ => {}
-        }
+        events.push(CalendarEvent {
+            id: 0, // Will be assigned by store
+            calendar_id,
+            uid,
+            summary: if summary.is_empty() {
+                String::new()
+            } else {
+                summary
+            },
+            start_at: start,
+            end_at: end,
+            all_day,
+            location: location.into(),
+            description: description.into(),
+            attendees_json: "[]".to_string(),
+            ics_raw: ical_data.to_string(),
+            etag: None,
+        });
     }
 
-    if uid.is_empty() {
-        return Err(Error::Protocol("Event missing UID".into()));
+    if events.is_empty() {
+        return Err(Error::Protocol("no parsable VEVENT in iCalendar data".into()));
     }
-    if start == 0 {
-        return Err(Error::Protocol("Event missing DTSTART".into()));
-    }
-
-    // Determine if all-day
-    let all_day = dtstart_params
-        .get("VALUE")
-        .is_some_and(|v| v.iter().any(|val| val == "DATE"));
-
-    Ok(CalendarEvent {
-        id: 0, // Will be assigned by store
-        calendar_id,
-        uid,
-        summary: if summary.is_empty() {
-            String::new()
-        } else {
-            summary
-        },
-        start_at: start,
-        end_at: end,
-        all_day,
-        location: location.into(),
-        description: description.into(),
-        attendees_json: "[]".to_string(),
-        ics_raw: ical_data.to_string(),
-        etag: None,
-    })
+    Ok(events)
 }
 
 fn parse_ical_property(line: &str) -> (String, String, HashMap<String, Vec<String>>) {
@@ -425,11 +482,58 @@ fn parse_datetime(value: &str, params: &HashMap<String, Vec<String>>) -> Option<
                 .and_utc()
                 .timestamp()
         })
+    } else if let Some(tzid) = params.get("TZID").and_then(|v| v.first()) {
+        // A TZID-qualified datetime is wall-clock time in that zone (RFC 5545
+        // §3.3.5); convert it to UTC instead of reading it as UTC.
+        match tzid.parse::<chrono_tz::Tz>() {
+            Ok(tz) => {
+                let naive = NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S").ok()?;
+                let local = tz.from_local_datetime(&naive).single()?;
+                Some(local.with_timezone(&Utc).timestamp())
+            }
+            Err(_) => {
+                tracing::warn!(tzid = %tzid, "unknown TZID; falling back to UTC");
+                NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
+                    .ok()
+                    .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
+            }
+        }
     } else {
         NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%S")
             .ok()
             .map(|dt| Utc.from_utc_datetime(&dt).timestamp())
     }
+}
+
+/// The text of the first XML element with the given name in a PROPFIND
+/// multistatus response.
+fn parse_first_prop(xml: &str, prop_name: &str) -> Option<String> {
+    let root = Element::parse(xml.as_bytes()).ok()?;
+    for response in root.children.iter().filter_map(|c| c.as_element()) {
+        if response.name != "response" {
+            continue;
+        }
+        for propstat in response.children.iter().filter_map(|c| c.as_element()) {
+            if propstat.name != "propstat" {
+                continue;
+            }
+            let status_ok = propstat
+                .get_child("status")
+                .and_then(|s| s.get_text())
+                .map(|s| s.contains("200"))
+                .unwrap_or(false);
+            if !status_ok {
+                continue;
+            }
+            if let Some(prop) = propstat.get_child("prop")
+                && let Some(elem) = prop.get_child(prop_name)
+                && let Some(text) = elem.get_text()
+            {
+                return Some(text.into_owned());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -453,7 +557,7 @@ mod tests {
     #[test]
     fn test_parse_ical_basic() {
         let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:test@example.com\nDTSTART:20240115T100000Z\nDTEND:20240115T110000Z\nSUMMARY:Test Event\nEND:VEVENT\nEND:VCALENDAR";
-        let event = parse_ical_event(ical, 1).unwrap();
+        let event = &parse_ical_events(ical, 1).unwrap()[0];
         assert_eq!(event.uid, "test@example.com");
         assert_eq!(event.summary, "Test Event");
         assert!(!event.all_day);
@@ -462,15 +566,51 @@ mod tests {
     #[test]
     fn test_parse_ical_all_day() {
         let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:test2@example.com\nDTSTART;VALUE=DATE:20240115\nDTEND;VALUE=DATE:20240116\nSUMMARY:All Day\nEND:VEVENT\nEND:VCALENDAR";
-        let event = parse_ical_event(ical, 1).unwrap();
+        let event = &parse_ical_events(ical, 1).unwrap()[0];
         assert!(event.all_day);
+    }
+
+    #[test]
+    fn multiple_vevents_parsed() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTART:20240101T100000Z\r\nDTEND:20240101T110000Z\r\nSUMMARY:A\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:b\r\nDTSTART:20240102T100000Z\r\nDTEND:20240102T110000Z\r\nSUMMARY:B\r\nEND:VEVENT\r\nEND:VCALENDAR";
+        let events = parse_ical_events(ics, 1).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].uid, "a");
+        assert_eq!(events[1].uid, "b");
+    }
+
+    #[test]
+    fn malformed_vevents_are_skipped_but_valid_ones_survive() {
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:no uid here\nEND:VEVENT\nBEGIN:VEVENT\nUID:good@example.com\nDTSTART:20240101T100000Z\nSUMMARY:Good\nEND:VEVENT\nEND:VCALENDAR";
+        let events = parse_ical_events(ics, 1).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uid, "good@example.com");
+    }
+
+    #[test]
+    fn tzid_datetime_is_converted_to_utc() {
+        let mut params: HashMap<String, Vec<String>> = HashMap::new();
+        params.insert("TZID".into(), vec!["America/New_York".into()]);
+        // 2024-01-15 10:00 in New York (EST, UTC-5) = 15:00 UTC.
+        let dt = parse_datetime("20240115T100000", &params).unwrap();
+        let expected = parse_datetime("20240115T150000Z", &HashMap::new()).unwrap();
+        assert_eq!(dt, expected);
+    }
+
+    #[test]
+    fn unknown_tzid_falls_back_to_utc() {
+        let mut params: HashMap<String, Vec<String>> = HashMap::new();
+        params.insert("TZID".into(), vec!["Mars/Olympus_Mons".into()]);
+        let dt = parse_datetime("20240115T100000", &params).unwrap();
+        let expected = parse_datetime("20240115T100000Z", &HashMap::new()).unwrap();
+        assert_eq!(dt, expected);
     }
 
     #[test]
     fn test_parse_ical_line_without_colon_does_not_panic() {
         // A content line with no ':' separator must not panic the parser.
         let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:malformed@example.com\nDTSTART:20240115T100000Z\nA LINE WITHOUT ANY COLON AT ALL\nEND:VEVENT\nEND:VCALENDAR";
-        let event = parse_ical_event(ical, 1).expect("malformed line is tolerated");
+        let event = &parse_ical_events(ical, 1).expect("malformed line is tolerated")[0];
         assert_eq!(event.uid, "malformed@example.com");
     }
 
@@ -478,7 +618,7 @@ mod tests {
     fn test_parse_ical_trailing_colon_line_does_not_panic() {
         // "SUMMARY:" carries an empty value and must not panic the parser.
         let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:empty@example.com\nDTSTART:20240115T100000Z\nSUMMARY:\nEND:VEVENT\nEND:VCALENDAR";
-        let event = parse_ical_event(ical, 1).expect("trailing colon is tolerated");
+        let event = &parse_ical_events(ical, 1).expect("trailing colon is tolerated")[0];
         assert_eq!(event.uid, "empty@example.com");
         assert_eq!(event.summary, "");
     }
@@ -487,7 +627,7 @@ mod tests {
     fn test_parse_ical_folded_lines_unfold() {
         // RFC 5545 §3.1: a line break followed by a space/tab is a fold.
         let ical = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:folded@example.com\nDTSTART:20240115T100000Z\nSUMMARY:Weekly sync\n  meeting\nEND:VEVENT\nEND:VCALENDAR";
-        let event = parse_ical_event(ical, 1).expect("folded lines are unfolded");
+        let event = &parse_ical_events(ical, 1).expect("folded lines are unfolded")[0];
         assert_eq!(event.summary, "Weekly sync meeting");
     }
 }

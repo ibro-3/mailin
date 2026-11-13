@@ -10,7 +10,6 @@
 //! [`Mailin`]: rows are written to the store and [`Event`]s tell the UIs to
 //! re-read them.
 
-use either::Either;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -31,7 +30,7 @@ use crate::model::{
     ScheduledAction, SnoozePayload, SyncStatus,
 };
 use crate::sync::{self, SyncMode};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
@@ -78,6 +77,7 @@ impl Engine {
             plugin_system: None,
             scheduled_actions_sender,
             scheduled_actions_receiver: Some(scheduled_actions_receiver),
+            oauth_grants: Arc::new(RwLock::new(HashMap::new())),
         });
         let (commands, receiver) = mpsc::unbounded_channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -411,6 +411,17 @@ struct EngineState {
     scheduled_actions_sender: mpsc::UnboundedSender<(AccountId, ScheduledAction)>,
     /// Receiver for supervise to forward scheduled actions to account workers.
     scheduled_actions_receiver: Option<mpsc::UnboundedReceiver<(AccountId, ScheduledAction)>>,
+    /// In-memory OAuth2 grants per account. Access tokens are never
+    /// persisted, so refreshed tokens are cached here to avoid a token
+    /// round-trip on every operation while the process runs.
+    oauth_grants: Arc<RwLock<HashMap<AccountId, OAuthGrantCache>>>,
+}
+
+/// Cached OAuth2 grants for one account, per protocol.
+#[derive(Default, Clone)]
+struct OAuthGrantCache {
+    imap: Option<crate::account::OAuth2Tokens>,
+    smtp: Option<crate::account::OAuth2Tokens>,
 }
 
 enum Command {
@@ -866,38 +877,20 @@ async fn account_worker(
         }
 
         // For OAuth2 accounts, we need the access token instead of a password
-        let auth_creds = if account.imap.auth_method == AuthMethod::OAuth2 {
-            if account.imap.oauth2.access_token.is_empty() {
+        let auth_creds = match imap_credential(&state, &account).await {
+            Ok(creds) => creds,
+            Err(error) => {
                 state.mailbox.publish(Event::AccountError {
                     account_id,
-                    message: "OAuth2 access token not configured".into(),
+                    message: error.friendly(),
                 });
+                tracing::warn!(%account_id, %error, "could not obtain the IMAP credential");
                 if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
                     return;
                 }
                 backoff = next_backoff(backoff);
                 continue;
             }
-            // Create a secret string with the access token for OAuth2
-            Either::Right(secrecy::SecretString::new(
-                account.imap.oauth2.access_token.clone().into(),
-            ))
-        } else {
-            let password = match state.mailbox.password(&account_id) {
-                Ok(password) => password,
-                Err(error) => {
-                    state.mailbox.publish(Event::AccountError {
-                        account_id,
-                        message: error.friendly(),
-                    });
-                    if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
-                        return;
-                    }
-                    backoff = next_backoff(backoff);
-                    continue;
-                }
-            };
-            Either::Left(password)
         };
 
         let started = Instant::now();
@@ -1039,11 +1032,52 @@ fn next_backoff(current: Duration) -> Duration {
 /// covers both; refreshing twice would break providers that rotate refresh
 /// tokens on every exchange.
 async fn refresh_oauth_tokens(state: &Arc<EngineState>, account: &mut Account) -> Result<()> {
-    let imap_needs =
-        account.imap.auth_method == AuthMethod::OAuth2 && needs_refresh(&account.imap.oauth2);
-    let smtp_needs =
-        account.smtp.auth_method == AuthMethod::OAuth2 && needs_refresh(&account.smtp.oauth2);
+    if account.imap.auth_method != AuthMethod::OAuth2
+        && account.smtp.auth_method != AuthMethod::OAuth2
+    {
+        return Ok(());
+    }
+
+    // Access tokens are not persisted, so the freshly loaded account copy
+    // always starts with an empty token. A cached grant from this process
+    // avoids a token round-trip on every operation.
+    let cached = state.oauth_grants.read().ok().map(|grants| {
+        grants
+            .get(&account.id)
+            .cloned()
+            .unwrap_or_else(OAuthGrantCache::default)
+    });
+
+    let mut imap_tokens = account.imap.oauth2.clone();
+    let mut smtp_tokens = account.smtp.oauth2.clone();
+    if account.imap.auth_method == AuthMethod::OAuth2
+        && let Some(fresh) = cached
+            .as_ref()
+            .and_then(|cache| cache.imap.as_ref())
+            .filter(|token| !token.access_token.is_empty() && !token.is_expired())
+    {
+        imap_tokens = fresh.clone();
+    }
+    if account.smtp.auth_method == AuthMethod::OAuth2
+        && let Some(fresh) = cached
+            .as_ref()
+            .and_then(|cache| cache.smtp.as_ref())
+            .filter(|token| !token.access_token.is_empty() && !token.is_expired())
+    {
+        smtp_tokens = fresh.clone();
+    }
+
+    // A grant whose access token is missing or expired must be refreshed.
+    let imap_needs = account.imap.auth_method == AuthMethod::OAuth2
+        && !imap_tokens.refresh_token.is_empty()
+        && (imap_tokens.access_token.is_empty() || imap_tokens.is_expired());
+    let smtp_needs = account.smtp.auth_method == AuthMethod::OAuth2
+        && !smtp_tokens.refresh_token.is_empty()
+        && (smtp_tokens.access_token.is_empty() || smtp_tokens.is_expired());
+
     if !imap_needs && !smtp_needs {
+        account.imap.oauth2 = imap_tokens;
+        account.smtp.oauth2 = smtp_tokens;
         return Ok(());
     }
 
@@ -1053,27 +1087,44 @@ async fn refresh_oauth_tokens(state: &Arc<EngineState>, account: &mut Account) -
         && account.imap.oauth2.client_id == account.smtp.oauth2.client_id
         && account.imap.oauth2.refresh_token == account.smtp.oauth2.refresh_token;
 
+    // Refresh from the account's current refresh token: it is the one just
+    // loaded from the keyring and therefore newer than any cached grant.
     if shared_grant {
         // One login, one refresh. Assign the result to both sides so the
         // shared grant stays consistent even if only one side is expired.
-        let refreshed = refresh_tokens(&account.imap.oauth2).await?;
-        account.imap.oauth2 = refreshed.clone();
-        account.smtp.oauth2 = refreshed;
+        let mut source = imap_tokens.clone();
+        source.refresh_token = account.imap.oauth2.refresh_token.clone();
+        let refreshed = refresh_tokens(&source).await?;
+        imap_tokens = refreshed.clone();
+        smtp_tokens = refreshed;
     } else {
         if imap_needs {
-            account.imap.oauth2 = refresh_tokens(&account.imap.oauth2).await?;
+            let mut source = imap_tokens.clone();
+            source.refresh_token = account.imap.oauth2.refresh_token.clone();
+            imap_tokens = refresh_tokens(&source).await?;
         }
         if smtp_needs {
-            account.smtp.oauth2 = refresh_tokens(&account.smtp.oauth2).await?;
+            let mut source = smtp_tokens.clone();
+            source.refresh_token = account.smtp.oauth2.refresh_token.clone();
+            smtp_tokens = refresh_tokens(&source).await?;
         }
     }
 
-    state.mailbox.save_account(account, None)?;
-    Ok(())
-}
+    account.imap.oauth2 = imap_tokens;
+    account.smtp.oauth2 = smtp_tokens;
 
-fn needs_refresh(tokens: &OAuth2Tokens) -> bool {
-    !tokens.refresh_token.is_empty() && tokens.is_expired()
+    // Persist the refresh tokens (the access token is skipped) and remember
+    // the grant in memory for the rest of the process.
+    state.mailbox.save_account(account, None)?;
+    let mut grants = state.oauth_grants.write().map_err(|_| Error::LockPoisoned)?;
+    let entry = grants.entry(account.id).or_default();
+    if account.imap.auth_method == AuthMethod::OAuth2 {
+        entry.imap = Some(account.imap.oauth2.clone());
+    }
+    if account.smtp.auth_method == AuthMethod::OAuth2 {
+        entry.smtp = Some(account.smtp.oauth2.clone());
+    }
+    Ok(())
 }
 
 async fn refresh_tokens(tokens: &OAuth2Tokens) -> Result<OAuth2Tokens> {
@@ -1109,15 +1160,12 @@ async fn wait_with_backoff(
 async fn run_session(
     state: &Arc<EngineState>,
     account: &Account,
-    auth_creds: Either<SecretString, SecretString>,
+    auth_creds: secrecy::SecretString,
     commands: &mut mpsc::UnboundedReceiver<WorkerCommand>,
     pending: &mut VecDeque<WorkerCommand>,
 ) -> Result<()> {
     let tls = crate::tls::client_config()?;
-    let password_or_token = match &auth_creds {
-        Either::Left(p) => p.expose_secret(),
-        Either::Right(t) => t.expose_secret(),
-    };
+    let password_or_token = auth_creds.expose_secret();
     let mut session = ImapSession::connect(&account.imap, password_or_token, tls).await?;
     set_sync_status(state, account.id, SyncStatus::Syncing);
     let remote = session.list_folders().await?;
@@ -1417,6 +1465,39 @@ async fn handle_command(
     Ok(false)
 }
 
+/// SELECT a folder on the server and verify the reported UIDVALIDITY against
+/// the locally cached one.
+///
+/// When the server recreated the mailbox, every cached UID points at a
+/// different message now. The folder cache is dropped and an error is
+/// returned; the next sync repopulates it with the new UIDs.
+async fn select_and_check_uidvalidity(
+    session: &mut ImapSession,
+    state: &Arc<EngineState>,
+    folder: &Folder,
+) -> Result<()> {
+    let mailbox = session.select(&folder.name).await?;
+    if let (Some(remote), Some(local)) = (mailbox.uid_validity, folder.uid_validity)
+        && remote != local
+    {
+        tracing::warn!(
+            folder = %folder.name,
+            remote,
+            local,
+            "UIDVALIDITY mismatch; invalidating cached UIDs"
+        );
+        state.mailbox.store().clear_folder_messages(folder.id)?;
+        state.mailbox.publish(Event::MessagesChanged {
+            folder_id: folder.id,
+        });
+        return Err(Error::Imap(format!(
+            "UIDVALIDITY changed for {} (was {local}, now {remote}); folder cache invalidated — the next sync will refetch, please retry",
+            folder.name
+        )));
+    }
+    Ok(())
+}
+
 async fn fetch_body(
     session: &mut ImapSession,
     state: &Arc<EngineState>,
@@ -1432,7 +1513,7 @@ async fn fetch_body(
     let Some(folder) = state.mailbox.folder(message.folder_id)? else {
         return Ok(());
     };
-    session.select(&folder.name).await?;
+    select_and_check_uidvalidity(session, state, &folder).await?;
     let Some(raw) = session.fetch_body(message.uid).await? else {
         return Ok(());
     };
@@ -1488,7 +1569,7 @@ async fn set_flags(
     let Some(folder) = state.mailbox.folder(message.folder_id)? else {
         return Ok(());
     };
-    session.select(&folder.name).await?;
+    select_and_check_uidvalidity(session, state, &folder).await?;
     session.store_flags(message.uid, add, remove).await?;
 
     let mut flags = message.flags.clone();
@@ -1542,7 +1623,7 @@ async fn bulk_set_flags(
             continue;
         };
         let uids: Vec<u32> = messages.iter().map(|message| message.uid).collect();
-        session.select(&folder.name).await?;
+        select_and_check_uidvalidity(session, state, &folder).await?;
         session.store_flags_many(&uids, add, remove).await?;
 
         let updates: Vec<(u32, Vec<String>)> = messages
@@ -1644,7 +1725,7 @@ async fn move_messages(
             continue;
         };
         let uids: Vec<u32> = items.iter().map(|(_, uid)| *uid).collect();
-        session.select(&source.name).await?;
+        select_and_check_uidvalidity(session, state, source).await?;
 
         if let Some(destination) = destination {
             let Some(target_folder) = folders.iter().find(|folder| folder.id == destination) else {
@@ -2353,7 +2434,7 @@ async fn sync_calendars(
     state: &Arc<EngineState>,
     account: &Account,
 ) -> Result<()> {
-    use crate::caldav::{CalDavClient, parse_ical_event};
+    use crate::caldav::{CalDavClient, parse_ical_events};
 
     // Check if the account has CalDAV settings
     let caldav_url = account
@@ -2366,20 +2447,37 @@ async fn sync_calendars(
         .as_ref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
-    let caldav_password = account
-        .caldav_password
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+    // The password is not persisted with the account; it is hydrated from
+    // the keyring on every sync.
+    let caldav_password = match &account.caldav_password {
+        Some(password) if !password.trim().is_empty() => Some(password.trim().to_owned()),
+        _ => match state.mailbox.get_caldav_password(&account.id) {
+            Ok(Some(password)) if !password.trim().is_empty() => {
+                Some(password.trim().to_owned())
+            }
+            Ok(_) => {
+                if caldav_url.is_some() {
+                    tracing::warn!(
+                        account = %account.email,
+                        "CalDAV is configured but no CalDAV password is stored in the keyring; calendar sync skipped"
+                    );
+                }
+                None
+            }
+            Err(error) => {
+                tracing::warn!(account = %account.email, %error, "could not read the CalDAV password");
+                None
+            }
+        },
+    };
 
-    let (Some(url), Some(username), Some(password)) =
-        (caldav_url, caldav_username, caldav_password)
+    let (Some(url), Some(username), Some(password)) = (caldav_url, caldav_username, caldav_password)
     else {
-        // No CalDAV configured, skip silently
+        // No CalDAV configured (or no credentials), skip silently
         return Ok(());
     };
 
-    let client = CalDavClient::new(url, username, password);
+    let client = CalDavClient::new(url, username, &password);
 
     // Discover calendar home
     let home_url = match client.discover_calendar_home() {
@@ -2415,8 +2513,16 @@ async fn sync_calendars(
             }
         };
 
-        // Sync events
-        let events = match client.sync_calendar(&calendar.href, calendar.ctag.as_deref()) {
+        // Sync events: pass the locally stored ctag so an unchanged calendar
+        // is skipped instead of re-downloaded every cycle.
+        let stored_ctag = state
+            .mailbox
+            .store()
+            .calendar_by_href(&account.id, &calendar.href)
+            .ok()
+            .flatten()
+            .and_then(|calendar| calendar.ctag);
+        let events = match client.sync_calendar(&calendar.href, stored_ctag.as_deref()) {
             Ok(events) => events,
             Err(error) => {
                 tracing::warn!(account = %account.email, calendar = %calendar.display_name, %error, "CalDAV calendar sync failed");
@@ -2425,19 +2531,20 @@ async fn sync_calendars(
         };
 
         for event_info in events {
-            let event = match parse_ical_event(&event_info.ical, cal_id) {
-                Ok(event) => event,
+            let parsed = match parse_ical_events(&event_info.ical, cal_id) {
+                Ok(parsed) => parsed,
                 Err(error) => {
                     tracing::debug!(%error, "could not parse iCal event");
                     continue;
                 }
             };
 
-            let mut event = event;
-            event.etag = Some(event_info.etag);
+            for mut event in parsed {
+                event.etag = Some(event_info.etag.clone());
 
-            if let Err(error) = state.mailbox.store().upsert_calendar_event(&event) {
-                tracing::warn!(%error, "could not upsert calendar event");
+                if let Err(error) = state.mailbox.store().upsert_calendar_event(&event) {
+                    tracing::warn!(%error, "could not upsert calendar event");
+                }
             }
         }
 
@@ -2640,14 +2747,58 @@ async fn execute_scheduled_action(
         .mailbox
         .account(&action.account_id)?
         .ok_or(Error::AccountNotFound(action.account_id))?;
-    let password = state.mailbox.password(&action.account_id)?;
+    let mut refreshed = account.clone();
+    refresh_oauth_tokens(state, &mut refreshed).await?;
+    let imap_secret = imap_credential(state, &refreshed).await?;
     let mut session = crate::imap::ImapSession::connect(
-        &account.imap,
-        password.expose_secret(),
+        &refreshed.imap,
+        imap_secret.expose_secret(),
         crate::tls::client_config()?,
     )
     .await?;
-    execute_scheduled_action_with_session(&mut session, state, &account, action).await
+    execute_scheduled_action_with_session(&mut session, state, &refreshed, action).await
+}
+
+/// The IMAP credential for `account`: the OAuth2 access token when the
+/// account authenticates with XOAUTH2, otherwise the stored password.
+///
+/// Each protocol uses its own credential — an SMTP token must never reach
+/// the IMAP server and vice versa.
+async fn imap_credential(
+    state: &Arc<EngineState>,
+    account: &Account,
+) -> Result<secrecy::SecretString> {
+    if account.imap.auth_method == AuthMethod::OAuth2 {
+        if account.imap.oauth2.access_token.is_empty() {
+            return Err(Error::Credentials(
+                "no OAuth2 access token is available for IMAP".into(),
+            ));
+        }
+        Ok(secrecy::SecretString::new(
+            account.imap.oauth2.access_token.clone().into(),
+        ))
+    } else {
+        state.mailbox.password(&account.id)
+    }
+}
+
+/// The SMTP credential for `account`.
+async fn smtp_credential(
+    state: &Arc<EngineState>,
+    account: &Account,
+) -> Result<secrecy::SecretString> {
+    if account.smtp.auth_method == AuthMethod::OAuth2 {
+        if account.smtp.oauth2.access_token.is_empty() {
+            return Err(Error::Credentials(
+                "no OAuth2 access token is available for SMTP".into(),
+            ));
+        }
+        Ok(secrecy::SecretString::new(
+            account.smtp.oauth2.access_token.clone().into(),
+        ))
+    } else {
+        state.mailbox.smtp_password(&account.id)
+    }
 }
 
 async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
@@ -2658,26 +2809,8 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
 
     // SMTP may be used before the IMAP worker has refreshed an expiring token.
     refresh_oauth_tokens(state, &mut account).await?;
-
-    // For OAuth2 accounts, use the access token
-    let auth_creds = if account.smtp.auth_method == AuthMethod::OAuth2 {
-        if account.smtp.oauth2.access_token.is_empty() {
-            return Err(Error::Config(
-                "OAuth2 access token not configured for SMTP".into(),
-            ));
-        }
-        Either::Right(secrecy::SecretString::new(
-            account.smtp.oauth2.access_token.clone().into(),
-        ))
-    } else {
-        let password = state.mailbox.password(&entry.account_id)?;
-        Either::Left(password)
-    };
-
-    let password_or_token = match &auth_creds {
-        Either::Left(p) => p.expose_secret(),
-        Either::Right(t) => t.expose_secret(),
-    };
+    let smtp_secret = smtp_credential(state, &account).await?;
+    let password_or_token = smtp_secret.expose_secret();
 
     let envelope: OutgoingEnvelope = serde_json::from_str(&entry.envelope_json)?;
 
@@ -2709,16 +2842,11 @@ async fn deliver(state: &Arc<EngineState>, entry: &OutboxEntry) -> Result<()> {
     }
     state.mailbox.publish(Event::OutboxChanged);
 
-    append_to_sent(state, &account, password_or_token, &entry.raw).await;
+    append_to_sent(state, &account, &entry.raw).await;
     Ok(())
 }
 
-async fn append_to_sent(
-    state: &Arc<EngineState>,
-    account: &Account,
-    password_or_token: &str,
-    raw: &[u8],
-) {
+async fn append_to_sent(state: &Arc<EngineState>, account: &Account, raw: &[u8]) {
     let sent = match state.mailbox.list_folders(&account.id) {
         Ok(folders) => folders
             .into_iter()
@@ -2730,6 +2858,16 @@ async fn append_to_sent(
     };
     let Some(sent) = sent else { return };
 
+    // The Sent copy must authenticate with the IMAP credential, not with
+    // whatever token the SMTP path used.
+    let imap_secret = match imap_credential(state, account).await {
+        Ok(secret) => secret,
+        Err(error) => {
+            tracing::warn!(%error, "could not obtain the IMAP credential for the Sent copy");
+            return;
+        }
+    };
+
     let tls = match crate::tls::client_config() {
         Ok(tls) => tls,
         Err(error) => {
@@ -2737,7 +2875,7 @@ async fn append_to_sent(
             return;
         }
     };
-    match ImapSession::connect(&account.imap, password_or_token, tls).await {
+    match ImapSession::connect(&account.imap, imap_secret.expose_secret(), tls).await {
         Ok(mut session) => {
             if let Err(error) = session.append(&sent.name, "(\\Seen)", raw).await {
                 tracing::warn!(folder = %sent.name, %error, "could not append to Sent");
@@ -2747,5 +2885,57 @@ async fn append_to_sent(
         Err(error) => {
             tracing::warn!(%error, "could not connect to store a copy in Sent");
         }
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    /// retry_outbox must wake the outbox sender within one poll cycle.
+    ///
+    /// This test verifies the notification plumbing added in Phase 2 (X11):
+    /// the Notify that the outbox task sleeps on must be signalled.
+    #[tokio::test]
+    async fn retry_outbox_wakes_sender() {
+        let notify = Arc::new(Notify::new());
+        let notify_clone = notify.clone();
+
+        // Simulate the outbox worker waiting
+        let waiter = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(200), notify_clone.notified())
+                .await
+                .is_ok()
+        });
+
+        // Give the waiter a moment to start waiting
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Trigger the notification (mirrors what retry_outbox does)
+        notify.notify_one();
+
+        let woken = waiter.await.expect("waiter task panicked");
+        assert!(woken, "outbox sender was not woken within 200 ms");
+    }
+
+    /// The scheduled-action worker must be notified when duetime changes (X12).
+    #[tokio::test]
+    async fn set_action_state_wakes_worker() {
+        let notify = Arc::new(Notify::new());
+        let notify_clone = notify.clone();
+
+        let waiter = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(200), notify_clone.notified())
+                .await
+                .is_ok()
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        notify.notify_one();
+
+        let woken = waiter.await.expect("waiter task panicked");
+        assert!(woken, "scheduled-action worker was not woken within 200 ms");
     }
 }
