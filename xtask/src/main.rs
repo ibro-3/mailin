@@ -236,6 +236,16 @@ fn it_certs() -> Result<()> {
         "-passout",
         "pass:changeit",
     ])?;
+    // `openssl pkcs12 -export` creates the keystore with mode 0600. The
+    // keystore is mounted read-only into the GreenMail container, which
+    // runs as a different user, so the file has to be readable for
+    // everyone or the TLS servers never come up. The password is a
+    // throwaway test password.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&p12, fs::Permissions::from_mode(0o644))?;
+    }
     println!("test certificates generated in {}", certs.display());
     Ok(())
 }
