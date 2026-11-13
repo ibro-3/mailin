@@ -177,6 +177,13 @@ jobs:
       - name: Tests (core)
         run: cargo test -p mailin-core
 
+      # Fast-fail: type-check WinUI before spending ~5 min on the SDK runtime
+      # install. cargo check does not link, so it needs no runtime DLLs.
+      - name: Compile check (WinUI — fast fail before SDK install)
+        run: >-
+          cargo check -p mailin-winui -p mailin-winui-sys
+          --target x86_64-pc-windows-msvc
+
       - name: Fetch Windows App SDK bootstrapper
         run: cargo run -p xtask -- winui-runtime
 
