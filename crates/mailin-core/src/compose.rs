@@ -132,13 +132,16 @@ impl OutgoingMessage {
         );
         write_header(&mut message, "Date", &date);
         write_header(&mut message, "From", &format_mailbox(&from));
-        write_header(&mut message, "To", &format_mailboxes(&to));
+        // Unstructured headers can grow arbitrarily long (address lists,
+        // subjects, References chains) and must be folded to stay within the
+        // RFC 5322 line limits.
+        write_folded_header(&mut message, "To", &format_mailboxes(&to));
         if !cc.is_empty() {
-            write_header(&mut message, "Cc", &format_mailboxes(&cc));
+            write_folded_header(&mut message, "Cc", &format_mailboxes(&cc));
         }
         // A Bcc header would leak the hidden recipients to everybody else; the
         // envelope above is the only place they belong.
-        write_header(&mut message, "Subject", &encode_unstructured(&self.subject));
+        write_folded_header(&mut message, "Subject", &encode_unstructured(&self.subject));
         write_header(&mut message, "Message-ID", &format!("<{message_id}>"));
         write_header(&mut message, "MIME-Version", "1.0");
         if let Some(parent) = self
@@ -156,7 +159,7 @@ impl OutgoingMessage {
             .filter(|id| !id.is_empty())
             .collect::<Vec<_>>();
         if !references.is_empty() {
-            write_header(&mut message, "References", &references.join(" "));
+            write_folded_header(&mut message, "References", &references.join(" "));
         }
 
         let body = normalize_crlf(&self.body);
@@ -547,8 +550,62 @@ fn message_id_header(value: &str) -> String {
 }
 
 fn write_header(output: &mut String, name: &str, value: &str) {
-    let _ = write!(output, "{name}: {value}\r\n");
+    output.push_str(&format!("{name}: {value}\r\n"));
 }
+
+/// Write a header with RFC 5322 folding for values that may exceed the line
+/// limit (address lists, subjects, References chains).
+fn write_folded_header(output: &mut String, name: &str, value: &str) {
+    output.push_str(&fold_header(name, value));
+}
+
+/// Fold a header so no line exceeds 78 characters (RFC 5322 §2.1.1).
+///
+/// Folding is inserted at whitespace boundaries with a `\r\n\t` continuation.
+/// An unbreakable token longer than the line limit (for example an encoded
+/// word or a long address) stays on its own line, since folding inside it
+/// would corrupt the value.
+fn fold_header(name: &str, value: &str) -> String {
+    let prefix = format!("{name}: ");
+    let full_len = prefix.len() + value.len();
+    if full_len <= HEADER_SOFT_LIMIT {
+        return format!("{prefix}{value}\r\n");
+    }
+
+    let mut result = String::with_capacity(full_len + 8);
+    result.push_str(&prefix);
+    let mut line_len = prefix.len();
+    let mut in_quotes = false;
+    for token in value.split_inclusive(' ') {
+        // Folding inside a quoted string (a boundary parameter, for example)
+        // is technically allowed but breaks many naive parsers, so it never
+        // happens: the fold point before a token is inside a quoted string
+        // exactly when `in_quotes` is set.
+        let long_token = token.trim_end().len() > HEADER_HARD_LIMIT;
+        if line_len + token.trim_end().len() > HEADER_SOFT_LIMIT
+            && line_len > prefix.len()
+            && !in_quotes
+            && !long_token
+        {
+            result.push_str("\r\n\t");
+            line_len = 1; // the tab counts as one column
+        }
+        result.push_str(token);
+        line_len += token.len();
+        // A quote toggles the quoted-string state; tokens are split on
+        // spaces, so a quote may open in one token and close in another.
+        if token.matches('"').count() % 2 == 1 {
+            in_quotes = !in_quotes;
+        }
+    }
+    result.push_str("\r\n");
+    result
+}
+
+/// Recommended maximum line length for headers (RFC 5322 §2.1.1).
+const HEADER_SOFT_LIMIT: usize = 78;
+/// Hard maximum: a header line must never exceed 998 characters.
+const HEADER_HARD_LIMIT: usize = 998;
 
 fn sanitize_mime_type(value: &str) -> String {
     let clean = value.trim();
@@ -856,6 +913,43 @@ mod tests {
 
     fn text(raw: &[u8]) -> String {
         String::from_utf8(raw.to_vec()).expect("utf-8")
+    }
+
+    #[test]
+    fn short_header_is_not_folded() {
+        let h = fold_header("Subject", "Hello");
+        assert_eq!(h, "Subject: Hello\r\n");
+        assert!(!h.contains("\r\n\t"));
+    }
+
+    #[test]
+    fn long_to_header_is_folded() {
+        let addresses: Vec<String> = (0..15)
+            .map(|i| format!("user{i}@example{i}.example.com"))
+            .collect();
+        let h = fold_header("To", &addresses.join(", "));
+        for line in h.split("\r\n").filter(|line| !line.is_empty()) {
+            assert!(line.len() <= 78, "line too long: {line:?}");
+        }
+        // Folding must not lose any recipient.
+        assert!(h.contains("user14@example14.example.com"));
+    }
+
+    #[test]
+    fn unbreakable_header_token_stays_intact() {
+        let token = "x".repeat(300);
+        let h = fold_header("X-Test", &token);
+        // The single token cannot be folded; it must survive verbatim.
+        assert!(h.contains(&token));
+    }
+
+    #[test]
+    fn quoted_strings_are_never_split_by_folding() {
+        let boundary = format!("mailin-{}", "a".repeat(32));
+        let h = fold_header("X-Test", &format!("type=mixed; boundary=\"{boundary}\"; extra=1"));
+        // The quoted string must survive verbatim on one line; a fold may
+        // land between parameters but never inside the quotes.
+        assert!(h.contains(&format!("boundary=\"{boundary}\"")));
     }
 
     #[test]
