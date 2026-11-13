@@ -408,18 +408,20 @@ impl MainWindow {
         let _ = set_text(0, "New mail");
         let _ = set_text(1, text);
 
-        // Add action buttons using XML: "Mark as read" and "Archive". The
-        // arguments carry exactly the message IDs this toast is about, so a
-        // button never sweeps unrelated unread mail.
+        // Add action buttons using XML: "Mark as read", "Archive" and "Open".
+        // The arguments carry exactly the message IDs this toast is about, so
+        // a button never sweeps unrelated unread mail.
         let ids_param = message_ids
             .iter()
             .map(|id| id.0.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        let open_id = message_ids.first().map(|id| id.0).unwrap_or_default();
         let actions_xml = format!(
             r#"<actions>
                 <action content="Mark as read" arguments="mark-read:{account_id}:{ids_param}" activationType="foreground"/>
                 <action content="Archive" arguments="archive:{account_id}:{ids_param}" activationType="foreground"/>
+                <action content="Open" arguments="open:{account_id}:{open_id}" activationType="foreground"/>
             </actions>"#
         );
 
@@ -459,8 +461,11 @@ impl MainWindow {
             }
         };
 
-        // Handle toast activation (button clicks)
+        // Handle toast activation (button clicks). The notification raises
+        // this on its own thread, so everything stateful — banner, engine
+        // calls, window activation — is enqueued onto the UI thread first.
         let this = Rc::clone(self);
+        let queue = DispatcherQueue::GetForCurrentThread().ok();
         let _activated_token = toast.Activated(move |_sender, args| {
             fn parse_action(prefix: &str, argument: &str) -> Option<(AccountId, Vec<MessageId>)> {
                 let rest = argument.strip_prefix(prefix)?;
@@ -485,20 +490,27 @@ impl MainWindow {
                         .ok()
                 })
                 .and_then(|toast_args| toast_args.Argument().ok());
-            if let Some(argument) = activated {
+            let Some(argument) = activated else {
+                return;
+            };
+            let this = Rc::clone(&this);
+            let dispatch = move || {
                 if let Some((account_id, ids)) = parse_action("mark-read:", &argument) {
                     this.notification_mark_read(account_id, ids);
                 } else if let Some((account_id, ids)) = parse_action("archive:", &argument) {
                     this.notification_archive(account_id, ids);
                 } else if let Some((account_id, ids)) = parse_action("open:", &argument) {
-                    // M4-I: per-message activation (scaffold). Full window/message
-                    // navigation requires UI-thread dispatch + selection plumbing.
-                    tracing::info!(
-                        %account_id,
-                        ?ids,
-                        "toast open activation received (scaffold)"
-                    );
+                    this.notification_open(account_id, ids);
                 }
+            };
+            // Toasts are raised on the UI thread, so the queue exists; when it
+            // does not, dispatch inline instead of dropping the activation.
+            match &queue {
+                Some(queue) => {
+                    let handler = mailin_winui_sys::DispatcherQueueHandler::new(dispatch);
+                    let _ = queue.TryEnqueue(handler.to_ref());
+                }
+                None => dispatch(),
             }
         });
 
@@ -2126,6 +2138,26 @@ impl MainWindow {
         }
         self.app.engine.archive_messages(&ids);
         self.show_banner("Archiving…");
+    }
+
+    /// Handle the "Open" action from a notification: bring the window
+    /// forward, switch to the account the toast was about and show the
+    /// newest message it mentioned.
+    fn notification_open(self: &Rc<Self>, account_id: AccountId, ids: Vec<MessageId>) {
+        let _ = self.widgets.window.Activate();
+        if self.state().selection.account != Some(account_id) {
+            self.select_account(account_id);
+        }
+        let Some(message_id) = ids.first().copied() else {
+            // Nothing specific to open: the inbox of the selected account is
+            // on screen.
+            return;
+        };
+        let Ok(Some(header)) = self.app.mailin.message(message_id) else {
+            self.show_error("Could not open the message");
+            return;
+        };
+        self.open_message(header);
     }
 
     /// Get unread message IDs from the inbox folder for an account.
