@@ -64,7 +64,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     env:
-      MAILIN_WINDOWSAPPSDK_BOOTSTRAP: ${{ runner.temp }}/Microsoft.WindowsAppRuntime.Bootstrap.dll
+      # The `runner` context is not available in a job-level `env`: GitHub
+      # rejects the whole workflow file when it is used there. The bootstrapper
+      # is therefore anchored in the workspace, next to the other build output.
+      MAILIN_WINDOWSAPPSDK_BOOTSTRAP: ${{ github.workspace }}/target/winui-runtime/Microsoft.WindowsAppRuntime.Bootstrap.dll
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -99,6 +102,7 @@ jobs:
           $out = "$env:TEMP\foundation.nupkg"
           Invoke-WebRequest -Uri $url -OutFile $out
           Expand-Archive -Path $out -DestinationPath "$env:TEMP\foundation" -Force
+          New-Item -ItemType Directory -Force -Path (Split-Path -Parent $env:MAILIN_WINDOWSAPPSDK_BOOTSTRAP) | Out-Null
           Copy-Item "$env:TEMP\foundation\runtimes\win-x64\native\Microsoft.WindowsAppRuntime.Bootstrap.dll" $env:MAILIN_WINDOWSAPPSDK_BOOTSTRAP
 
       - name: Install Inno Setup
