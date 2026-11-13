@@ -260,75 +260,106 @@ impl PendingAuthorization {
 
     fn wait_for_code(&self, timeout: Duration) -> Result<String> {
         let deadline = Instant::now() + timeout;
-        let mut stream = loop {
-            match self.listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(Error::OAuth(
-                            "timed out waiting for the browser to complete sign-in".into(),
-                        ));
+        // Browsers open speculative preconnect sockets before the redirect
+        // arrives, so accept several connections and take the first one that
+        // actually carries the OAuth response.
+        for _attempt in 0..MAX_ACCEPTED_CONNECTIONS {
+            let mut stream = loop {
+                match self.listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return Err(Error::OAuth(
+                                "timed out waiting for the browser to complete sign-in".into(),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
                     }
-                    std::thread::sleep(Duration::from_millis(100));
+                    Err(error) => return Err(Error::Io(error)),
                 }
-                Err(error) => return Err(Error::Io(error)),
+            };
+            stream.set_nonblocking(false)?;
+            stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+
+            let request = match read_request(&mut stream) {
+                Ok(request) => request,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read the OAuth callback request");
+                    continue;
+                }
+            };
+            let target = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or_default();
+            let query = target.split_once('?').map_or("", |(_, query)| query);
+            let params = parse_query(query);
+
+            // A preconnect/probe has neither a `code` nor an `error`; close it
+            // and keep waiting for the real redirect.
+            if !params.contains_key("code") && !params.contains_key("error") {
+                continue;
             }
-        };
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
 
-        let request = read_request(&mut stream)?;
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or_default();
-        let query = target.split_once('?').map_or("", |(_, query)| query);
-        let params = parse_query(query);
+            if let Some(error) = params.get("error") {
+                let description = params
+                    .get("error_description")
+                    .map(String::as_str)
+                    .unwrap_or(error);
+                // The description is reflected into the served page; cap it so a
+                // hostile provider cannot push arbitrarily large content there.
+                let mut cap = description.len().min(512);
+                while !description.is_char_boundary(cap) {
+                    cap -= 1;
+                }
+                let description: &str = &description[..cap];
+                respond(&mut stream, false, "Sign-in failed", description);
+                return Err(Error::OAuth(format!("authorization failed: {description}")));
+            }
 
-        if let Some(error) = params.get("error") {
-            let description = params
-                .get("error_description")
-                .map(String::as_str)
-                .unwrap_or(error);
-            respond(&mut stream, false, "Sign-in failed", description);
-            return Err(Error::OAuth(format!("authorization failed: {description}")));
-        }
+            let returned_state = params.get("state").map(String::as_str).unwrap_or_default();
+            if returned_state != self.state {
+                respond(
+                    &mut stream,
+                    false,
+                    "Sign-in failed",
+                    "The authorization response did not match this request.",
+                );
+                // A stale browser tab or a CSRF attempt: keep listening for
+                // the genuine response instead of aborting the flow.
+                continue;
+            }
 
-        let returned_state = params.get("state").map(String::as_str).unwrap_or_default();
-        if returned_state != self.state {
+            let Some(code) = params.get("code") else {
+                respond(
+                    &mut stream,
+                    false,
+                    "Sign-in failed",
+                    "The provider did not return an authorization code.",
+                );
+                return Err(Error::OAuth(
+                    "the authorization response did not include a code".into(),
+                ));
+            };
+
             respond(
                 &mut stream,
-                false,
-                "Sign-in failed",
-                "The authorization response did not match this request.",
-            );
-            return Err(Error::OAuth(
-                "OAuth2 state mismatch; the response may have been forged".into(),
-            ));
-        }
-
-        let Some(code) = params.get("code") else {
-            respond(
-                &mut stream,
-                false,
-                "Sign-in failed",
-                "The provider did not return an authorization code.",
-            );
-            return Err(Error::OAuth(
-                "the authorization response did not include a code".into(),
-            ));
-        };
-
-        respond(
-            &mut stream,
-            true,
-            "Mailin is signed in",
-            "You can close this browser tab and return to Mailin.",
+                true,
+                "Mailin is signed in",
+                "You can close this browser tab and return to Mailin.",
         );
-        Ok(code.clone())
+            return Ok(code.clone());
+        }
+        Err(Error::OAuth(format!(
+            "did not receive a valid OAuth2 callback after {MAX_ACCEPTED_CONNECTIONS} connections"
+        )))
     }
 }
+
+/// How many callback connections may be accepted before giving up: browsers
+/// open speculative preconnect sockets that carry no redirect.
+const MAX_ACCEPTED_CONNECTIONS: usize = 10;
 
 /// Exchange an authorization code for tokens.
 pub fn exchange_code(
@@ -442,6 +473,9 @@ fn read_request(stream: &mut TcpStream) -> Result<String> {
 
 fn respond(stream: &mut TcpStream, success: bool, title: &str, message: &str) {
     let colour = if success { "#1a7f37" } else { "#b42318" };
+    // `title` and `message` can carry provider-supplied text (for example
+    // `error_description`), so they must never reach the page unescaped.
+    let (title, message) = (crate::html::escape(title), crate::html::escape(message));
     let body = format!(
         "<!doctype html><meta charset=\"utf-8\"><title>{title}</title>\
          <style>body{{font-family:system-ui,sans-serif;margin:3rem;line-height:1.5}}\
@@ -614,5 +648,17 @@ mod tests {
         let pending = PendingAuthorization::begin(OAuthProvider::Microsoft, "client-id", None)
             .expect("pending authorization");
         assert!(pending.redirect_uri().starts_with("http://localhost:"));
+    }
+
+    #[test]
+    fn html_escape_prevents_injection() {
+        let escaped = crate::html::escape("<script>alert(1)</script>");
+        assert!(!escaped.contains('<'));
+        assert!(escaped.contains("&lt;"));
+        // Attribute-context-breaking quotes are escaped too.
+        assert_eq!(
+            crate::html::escape("\"><img src=x onerror=alert(1)>"),
+            "&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"
+        );
     }
 }
