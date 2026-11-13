@@ -12,6 +12,7 @@ Microsoft.UI.Xaml.Window
 Microsoft.UI.Xaml.IWindow
 Microsoft.UI.Xaml.IWindowFactory
 Microsoft.UI.Xaml.IWindowStatics
+Microsoft.UI.Xaml.IWindow2
 Microsoft.UI.Xaml.UIElement
 Microsoft.UI.Xaml.FrameworkElement
 Microsoft.UI.Xaml.IFrameworkElement
@@ -142,6 +143,10 @@ Microsoft.UI.Dispatching.IDispatcherQueueStatics
 Microsoft.UI.Dispatching.DispatcherQueueHandler
 Microsoft.UI.Dispatching.DispatcherQueueTimer
 Microsoft.UI.Dispatching.IDispatcherQueueTimer
+Microsoft.UI.Windowing.AppWindow
+Microsoft.UI.Windowing.IAppWindow
+Microsoft.UI.Windowing.AppWindowClosingEventArgs
+Microsoft.UI.Windowing.IAppWindowClosingEventArgs
 
 Windows.UI.Notifications.ToastNotificationManager
 Windows.UI.Notifications.IToastNotificationManagerStatics

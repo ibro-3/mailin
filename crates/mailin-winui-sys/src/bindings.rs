@@ -153,6 +153,158 @@ unsafe impl Send for AnchorRequestedEventArgs {}
 unsafe impl Sync for AnchorRequestedEventArgs {}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppWindow(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    AppWindow,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for AppWindow {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IAppWindow>();
+}
+unsafe impl windows_core::Interface for AppWindow {
+    type Vtable = <IAppWindow as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IAppWindow as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for AppWindow {
+    type Target = IAppWindow;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for AppWindow {
+    const NAME: &'static str = "Microsoft.UI.Windowing.AppWindow";
+}
+unsafe impl Send for AppWindow {}
+unsafe impl Sync for AppWindow {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppWindowChangedEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    AppWindowChangedEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for AppWindowChangedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IAppWindowChangedEventArgs>();
+}
+unsafe impl windows_core::Interface for AppWindowChangedEventArgs {
+    type Vtable = <IAppWindowChangedEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IAppWindowChangedEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for AppWindowChangedEventArgs {
+    type Target = IAppWindowChangedEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for AppWindowChangedEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Windowing.AppWindowChangedEventArgs";
+}
+unsafe impl Send for AppWindowChangedEventArgs {}
+unsafe impl Sync for AppWindowChangedEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppWindowClosingEventArgs(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    AppWindowClosingEventArgs,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for AppWindowClosingEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IAppWindowClosingEventArgs>();
+}
+unsafe impl windows_core::Interface for AppWindowClosingEventArgs {
+    type Vtable = <IAppWindowClosingEventArgs as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IAppWindowClosingEventArgs as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for AppWindowClosingEventArgs {
+    type Target = IAppWindowClosingEventArgs;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for AppWindowClosingEventArgs {
+    const NAME: &'static str = "Microsoft.UI.Windowing.AppWindowClosingEventArgs";
+}
+unsafe impl Send for AppWindowClosingEventArgs {}
+unsafe impl Sync for AppWindowClosingEventArgs {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppWindowPresenter(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    AppWindowPresenter,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for AppWindowPresenter {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IAppWindowPresenter>();
+}
+unsafe impl windows_core::Interface for AppWindowPresenter {
+    type Vtable = <IAppWindowPresenter as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IAppWindowPresenter as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for AppWindowPresenter {
+    type Target = IAppWindowPresenter;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for AppWindowPresenter {
+    const NAME: &'static str = "Microsoft.UI.Windowing.AppWindowPresenter";
+}
+unsafe impl Send for AppWindowPresenter {}
+unsafe impl Sync for AppWindowPresenter {}
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AppWindowPresenterKind(pub i32);
+impl AppWindowPresenterKind {
+    pub const Default: Self = Self(0);
+    pub const CompactOverlay: Self = Self(1);
+    pub const FullScreen: Self = Self(2);
+    pub const Overlapped: Self = Self(3);
+}
+impl windows_core::imp::TypeKind for AppWindowPresenterKind {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for AppWindowPresenterKind {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"enum(Microsoft.UI.Windowing.AppWindowPresenterKind;i4)",
+    );
+}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AppWindowTitleBar(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    AppWindowTitleBar,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for AppWindowTitleBar {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IAppWindowTitleBar>();
+}
+unsafe impl windows_core::Interface for AppWindowTitleBar {
+    type Vtable = <IAppWindowTitleBar as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IAppWindowTitleBar as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for AppWindowTitleBar {
+    type Target = IAppWindowTitleBar;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for AppWindowTitleBar {
+    const NAME: &'static str = "Microsoft.UI.Windowing.AppWindowTitleBar";
+}
+unsafe impl Send for AppWindowTitleBar {}
+unsafe impl Sync for AppWindowTitleBar {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Application(windows_core::IUnknown);
 windows_core::imp::interface_hierarchy!(
     Application,
@@ -4796,6 +4948,33 @@ impl windows_core::RuntimeType for DispatcherShutdownMode {
         b"enum(Microsoft.UI.Xaml.DispatcherShutdownMode;i4)",
     );
 }
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisplayArea(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    DisplayArea,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+impl windows_core::RuntimeType for DisplayArea {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, IDisplayArea>();
+}
+unsafe impl windows_core::Interface for DisplayArea {
+    type Vtable = <IDisplayArea as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <IDisplayArea as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for DisplayArea {
+    type Target = IDisplayArea;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for DisplayArea {
+    const NAME: &'static str = "Microsoft.UI.Windowing.DisplayArea";
+}
+unsafe impl Send for DisplayArea {}
+unsafe impl Sync for DisplayArea {}
 windows_core::imp::define_interface!(
     DoubleTappedEventHandler,
     DoubleTappedEventHandler_Vtbl,
@@ -6602,6 +6781,488 @@ impl windows_core::RuntimeType for IAnchorRequestedEventArgs {
 }
 #[repr(C)]
 pub struct IAnchorRequestedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IAppWindow,
+    IAppWindow_Vtbl,
+    0xcfa788b3_643b_5c5e_ad4e_321d48a82acd
+);
+impl windows_core::RuntimeType for IAppWindow {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IAppWindow {
+    pub fn Id(&self) -> windows_core::Result<WindowId> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Id)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn IsShownInSwitchers(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsShownInSwitchers)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetIsShownInSwitchers(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIsShownInSwitchers)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+    pub fn IsVisible(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).IsVisible)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn OwnerWindowId(&self) -> windows_core::Result<WindowId> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).OwnerWindowId)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Position(&self) -> windows_core::Result<PointInt32> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Position)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Presenter(&self) -> windows_core::Result<AppWindowPresenter> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Presenter)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Size(&self) -> windows_core::Result<SizeInt32> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Size)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Title(&self) -> windows_core::Result<String> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Title)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| {
+                let hstring: windows_core::HSTRING = core::mem::transmute(result__);
+                hstring.to_string_lossy()
+            })
+        }
+    }
+    pub fn SetTitle(&self, value: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetTitle)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(value)),
+            )
+            .ok()
+        }
+    }
+    pub fn TitleBar(&self) -> windows_core::Result<AppWindowTitleBar> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).TitleBar)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn Destroy(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Destroy)(windows_core::Interface::as_raw(self))
+                .ok()
+        }
+    }
+    pub fn Hide(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Hide)(windows_core::Interface::as_raw(self)).ok()
+        }
+    }
+    pub fn Move(&self, position: PointInt32) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Move)(
+                windows_core::Interface::as_raw(self),
+                position,
+            )
+            .ok()
+        }
+    }
+    pub fn MoveAndResize(&self, rect: RectInt32) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).MoveAndResize)(
+                windows_core::Interface::as_raw(self),
+                rect,
+            )
+            .ok()
+        }
+    }
+    pub fn MoveAndResizeRelativeToDisplayArea<P1>(
+        &self,
+        rect: RectInt32,
+        displayarea: P1,
+    ) -> windows_core::Result<()>
+    where
+        P1: windows_core::Param<DisplayArea>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).MoveAndResizeRelativeToDisplayArea)(
+                windows_core::Interface::as_raw(self),
+                rect,
+                displayarea.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn Resize(&self, size: SizeInt32) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Resize)(
+                windows_core::Interface::as_raw(self),
+                size,
+            )
+            .ok()
+        }
+    }
+    pub fn SetIcon(&self, iconpath: &str) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIcon)(
+                windows_core::Interface::as_raw(self),
+                core::mem::transmute_copy(&windows_core::HSTRING::from(iconpath)),
+            )
+            .ok()
+        }
+    }
+    pub fn SetIconWithIconId(&self, iconid: IconId) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetIconWithIconId)(
+                windows_core::Interface::as_raw(self),
+                iconid,
+            )
+            .ok()
+        }
+    }
+    pub fn SetPresenter<P0>(&self, appwindowpresenter: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<AppWindowPresenter>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetPresenter)(
+                windows_core::Interface::as_raw(self),
+                appwindowpresenter.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn SetPresenterByKind(
+        &self,
+        appwindowpresenterkind: AppWindowPresenterKind,
+    ) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetPresenterByKind)(
+                windows_core::Interface::as_raw(self),
+                appwindowpresenterkind,
+            )
+            .ok()
+        }
+    }
+    pub fn Show(&self) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).Show)(windows_core::Interface::as_raw(self)).ok()
+        }
+    }
+    pub fn ShowWithActivation(&self, activatewindow: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).ShowWithActivation)(
+                windows_core::Interface::as_raw(self),
+                activatewindow,
+            )
+            .ok()
+        }
+    }
+    pub fn Changed<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<AppWindow>, windows_core::Ref<AppWindowChangedEventArgs>) + 'static,
+    {
+        let handler: TypedEventHandler<AppWindow, AppWindowChangedEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<AppWindow, AppWindowChangedEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<AppWindow, AppWindowChangedEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Changed)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveChanged,
+            ))
+        }
+    }
+    pub fn Closing<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<AppWindow>, windows_core::Ref<AppWindowClosingEventArgs>) + 'static,
+    {
+        let handler: TypedEventHandler<AppWindow, AppWindowClosingEventArgs> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<AppWindow, AppWindowClosingEventArgs>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<AppWindow, AppWindowClosingEventArgs, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Closing)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveClosing,
+            ))
+        }
+    }
+    pub fn Destroying<F>(&self, handler: F) -> windows_core::Result<windows_core::EventRevoker>
+    where
+        F: Fn(windows_core::Ref<AppWindow>, windows_core::Ref<windows_core::IInspectable>)
+            + 'static,
+    {
+        let handler: TypedEventHandler<AppWindow, windows_core::IInspectable> = {
+            let com = windows_core::imp::DelegateBox::<
+                TypedEventHandler<AppWindow, windows_core::IInspectable>,
+                F,
+            >::new(
+                &TypedEventHandlerBox::<AppWindow, windows_core::IInspectable, F>::VTABLE,
+                handler,
+            );
+            unsafe { core::mem::transmute(windows_core::imp::box_new(com)) }
+        };
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            let token__ = (windows_core::Interface::vtable(self).Destroying)(
+                windows_core::Interface::as_raw(self),
+                windows_core::Interface::as_raw(&handler),
+                &mut result__,
+            )
+            .map(|| result__)?;
+            Ok(windows_core::EventRevoker::new(
+                self.clone(),
+                token__,
+                windows_core::Interface::vtable(self).RemoveDestroying,
+            ))
+        }
+    }
+}
+#[repr(C)]
+pub struct IAppWindow_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Id:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut WindowId) -> windows_core::HRESULT,
+    pub IsShownInSwitchers:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetIsShownInSwitchers:
+        unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub IsVisible:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub OwnerWindowId:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut WindowId) -> windows_core::HRESULT,
+    pub Position:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut PointInt32) -> windows_core::HRESULT,
+    pub Presenter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Size:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut SizeInt32) -> windows_core::HRESULT,
+    pub Title: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetTitle: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub TitleBar: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Destroy: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub Hide: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub Move:
+        unsafe extern "system" fn(*mut core::ffi::c_void, PointInt32) -> windows_core::HRESULT,
+    pub MoveAndResize:
+        unsafe extern "system" fn(*mut core::ffi::c_void, RectInt32) -> windows_core::HRESULT,
+    pub MoveAndResizeRelativeToDisplayArea: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        RectInt32,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub Resize:
+        unsafe extern "system" fn(*mut core::ffi::c_void, SizeInt32) -> windows_core::HRESULT,
+    pub SetIcon: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetIconWithIconId:
+        unsafe extern "system" fn(*mut core::ffi::c_void, IconId) -> windows_core::HRESULT,
+    pub SetPresenter: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetPresenterByKind: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        AppWindowPresenterKind,
+    ) -> windows_core::HRESULT,
+    pub Show: unsafe extern "system" fn(*mut core::ffi::c_void) -> windows_core::HRESULT,
+    pub ShowWithActivation:
+        unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+    pub Changed: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveChanged:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Closing: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveClosing:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+    pub Destroying: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveDestroying:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IAppWindowChangedEventArgs,
+    IAppWindowChangedEventArgs_Vtbl,
+    0x2182bc5d_fdac_5c3e_bf37_7d8d684e9d1d
+);
+impl windows_core::RuntimeType for IAppWindowChangedEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IAppWindowChangedEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IAppWindowClosingEventArgs,
+    IAppWindowClosingEventArgs_Vtbl,
+    0x0e09d90b_2261_590b_9ad1_8504991d8754
+);
+impl windows_core::RuntimeType for IAppWindowClosingEventArgs {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IAppWindowClosingEventArgs {
+    pub fn Cancel(&self) -> windows_core::Result<bool> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).Cancel)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn SetCancel(&self, value: bool) -> windows_core::Result<()> {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetCancel)(
+                windows_core::Interface::as_raw(self),
+                value,
+            )
+            .ok()
+        }
+    }
+}
+#[repr(C)]
+pub struct IAppWindowClosingEventArgs_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub Cancel:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub SetCancel: unsafe extern "system" fn(*mut core::ffi::c_void, bool) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IAppWindowPresenter,
+    IAppWindowPresenter_Vtbl,
+    0xbc3042c2_c6c6_5632_8989_ff0ec6d3b40d
+);
+impl windows_core::RuntimeType for IAppWindowPresenter {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IAppWindowPresenter_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
+    IAppWindowTitleBar,
+    IAppWindowTitleBar_Vtbl,
+    0x5574efa2_c91c_5700_a363_539c71a7aaf4
+);
+impl windows_core::RuntimeType for IAppWindowTitleBar {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IAppWindowTitleBar_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
@@ -14016,6 +14677,19 @@ pub struct IDispatcherQueueTimer_Vtbl {
         *mut i64,
     ) -> windows_core::HRESULT,
     pub RemoveTick: unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IDisplayArea,
+    IDisplayArea_Vtbl,
+    0x5c7e0537_b621_5579_bcae_a84aa8746167
+);
+impl windows_core::RuntimeType for IDisplayArea {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct IDisplayArea_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
     IDoubleTappedRoutedEventArgs,
@@ -22782,6 +23456,19 @@ pub struct IStyleSelector_Vtbl {
     pub base__: windows_core::IInspectable_Vtbl,
 }
 windows_core::imp::define_interface!(
+    ISystemBackdrop,
+    ISystemBackdrop_Vtbl,
+    0x5aeed5c4_37ac_5852_b73f_1b76ebc3205f
+);
+impl windows_core::RuntimeType for ISystemBackdrop {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+#[repr(C)]
+pub struct ISystemBackdrop_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+}
+windows_core::imp::define_interface!(
     ITappedRoutedEventArgs,
     ITappedRoutedEventArgs_Vtbl,
     0x73f74b8c_3709_547e_8e0c_51c03c89126a
@@ -31320,6 +32007,65 @@ pub struct IWindow_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IWindow2,
+    IWindow2_Vtbl,
+    0x42febaa5_1c32_522a_a591_57618c6f665d
+);
+impl windows_core::RuntimeType for IWindow2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl IWindow2 {
+    pub fn SystemBackdrop(&self) -> windows_core::Result<SystemBackdrop> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).SystemBackdrop)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+    pub fn SetSystemBackdrop<P0>(&self, value: P0) -> windows_core::Result<()>
+    where
+        P0: windows_core::Param<SystemBackdrop>,
+    {
+        unsafe {
+            (windows_core::Interface::vtable(self).SetSystemBackdrop)(
+                windows_core::Interface::as_raw(self),
+                value.param().abi(),
+            )
+            .ok()
+        }
+    }
+    pub fn AppWindow(&self) -> windows_core::Result<AppWindow> {
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(self).AppWindow)(
+                windows_core::Interface::as_raw(self),
+                &mut result__,
+            )
+            .and_then(|| windows_core::imp::Type::from_abi(result__))
+        }
+    }
+}
+#[repr(C)]
+pub struct IWindow2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub SystemBackdrop: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub SetSystemBackdrop: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+    pub AppWindow: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IWindowActivatedEventArgs,
     IWindowActivatedEventArgs_Vtbl,
     0xc723a5ea_82c4_5dd6_861b_70ef573b88d6
@@ -32548,6 +33294,18 @@ impl windows_core::RuntimeName for IconElement {
 }
 unsafe impl Send for IconElement {}
 unsafe impl Sync for IconElement {}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct IconId {
+    pub value: u64,
+}
+impl windows_core::imp::TypeKind for IconId {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for IconId {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"struct(Microsoft.UI.IconId;u8)");
+}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Image(windows_core::IUnknown);
@@ -34548,6 +35306,19 @@ impl windows_core::RuntimeType for Point {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::from_slice(b"struct(Windows.Foundation.Point;f4;f4)");
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PointInt32 {
+    pub x: i32,
+    pub y: i32,
+}
+impl windows_core::imp::TypeKind for PointInt32 {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for PointInt32 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"struct(Windows.Graphics.PointInt32;i4;i4)");
+}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Pointer(windows_core::IUnknown);
@@ -34829,6 +35600,22 @@ impl windows_core::imp::TypeKind for Rect {
 impl windows_core::RuntimeType for Rect {
     const SIGNATURE: windows_core::imp::ConstBuffer =
         windows_core::imp::ConstBuffer::from_slice(b"struct(Windows.Foundation.Rect;f4;f4;f4;f4)");
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RectInt32 {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+impl windows_core::imp::TypeKind for RectInt32 {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for RectInt32 {
+    const SIGNATURE: windows_core::imp::ConstBuffer = windows_core::imp::ConstBuffer::from_slice(
+        b"struct(Windows.Graphics.RectInt32;i4;i4;i4;i4)",
+    );
 }
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36601,6 +37388,19 @@ impl<
         }
     }
 }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SizeInt32 {
+    pub width: i32,
+    pub height: i32,
+}
+impl windows_core::imp::TypeKind for SizeInt32 {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for SizeInt32 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"struct(Windows.Graphics.SizeInt32;i4;i4)");
+}
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SnapPointsAlignment(pub i32);
@@ -36854,6 +37654,34 @@ impl windows_core::RuntimeName for StyleSelector {
 }
 unsafe impl Send for StyleSelector {}
 unsafe impl Sync for StyleSelector {}
+#[repr(transparent)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SystemBackdrop(windows_core::IUnknown);
+windows_core::imp::interface_hierarchy!(
+    SystemBackdrop,
+    windows_core::IUnknown,
+    windows_core::IInspectable
+);
+windows_core::imp::required_hierarchy!(SystemBackdrop, DependencyObject);
+impl windows_core::RuntimeType for SystemBackdrop {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_class::<Self, ISystemBackdrop>();
+}
+unsafe impl windows_core::Interface for SystemBackdrop {
+    type Vtable = <ISystemBackdrop as windows_core::Interface>::Vtable;
+    const IID: windows_core::GUID = <ISystemBackdrop as windows_core::Interface>::IID;
+}
+impl core::ops::Deref for SystemBackdrop {
+    type Target = ISystemBackdrop;
+    fn deref(&self) -> &Self::Target {
+        unsafe { core::mem::transmute(self) }
+    }
+}
+impl windows_core::RuntimeName for SystemBackdrop {
+    const NAME: &'static str = "Microsoft.UI.Xaml.Media.SystemBackdrop";
+}
+unsafe impl Send for SystemBackdrop {}
+unsafe impl Sync for SystemBackdrop {}
 windows_core::imp::define_interface!(
     TappedEventHandler,
     TappedEventHandler_Vtbl,
@@ -39713,6 +40541,18 @@ impl windows_core::RuntimeName for WindowEventArgs {
 }
 unsafe impl Send for WindowEventArgs {}
 unsafe impl Sync for WindowEventArgs {}
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WindowId {
+    pub value: u64,
+}
+impl windows_core::imp::TypeKind for WindowId {
+    type TypeKind = windows_core::imp::CopyType;
+}
+impl windows_core::RuntimeType for WindowId {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::from_slice(b"struct(Microsoft.UI.WindowId;u8)");
+}
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowSizeChangedEventArgs(windows_core::IUnknown);

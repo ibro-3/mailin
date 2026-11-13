@@ -142,6 +142,15 @@ pub fn present(
         on_done: Option<CaptureDone>,
     }
 
+    // Closing a dirty composer asks the user instead of losing the last
+    // edits: Save closes once the draft is stored, Discard throws the draft
+    // away and closes right away, and Cancel keeps the window open. The
+    // decision is shared between the closing confirmation and the save
+    // completion.
+    let confirming = Rc::new(std::cell::Cell::new(false));
+    let allow_close = Rc::new(std::cell::Cell::new(false));
+    let close_after_save = Rc::new(std::cell::Cell::new(false));
+
     let pending_capture = Rc::new(RefCell::new(PendingCapture::default()));
 
     let revokers = ui::Revokers::default();
@@ -626,6 +635,9 @@ pub fn present(
         let dirty = Arc::clone(&dirty);
         let sent = Arc::clone(&sent);
         let mark_clean = Rc::clone(&mark_clean);
+        let close_after_save = Rc::clone(&close_after_save);
+        let allow_close = Rc::clone(&allow_close);
+        let window_for_save = window.clone();
         let mark_dirty = Rc::clone(&mark_dirty);
         let banner = error.clone();
         let account_id = account.id;
@@ -675,6 +687,9 @@ pub fn present(
             // needs the dirty marker when the capture could not start.
             let dirty_for_done = Arc::clone(&dirty);
             let mark_dirty_for_done = Rc::clone(&mark_dirty);
+            let close_after_save_for_done = Rc::clone(&close_after_save);
+            let allow_close_for_done = Rc::clone(&allow_close);
+            let window_for_done = window_for_save.clone();
             let on_done: CaptureDone = Box::new(move |html_body, body_text: String| {
                 let snapshot = attachments
                     .lock()
@@ -712,6 +727,21 @@ pub fn present(
                         mark_dirty_for_done();
                         let _ = banner.SetText(&format!("Could not save the draft: {failure}"));
                         let _ = ui::set_visible(&banner, true);
+                    }
+                }
+                // A save that was requested by the closing confirmation closes
+                // the window once the draft is stored — or leaves it open when
+                // the save failed, so the message is never lost. Either way the
+                // close is enqueued on a fresh turn of the queue instead of
+                // running inside the capture callback.
+                if close_after_save_for_done.replace(false) {
+                    allow_close_for_done.set(true);
+                    if let Ok(queue) = DispatcherQueue::GetForCurrentThread() {
+                        let window = window_for_done.clone();
+                        let handler = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+                            let _ = window.Close();
+                        });
+                        let _ = queue.TryEnqueue(handler.to_ref());
                     }
                 }
             });
@@ -946,24 +976,165 @@ pub fn present(
         .Start()
         .context("could not start the draft auto-save timer")?;
 
+    // ----------------------------------------------------------- closing the window
+    // The user closing a dirty composer gets the same choice the GTK client
+    // offers: Save, Discard or stay. The close is cancelled until the user
+    // decides, and the window only closes once a save that belongs to the
+    // confirmation is stored — so the last edits are never lost.
+    let dirty_for_closing = Arc::clone(&dirty);
+    let sent_for_closing = Arc::clone(&sent);
+    let closing_revokers = ui::Revokers::default();
+    match window
+        .cast::<mailin_winui_sys::IWindow2>()
+        .and_then(|w2| w2.AppWindow())
+    {
+        Ok(app_window) => {
+            // Subscriptions for the confirmation dialog. The set is owned by
+            // the closing handler's scope, and the closing handler outlives
+            // present() because it is registered on the AppWindow.
+            let dialog_revokers = ui::Revokers::default();
+            let closing = app_window.Closing({
+                let dirty_for_closing = Arc::clone(&dirty_for_closing);
+                let sent_for_closing = Arc::clone(&sent_for_closing);
+                let allow_close = Rc::clone(&allow_close);
+                let close_after_save = Rc::clone(&close_after_save);
+                let window_for_dialog = window.clone();
+                let app_for_dialog = Arc::clone(&app);
+                let account_id = account.id;
+                let draft_key = Arc::clone(&draft_key);
+                let save_draft = Arc::clone(&save_draft);
+                let dirty_for_discard = Arc::clone(&dirty_for_closing);
+                let mark_clean = Rc::clone(&mark_clean);
+                let confirming = Rc::clone(&confirming);
+                move |_sender, args| {
+                    // A send or an allowed close goes straight through.
+                    if allow_close.get() || sent_for_closing.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if !dirty_for_closing.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    // Cancel the close and ask instead.
+                    if let Some(args) = args.as_ref() {
+                        let _ = args.SetCancel(true);
+                    }
+                    if confirming.replace(true) {
+                        // The confirmation is already open.
+                        return;
+                    }
+                    let dialog_parts = (|| {
+                        let xaml_root = ui::window_xaml_root(&window_for_dialog)?;
+                        let dialog = mailin_winui_sys::ContentDialog::new()
+                            .context("could not create the close confirmation")?;
+                        let title = ui::text("Save draft?")
+                            .context("could not build the confirmation title")?;
+                        dialog.SetTitle(&title)?;
+                        let body = ui::text("This message has unsaved changes.")
+                            .context("could not build the confirmation body")?;
+                        ui::set_content(&dialog, &body)?;
+                        dialog.SetPrimaryButtonText("Save")?;
+                        dialog.SetSecondaryButtonText("Discard")?;
+                        dialog.SetCloseButtonText("Cancel")?;
+                        dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Primary)?;
+                        Ok::<_, anyhow::Error>((dialog, xaml_root))
+                    })();
+                    let (dialog, xaml_root) = match dialog_parts {
+                        Ok(parts) => parts,
+                        Err(error) => {
+                            tracing::warn!(%error, "could not build the close confirmation; the window stays open");
+                            confirming.set(false);
+                            return;
+                        }
+                    };
+                    let _ = ui::set_xaml_root(&dialog, &xaml_root);
+                    // Any close (Escape, backdrop, any button) re-arms the
+                    // prompt for the next attempt.
+                    if let Ok(token) = dialog.Closed({
+                        let confirming = Rc::clone(&confirming);
+                        move |_, _| confirming.set(false)
+                    }) {
+                        dialog_revokers.keep(token);
+                    }
+                    // Save: close once the draft has been stored.
+                    if let Ok(token) = dialog.PrimaryButtonClick({
+                        let close_after_save = Rc::clone(&close_after_save);
+                        let save_draft = Arc::clone(&save_draft);
+                        let confirming = Rc::clone(&confirming);
+                        move |_, _| {
+                            confirming.set(false);
+                            close_after_save.set(true);
+                            save_draft(true);
+                        }
+                    }) {
+                        dialog_revokers.keep(token);
+                    }
+                    // Discard: delete the queued draft and close now.
+                    if let Ok(token) = dialog.SecondaryButtonClick({
+                        let app = Arc::clone(&app_for_dialog);
+                        let window = window_for_dialog.clone();
+                        let draft_key = Arc::clone(&draft_key);
+                        let dirty = Arc::clone(&dirty_for_discard);
+                        let mark_clean = Rc::clone(&mark_clean);
+                        let allow_close = Rc::clone(&allow_close);
+                        let confirming = Rc::clone(&confirming);
+                        move |_, _| {
+                            confirming.set(false);
+                            if let Ok(key) = draft_key.lock()
+                                && !key.is_empty()
+                            {
+                                app.engine.discard_draft(account_id, key.clone());
+                            }
+                            dirty.store(false, Ordering::Relaxed);
+                            mark_clean();
+                            allow_close.set(true);
+                            let _ = window.Close();
+                        }
+                    }) {
+                        dialog_revokers.keep(token);
+                    }
+                    let _ = dialog.ShowAsync();
+                }
+            })?;
+            closing_revokers.keep(closing);
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the composer window has no AppWindow; closing a dirty composer will not ask");
+        }
+    }
+
     let window_token = ui::keep_alive(&window);
-    let cleanup = revokers.clone();
-    let attachments_cleanup = attachment_events.clone();
-    let save_for_close = Arc::clone(&save_draft);
-    let timer_for_close = timer.clone();
     // The Closed handler must not release its own subscription: dropping the
     // revoker from inside the callback frees the delegate while it is still
     // running. Keep it in a set of its own, which is never cleared.
+    let cleanup = revokers.clone();
+    let attachments_cleanup = attachment_events.clone();
+    let timer_for_close = timer.clone();
+    let queue_for_close = queue.clone();
+    // The closing subscription ends with the window: the set lives inside
+    // the Closed handler and is dropped when the window releases it.
+    let closing_revokers_for_close = closing_revokers;
     let closed_revokers = ui::Revokers::default();
     let closed_keepalive = closed_revokers.clone();
     let closed = window.Closed(move |_, _| {
-        save_for_close(false);
         let _ = timer_for_close.Stop();
-        cleanup.clear();
-        attachments_cleanup.clear();
-        ui::release(window_token);
-        // Hold on to this handler's own subscription for as long as it runs.
+        // Never clear the subscriptions from inside this callback: they are
+        // released on a fresh turn of the queue, so a capture that is still
+        // finishing keeps its response and its revoker until then.
+        let cleanup = cleanup.clone();
+        let attachments_cleanup = attachments_cleanup.clone();
+        let deferred = mailin_winui_sys::DispatcherQueueHandler::new(move || {
+            cleanup.clear();
+            attachments_cleanup.clear();
+            ui::release(window_token);
+        });
+        match queue_for_close.TryEnqueue(deferred.to_ref()) {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!("the composer cleanup was not enqueued"),
+            Err(error) => tracing::warn!(%error, "could not enqueue the composer cleanup"),
+        }
+        // Hold on to this handler's own subscriptions for as long as it runs.
         let _keepalive = &closed_keepalive;
+        let _closing_alive = &closing_revokers_for_close;
     })?;
     closed_revokers.keep(closed);
     window.Activate()?;
