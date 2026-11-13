@@ -13,6 +13,8 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
     OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 /// Maximum size of a single attached file. The same limit is enforced by the
 /// GTK client and keeps the SQLite outbox and SMTP submission sane.
@@ -40,6 +42,31 @@ pub fn pick_files(title: &str) -> Vec<PathBuf> {
         return Vec::new();
     }
     parse_multiselect(&buffer)
+}
+
+/// Open a URL (http/https/mailto) with the shell association.
+///
+/// `ShellExecuteW` hands the URI directly to the shell without a `cmd.exe`
+/// re-parse, so a crafted URL cannot inject extra command arguments the way
+/// `cmd /C start <url>` could. Failures are logged, never ignored.
+pub fn open_url(url: &str) {
+    let verb = wide("open");
+    let target = wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // ShellExecuteW returns a value > 32 on success; anything else is an
+    // SE_ERR_* code.
+    if result as usize <= 32 {
+        tracing::warn!(url = %url, code = result as usize, "ShellExecuteW could not open the URL");
+    }
 }
 
 /// Show the common save dialog. Returns `None` when the user cancels.

@@ -3596,9 +3596,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
                 || lower.starts_with("mailto:")
             {
                 let _ = args.SetCancel(true);
-                let _ = std::process::Command::new("cmd")
-                    .args(["/C", "start", "", &uri])
-                    .spawn();
+                crate::platform::open_url(&uri);
             } else {
                 let _ = args.SetCancel(true);
             }

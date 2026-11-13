@@ -693,14 +693,9 @@ pub fn present(
                 }
             };
             let url = pending.auth_url().to_owned();
-            if let Err(error) = std::process::Command::new("cmd")
-                .args(["/C", "start", "", &url])
-                .spawn()
-            {
-                let _ = oauth_status.SetText(&format!("Could not open the browser: {error}"));
-                let _ = ui::set_visible(&oauth_status, true);
-                return;
-            }
+            // Opened via the shell (ShellExecuteW) instead of `cmd /C start`
+            // so a crafted URL cannot inject extra command-line arguments.
+            crate::platform::open_url(&url);
             let _ = oauth_status.SetText("Waiting for the browser to complete sign-in…");
             let _ = ui::set_visible(&oauth_status, true);
 
