@@ -162,7 +162,7 @@ jobs:
           retention-days: 30
 
   # ============================================================
-  # Artifact Attestation (Sigstore/cosign)
+  # Artifact Attestation
   # ============================================================
   attest:
     name: Artifact Attestation
@@ -186,17 +186,23 @@ jobs:
           name: mailin-windows
           path: artifacts/windows
 
-      - name: Generate SLSA Provenance
-        uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+      # The provenance is signed keylessly by GitHub. The SLSA generator
+      # cannot be used here: a reusable workflow from another repository is
+      # not resolvable for this repository, which makes GitHub reject the
+      # whole workflow file before any job is scheduled.
+      - name: Generate build provenance
+        id: attest
+        uses: actions/attest-build-provenance@v4
         with:
-          base64-subjects: "${{ hashFiles('artifacts/**/*') }}"
-          provenance-name: mailin-provenance.intoto.jsonl
+          subject-path: |
+            artifacts/flatpak/*
+            artifacts/windows/*
 
       - name: Upload Attestation
         uses: actions/upload-artifact@v4
         with:
           name: mailin-attestation
-          path: mailin-provenance.intoto.jsonl
+          path: ${{ steps.attest.outputs.bundle-path }}
           retention-days: 90
 
   # ============================================================
@@ -243,6 +249,6 @@ jobs:
             artifacts/windows/mailin-*-x86_64.msix
             artifacts/windows/mailin-setup-*.exe
             artifacts/windows/SHA256SUMS
-            artifacts/attestation/mailin-provenance.intoto.jsonl
+            artifacts/attestation/*.jsonl
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
