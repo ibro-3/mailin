@@ -42,6 +42,7 @@ pub use account::{
     Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, OAuthProvider, Security,
     ServerSettings,
 };
+pub use imap::validate_flag;
 pub use client::{
     ClientEvent, ConnectionStage, ConnectionTestReport, Event, Mailin, StageTestResult,
     test_connection_staged, test_imap_connection, test_smtp_connection,
@@ -49,7 +50,7 @@ pub use client::{
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{
     Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode,
-    UiPreferences,
+    UiPreferences, quick_action_restore_states,
 };
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;

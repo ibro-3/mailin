@@ -2,6 +2,7 @@
 //! flag updates. The protocol crate is contained in this module; the rest of
 //! the core only sees Mailin types.
 
+pub(crate) mod decode;
 pub(crate) mod parse;
 
 use std::collections::HashSet;
@@ -471,6 +472,9 @@ impl ImapSession {
         mode: &str,
         flags: &[String],
     ) -> Result<()> {
+        for flag in flags {
+            validate_flag(flag)?;
+        }
         let query = format!("{mode}FLAGS.SILENT ({})", flags.join(" "));
         let mut stream = self
             .inner
@@ -627,48 +631,60 @@ impl ImapSession {
     /// Append a raw message, for example a copy of an outgoing message to the
     /// Sent folder.
     pub async fn append(&mut self, mailbox: &str, flags: &str, raw: &[u8]) -> Result<()> {
+        // `flags` arrives as a parenthesized flag list, e.g. `(\Seen)`.
+        let inner = flags.trim_start_matches('(').trim_end_matches(')');
+        for flag in inner.split_whitespace() {
+            validate_flag(flag)?;
+        }
+        let wire = decode::mutf7_encode(mailbox);
         self.inner
-            .append(mailbox, Some(flags), None, raw)
+            .append(&wire, Some(flags), None, raw)
             .await
             .map_err(|e| Error::Imap(format!("APPEND to {mailbox} failed: {e}")))
     }
 
     /// Create a new folder on the IMAP server.
     pub async fn create_folder(&mut self, name: &str) -> Result<()> {
+        let wire = decode::mutf7_encode(name);
         self.inner
-            .create(name)
+            .create(&wire)
             .await
             .map_err(|e| Error::Imap(format!("CREATE {name} failed: {e}")))
     }
 
     /// Rename a folder on the IMAP server.
     pub async fn rename_folder(&mut self, old_name: &str, new_name: &str) -> Result<()> {
+        let old = decode::mutf7_encode(old_name);
+        let new = decode::mutf7_encode(new_name);
         self.inner
-            .rename(old_name, new_name)
+            .rename(&old, &new)
             .await
             .map_err(|e| Error::Imap(format!("RENAME {old_name} -> {new_name} failed: {e}")))
     }
 
     /// Delete a folder on the IMAP server.
     pub async fn delete_folder(&mut self, name: &str) -> Result<()> {
+        let wire = decode::mutf7_encode(name);
         self.inner
-            .delete(name)
+            .delete(&wire)
             .await
             .map_err(|e| Error::Imap(format!("DELETE {name} failed: {e}")))
     }
 
     /// Subscribe to a folder on the IMAP server.
     pub async fn subscribe_folder(&mut self, name: &str) -> Result<()> {
+        let wire = decode::mutf7_encode(name);
         self.inner
-            .subscribe(name)
+            .subscribe(&wire)
             .await
             .map_err(|e| Error::Imap(format!("SUBSCRIBE {name} failed: {e}")))
     }
 
     /// Unsubscribe from a folder on the IMAP server.
     pub async fn unsubscribe_folder(&mut self, name: &str) -> Result<()> {
+        let wire = decode::mutf7_encode(name);
         self.inner
-            .unsubscribe(name)
+            .unsubscribe(&wire)
             .await
             .map_err(|e| Error::Imap(format!("UNSUBSCRIBE {name} failed: {e}")))
     }
@@ -679,6 +695,39 @@ fn uid_set(uids: &[u32]) -> String {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Validate a single IMAP flag before it is interpolated into a `UID STORE`
+/// command.
+///
+/// Flags are stored as bare atoms (`RFC 3501 §9`): any byte outside the
+/// atom-char set would let a corrupt or malicious flag value inject protocol
+/// tokens into the command, so it is rejected. System flags start with `\`
+/// followed by ASCII letters (e.g. `\Seen`, `\Answered`, `\Deleted`).
+pub fn validate_flag(flag: &str) -> Result<()> {
+    let invalid = |why: &str| Error::Protocol(format!("invalid IMAP flag {flag:?}: {why}"));
+
+    if flag.is_empty() {
+        return Err(invalid("empty"));
+    }
+    if let Some(rest) = flag.strip_prefix('\\') {
+        if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return Err(invalid("system flags must be \\ followed by ASCII letters"));
+        }
+        return Ok(());
+    }
+    for &b in flag.as_bytes() {
+        let forbidden = matches!(
+            b,
+            b'(' | b')' | b'{' | b'}' | b'%' | b'*' | b'"' | b'\\' | b']'
+        ) || b == b' '
+            || b.is_ascii_control()
+            || b >= 0x80;
+        if forbidden {
+            return Err(invalid("contains a character that is not an atom-char"));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a message is flagged `\Deleted` without being part of `uids`.
@@ -694,10 +743,13 @@ fn is_foreign_deleted(uid: &u32, flags: &[String], uids: &[u32]) -> bool {
 
 fn remote_folder(name: &Name) -> RemoteFolder {
     let attributes: Vec<String> = name.attributes().iter().map(attribute_string).collect();
+    // Mailbox names arrive in Modified UTF-7 (RFC 3501 §5.1.3); decode them so
+    // non-ASCII names are stored and displayed as Unicode.
+    let decoded = decode::mutf7_decode(name.name());
     RemoteFolder {
-        name: name.name().to_owned(),
+        role: FolderRole::from_imap(&decoded, &attributes),
+        name: decoded,
         delimiter: name.delimiter().unwrap_or("/").to_owned(),
-        role: FolderRole::from_imap(name.name(), &attributes),
         attributes,
     }
 }
@@ -785,5 +837,24 @@ mod tests {
         assert_eq!(make("Gesendet", &["\\Sent"]).role, FolderRole::Sent);
         assert_eq!(make("Papierkorb", &["\\Trash"]).role, FolderRole::Trash);
         assert_eq!(make("custom", &["\\Noselect"]).role, FolderRole::Other);
+    }
+
+    #[test]
+    fn flag_injection_is_rejected() {
+        assert!(validate_flag("\\Seen").is_ok());
+        assert!(validate_flag("$Junk").is_ok());
+        assert!(validate_flag("keyword").is_ok());
+        assert!(validate_flag("bad flag").is_err()); // space
+        assert!(validate_flag("bad)flag").is_err()); // )
+        assert!(validate_flag("bad{flag").is_err()); // {
+        assert!(validate_flag("").is_err()); // empty
+        assert!(validate_flag("\\Bad Chars").is_err()); // space after \
+        assert!(validate_flag("\\Bad*").is_err()); // wildcard after \
+        assert!(validate_flag("ctrl\u{1}").is_err()); // control char
+        assert!(validate_flag("nönascii").is_err()); // non-ASCII
+        assert!(validate_flag("bad*flag").is_err()); // list-wildcard
+        assert!(validate_flag("bad\"flag").is_err()); // quoted-special
+        assert!(validate_flag("bad\\flag").is_err()); // backslash
+        assert!(validate_flag("bad]flag").is_err()); // ]
     }
 }

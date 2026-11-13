@@ -85,7 +85,10 @@ fn body_from(message: &Message<'_>) -> ParsedBody {
 /// exact MIME entity plus the detached signature so it can be verified later.
 fn pgp_from_raw(raw: &[u8]) -> Option<ParsedPgp> {
     let text = std::str::from_utf8(raw).ok()?;
-    let (headers, body) = text.split_once("\r\n\r\n")?;
+    // Some paths produce LF-only messages, so accept both separators; the
+    // original bytes are kept for payload extraction (a signature must verify
+    // against the exact entity).
+    let (headers, body) = split_headers_body(text)?;
     let lower = headers.to_ascii_lowercase();
 
     if lower.contains("multipart/encrypted") {
@@ -102,7 +105,11 @@ fn pgp_from_raw(raw: &[u8]) -> Option<ParsedPgp> {
         let marker = format!("--{boundary}");
         let mut parts = body.split(&marker);
         parts.next()?; // preamble
-        let entity = parts.next()?.strip_prefix("\r\n")?.to_owned();
+        let entity_part = parts.next()?;
+        let entity = entity_part
+            .strip_prefix("\r\n")
+            .or_else(|| entity_part.strip_prefix('\n'))?
+            .to_owned();
         let signature_part = parts.next()?;
         let signature = armored_block(signature_part, "SIGNATURE")?;
         return Some(ParsedPgp {
@@ -112,7 +119,53 @@ fn pgp_from_raw(raw: &[u8]) -> Option<ParsedPgp> {
         });
     }
 
+    // PGP/MIME can also hide in a nested multipart part, for example when the
+    // outer part carries the message and an inner part is multipart/encrypted.
+    if lower.contains("multipart/")
+        && let Some(boundary) = header_parameter(headers, "boundary")
+    {
+        let marker = format!("--{boundary}");
+        for part in body.split(&marker) {
+            let part = part.trim_start_matches(['\r', '\n']);
+            let Some((part_headers, _)) = split_headers_body(part) else {
+                continue;
+            };
+            let part_lower = part_headers.to_ascii_lowercase();
+            if part_lower.contains("application/pgp-encrypted")
+                || part_lower.contains("multipart/encrypted")
+                || part_lower.contains("multipart/signed")
+                || part_lower.contains("multipart/")
+            {
+                if let Some(pgp) = pgp_from_raw(part.as_bytes()) {
+                    return Some(pgp);
+                }
+            }
+        }
+    }
+
     None
+}
+
+/// Split a message or part into its header block and body, accepting both
+/// CRLF and LF line endings. Returns slices of the original text.
+fn split_headers_body(text: &str) -> Option<(&str, &str)> {
+    let crlf = text.find("\r\n\r\n").map(|index| (index, 4));
+    let lf = text.find("\n\n").map(|index| (index, 2));
+    match (crlf, lf) {
+        (Some((index, separator)), None) => Some((&text[..index], &text[index + separator..])),
+        (None, Some((index, separator))) => Some((&text[..index], &text[index + separator..])),
+        (Some((a, _)), Some((b, _))) => {
+            // Take whichever blank line comes first.
+            if a <= b {
+                let (index, separator) = crlf.unwrap();
+                Some((&text[..index], &text[index + separator..]))
+            } else {
+                let (index, separator) = lf.unwrap();
+                Some((&text[..index], &text[index + separator..]))
+            }
+        }
+        (None, None) => None,
+    }
 }
 
 /// Value of a `; name="value"` (or `; name=value`) MIME parameter.
@@ -348,6 +401,59 @@ mod tests {
                 .expect("signature")
                 .contains("BEGIN PGP SIGNATURE")
         );
+    }
+
+    #[test]
+    fn extracts_encrypted_payload_with_lf_only_endings() {
+        let wrapped = concat!(
+            "Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"abc\"\n",
+            "\n",
+            "--abc\n",
+            "Content-Type: application/pgp-encrypted\n",
+            "\n",
+            "Version: 1\n",
+            "--abc\n",
+            "Content-Type: application/octet-stream; name=\"encrypted.asc\"\n",
+            "\n",
+            "-----BEGIN PGP MESSAGE-----\n",
+            "AAAA\n",
+            "-----END PGP MESSAGE-----\n",
+            "--abc--"
+        );
+        let (_, body) = parse_message(wrapped.as_bytes());
+        let pgp = body.pgp.expect("pgp payload");
+        assert_eq!(pgp.kind, PgpMimeKind::Encrypted);
+        assert!(pgp.payload.contains("BEGIN PGP MESSAGE"));
+    }
+
+    #[test]
+    fn pgp_inside_a_nested_part_is_detected() {
+        // The encrypted entity hides one level below the outer multipart.
+        let inner = concat!(
+            "Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"pgp\"\r\n",
+            "\r\n",
+            "--pgp\r\n",
+            "Content-Type: application/pgp-encrypted\r\n",
+            "\r\n",
+            "Version: 1\r\n",
+            "--pgp\r\n",
+            "Content-Type: application/octet-stream\r\n",
+            "\r\n",
+            "-----BEGIN PGP MESSAGE-----\r\n",
+            "BBBB\r\n",
+            "-----END PGP MESSAGE-----\r\n",
+            "--pgp--"
+        );
+        let wrapped = format!(
+            "Content-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n--outer\r\n\
+             Content-Type: multipart/mixed; boundary=\"pgp-inner\"\r\n\r\n{inner}\r\n--outer--"
+        );
+        // Rebind the inner boundary so the nested scan can find it.
+        let wrapped = wrapped.replace("boundary=\"pgp\"", "boundary=\"pgp-inner\"");
+        let (_, body) = parse_message(wrapped.as_bytes());
+        let pgp = body.pgp.expect("nested pgp payload");
+        assert_eq!(pgp.kind, PgpMimeKind::Encrypted);
+        assert!(pgp.payload.contains("BEGIN PGP MESSAGE"));
     }
 
     #[test]
