@@ -160,27 +160,42 @@ impl Mailin {
 
     // ---------------------------------------------------------------- accounts
 
-    /// Create or update an account. The password is stored in the keyring.
+    /// Create or update an account. Passwords are stored in the keyring.
     ///
-    /// OAuth2 refresh tokens are also kept in the keyring: the account row
-    /// stores the short-lived access token and metadata, while the long-lived
-    /// refresh token never touches the SQLite file.
+    /// OAuth2 refresh tokens also live in the keyring: the main entry holds
+    /// the IMAP credential (password or prefixed OAuth2 grant) and the
+    /// `:smtp` entry holds the SMTP credential. The account row never
+    /// contains a refresh token or an access token.
     pub fn save_account(&self, account: &Account, password: Option<&SecretString>) -> Result<()> {
         account.validate()?;
 
         let mut stored = account.clone();
-        let refresh_token = stored.imap.oauth2.refresh_token.clone();
-        if !refresh_token.is_empty() {
-            let secret = SecretString::new(format!("{OAUTH2_PREFIX}{refresh_token}").into());
-            self.credentials.set(&account.id, &secret)?;
-            stored.imap.oauth2.refresh_token.clear();
-            stored.smtp.oauth2.refresh_token.clear();
-        }
+        let imap_grant = stored.imap.oauth2.refresh_token.clone();
+        let smtp_grant = stored.smtp.oauth2.refresh_token.clone();
 
-        self.store.upsert_account(&stored)?;
-        if let Some(password) = password {
+        // The main keyring entry is the IMAP credential.
+        if !imap_grant.is_empty() {
+            let secret = SecretString::new(format!("{OAUTH2_PREFIX}{imap_grant}").into());
+            self.credentials.set(&account.id, &secret)?;
+        } else if let Some(password) = password {
             self.credentials.set(&account.id, password)?;
         }
+
+        // The `:smtp` entry is the SMTP credential. It is only needed when
+        // SMTP uses a different grant than IMAP; a shared grant (the common
+        // case) lives in the main entry alone.
+        if !smtp_grant.is_empty() && smtp_grant != imap_grant {
+            let secret = SecretString::new(format!("{OAUTH2_PREFIX}{smtp_grant}").into());
+            self.credentials.set_smtp_secret(&account.id, &secret)?;
+        } else if let Some(password) = password {
+            // Keep an SMTP password copy for accounts where IMAP and SMTP use
+            // different passwords; the main entry may be an OAuth2 grant.
+            self.credentials.set_smtp_secret(&account.id, password)?;
+        }
+
+        stored.imap.oauth2.refresh_token.clear();
+        stored.smtp.oauth2.refresh_token.clear();
+        self.store.upsert_account(&stored)?;
         self.publish(Event::AccountsChanged);
         self.publish(Event::FoldersChanged {
             account_id: account.id,
@@ -195,6 +210,13 @@ impl Mailin {
         }
         if let Err(error) = self.credentials.delete(id) {
             tracing::warn!(%id, %error, "could not remove the stored password");
+        }
+        // Best-effort cleanup of the per-protocol entries.
+        if let Err(error) = self.credentials.delete_smtp_secret(id) {
+            tracing::warn!(%id, %error, "could not remove the stored SMTP credential");
+        }
+        if let Err(error) = self.credentials.delete_caldav_password(id) {
+            tracing::warn!(%id, %error, "could not remove the stored CalDAV password");
         }
         self.publish(Event::AccountsChanged);
         Ok(())
@@ -235,18 +257,36 @@ impl Mailin {
             .ok_or_else(|| Error::Credentials("no password is stored for this account".into()))
     }
 
-    /// Add the refresh token from the keyring to an account loaded from the
-    /// store. Missing keyring entries are not an error: the account may be a
-    /// password account, or the user may be editing it before signing in.
+    /// SMTP credential for a connection attempt: the dedicated `:smtp` entry
+    /// when one exists (SMTP may use a different password or grant than
+    /// IMAP), otherwise the main entry.
+    pub fn smtp_password(&self, id: &AccountId) -> Result<SecretString> {
+        self.credentials
+            .get_smtp_secret(id)?
+            .or_else(|| self.credentials.get(id).ok().flatten())
+            .filter(|secret| !is_oauth2_secret(secret))
+            .ok_or_else(|| Error::Credentials("no SMTP password is stored for this account".into()))
+    }
+
+    /// Add the OAuth2 refresh tokens from the keyring to an account loaded
+    /// from the store. Missing keyring entries are not an error: the account
+    /// may be a password account, or the user may be editing it before
+    /// signing in.
     fn hydrate_oauth2(&self, mut account: Account) -> Result<Account> {
         let Some(secret) = self.credentials.get(&account.id)? else {
             return Ok(account);
         };
-        let Some(refresh_token) = refresh_token_from_secret(&secret) else {
-            return Ok(account);
-        };
-        account.imap.oauth2.refresh_token = refresh_token.clone();
-        account.smtp.oauth2.refresh_token = refresh_token;
+        if let Some(refresh_token) = refresh_token_from_secret(&secret) {
+            account.imap.oauth2.refresh_token = refresh_token.clone();
+            // Legacy layout: the SMTP grant was shared with IMAP's entry. It
+            // still applies unless the account has its own `:smtp` entry.
+            account.smtp.oauth2.refresh_token = refresh_token;
+        }
+        if let Some(smtp) = self.credentials.get_smtp_secret(&account.id)?
+            && let Some(smtp_token) = refresh_token_from_secret(&smtp)
+        {
+            account.smtp.oauth2.refresh_token = smtp_token;
+        }
         Ok(account)
     }
 
@@ -1076,7 +1116,9 @@ mod tests {
 
         let stored = client.store.account(&acc.id).expect("read").expect("row");
         assert!(stored.imap.oauth2.refresh_token.is_empty());
-        assert_eq!(stored.imap.oauth2.access_token, "access");
+        // The access token is never persisted (serde skip, P15).
+        assert!(stored.imap.oauth2.access_token.is_empty());
+        assert!(stored.smtp.oauth2.access_token.is_empty());
 
         let loaded = client.account(&acc.id).expect("load").expect("account");
         assert_eq!(loaded.imap.oauth2.refresh_token, "refresh");

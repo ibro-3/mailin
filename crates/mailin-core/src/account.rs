@@ -89,10 +89,15 @@ pub enum OAuthProvider {
 }
 
 /// OAuth2 tokens for an account.
+///
+/// The access token is intentionally not persisted to disk (`serde(skip)`):
+/// only the long-lived refresh token is stored, and the access token is
+/// refreshed from it on every startup and before each connection.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OAuth2Tokens {
     /// Access token for XOAUTH2 authentication.
+    #[serde(skip, default)]
     pub access_token: String,
     /// Refresh token for obtaining new access tokens.
     pub refresh_token: String,

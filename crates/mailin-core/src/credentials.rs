@@ -46,6 +46,17 @@ pub trait CredentialsStore: Send + Sync {
 
     /// Remove the CalDAV password for an account.
     fn delete_caldav_password(&self, account: &AccountId) -> Result<()>;
+
+    /// Store the SMTP credential for an account: a password or, for OAuth2,
+    /// a prefixed refresh-token grant. Kept separately from the IMAP
+    /// credential so the two protocols can use different authentication.
+    fn set_smtp_secret(&self, account: &AccountId, secret: &SecretString) -> Result<()>;
+
+    /// Load the SMTP credential for an account.
+    fn get_smtp_secret(&self, account: &AccountId) -> Result<Option<SecretString>>;
+
+    /// Remove the SMTP credential for an account.
+    fn delete_smtp_secret(&self, account: &AccountId) -> Result<()>;
 }
 
 /// In-memory store for tests and for `--self-test` runs.
@@ -54,6 +65,7 @@ pub struct MemoryCredentials {
     secrets: Mutex<HashMap<AccountId, SecretString>>,
     pgp_secrets: Mutex<HashMap<(AccountId, String), SecretString>>,
     caldav_secrets: Mutex<HashMap<AccountId, SecretString>>,
+    smtp_secrets: Mutex<HashMap<AccountId, SecretString>>,
 }
 
 impl MemoryCredentials {
@@ -139,6 +151,31 @@ impl CredentialsStore for MemoryCredentials {
             .remove(account);
         Ok(())
     }
+
+    fn set_smtp_secret(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
+        self.smtp_secrets
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .insert(*account, secret.clone());
+        Ok(())
+    }
+
+    fn get_smtp_secret(&self, account: &AccountId) -> Result<Option<SecretString>> {
+        Ok(self
+            .smtp_secrets
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .get(account)
+            .cloned())
+    }
+
+    fn delete_smtp_secret(&self, account: &AccountId) -> Result<()> {
+        self.smtp_secrets
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .remove(account);
+        Ok(())
+    }
 }
 
 /// OS keyring backed store: Secret Service (GNOME Keyring, KWallet) on Linux
@@ -209,6 +246,33 @@ impl CredentialsStore for KeyringCredentials {
 
     fn delete(&self, account: &AccountId) -> Result<()> {
         match self.entry(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(Error::Credentials(e.to_string())),
+        }
+    }
+
+    fn set_smtp_secret(&self, account: &AccountId, secret: &SecretString) -> Result<()> {
+        self.entry_named(&format!("{account}:smtp"))?
+            .set_password(secret.expose_secret())
+            .map_err(|e| Error::Credentials(e.to_string()))
+    }
+
+    fn get_smtp_secret(&self, account: &AccountId) -> Result<Option<SecretString>> {
+        match self
+            .entry_named(&format!("{account}:smtp"))?
+            .get_password()
+        {
+            Ok(secret) => Ok(Some(SecretString::new(secret.into()))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(Error::Credentials(e.to_string())),
+        }
+    }
+
+    fn delete_smtp_secret(&self, account: &AccountId) -> Result<()> {
+        match self
+            .entry_named(&format!("{account}:smtp"))?
+            .delete_credential()
+        {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(Error::Credentials(e.to_string())),
         }
