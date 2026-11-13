@@ -233,8 +233,13 @@ pub fn show_preferences(
             page_size_row.set_value(defaults.ui.page_size as f64);
             mark_read_row.set_active(defaults.ui.mark_read_on_open);
             quick_actions_row.set_active(defaults.ui.quick_actions);
-            for (action, row) in quick_item_rows.borrow().iter() {
-                row.set_active(defaults.ui.quick_action_items.contains(action));
+            let rows = quick_item_rows.borrow();
+            let actions: Vec<QuickAction> = rows.iter().map(|(action, _)| *action).collect();
+            for ((_, row), active) in rows
+                .iter()
+                .zip(mailin_core::quick_action_restore_states(&actions))
+            {
+                row.set_active(active);
             }
         }
     });

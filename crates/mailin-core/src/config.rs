@@ -353,6 +353,18 @@ impl Config {
     }
 }
 
+/// Compute the "active" state of each quick-action switch row for `actions`,
+/// using the default configuration. The preferences "Restore defaults" button
+/// applies these to the rows it actually shows. Pure helper so the restore
+/// logic is testable without the front-end toolkit.
+pub fn quick_action_restore_states(actions: &[QuickAction]) -> Vec<bool> {
+    let defaults = UiPreferences::default().quick_action_items;
+    actions
+        .iter()
+        .map(|action| defaults.contains(action))
+        .collect()
+}
+
 #[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -370,6 +382,30 @@ fn restrict_to_owner(_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_action_restore_states_match_defaults() {
+        let shown = [
+            QuickAction::Archive,
+            QuickAction::Delete,
+            QuickAction::Flag,
+            QuickAction::MarkRead,
+            QuickAction::MarkUnread,
+            QuickAction::Junk,
+        ];
+        let states = quick_action_restore_states(&shown);
+        let expected: Vec<bool> = shown
+            .iter()
+            .map(|action| UiPreferences::default().quick_action_items.contains(action))
+            .collect();
+        assert_eq!(states, expected);
+        assert_eq!(states, [true, true, true, true, false, false]);
+    }
+
+    #[test]
+    fn quick_action_restore_states_is_empty_for_no_rows() {
+        assert!(quick_action_restore_states(&[]).is_empty());
+    }
 
     #[test]
     fn defaults_are_valid() {
