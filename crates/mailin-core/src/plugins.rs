@@ -3,11 +3,112 @@
 use crate::error::{Error, Result};
 use crate::model::Plugin;
 use crate::store::Store;
-use mlua::{ChunkMode, Lua, Table, Value};
-use std::collections::HashMap;
+use mlua::{ChunkMode, Lua, Table, Value, VmState};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::RwLock;
+
+/// Wall-clock budget for a single plugin hook invocation.
+const PLUGIN_HOOK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// CPU budget per Lua invocation: the interrupt callback errors out once more
+/// than this many VM instructions have executed, which terminates runaway
+/// loops (`while true do end`) instead of pinning the Lua mutex forever.
+const LUA_INSTRUCTION_BUDGET: u64 = 10_000_000;
+
+/// Timeout for a single plugin HTTP request.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Shared instruction counter checked by the Lua interrupt callback.
+#[derive(Default)]
+struct InstructionBudget {
+    counter: AtomicU64,
+}
+
+impl InstructionBudget {
+    /// Reset the counter for a new Lua invocation.
+    fn reset(&self) {
+        self.counter.store(0, Ordering::Relaxed);
+    }
+
+    /// Install the interrupt callback on the Lua state.
+    fn install(self: &Arc<Self>, lua: &Lua) -> Result<()> {
+        let budget = Arc::clone(self);
+        lua.set_interrupt(move |_| {
+            let used = budget.counter.fetch_add(1, Ordering::Relaxed);
+            if used >= LUA_INSTRUCTION_BUDGET {
+                Err(mlua::Error::RuntimeError(format!(
+                    "plugin exceeded its CPU budget ({LUA_INSTRUCTION_BUDGET} VM instructions)"
+                )))
+            } else {
+                Ok(VmState::Continue)
+            }
+        });
+        Ok(())
+    }
+}
+
+/// Run a blocking operation without pinning the tokio executor.
+///
+/// Inside a multi-threaded runtime this uses `block_in_place`; on a
+/// current-thread runtime (where `block_in_place` panics) or on a plain
+/// thread the work hops to a short-lived OS thread so `reqwest::blocking`
+/// does not panic inside a runtime.
+fn run_blocking<T, F>(work: F) -> T
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(work),
+            _ => std::thread::scope(|scope| {
+                scope
+                    .spawn(work)
+                    .join()
+                    .expect("blocking operation thread panicked")
+            }),
+        },
+        Err(_) => work(),
+    }
+}
+
+/// A timeout-guarded shared `reqwest::blocking` client for plugin HTTP calls.
+fn http_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .build()
+        .unwrap_or_default()
+}
+
+/// Parse the http entries of a plugin's `permissions` list into allowed URL
+/// prefixes. Entries that do not start with `http:`/`https:` are ignored; a
+/// trailing `*` wildcard is stripped so the remainder can be prefix-matched.
+fn parse_allowed_hosts(permissions_json: &str) -> HashSet<String> {
+    serde_json::from_str::<Vec<serde_json::Value>>(permissions_json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .filter(|s| s.starts_with("http:") || s.starts_with("https:"))
+        .map(|s| s.trim_end_matches('*').to_owned())
+        .collect()
+}
+
+/// Whether a URL is covered by at least one allowed prefix.
+fn host_permitted(url: &str, allowed: &HashSet<String>) -> bool {
+    !allowed.is_empty() && allowed.iter().any(|prefix| url.starts_with(prefix.as_str()))
+}
+
+/// The error returned to Lua when a URL is not covered by the plugin's
+/// manifest permissions.
+fn denied_url(url: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!(
+        "permission denied: {url} is not covered by the plugin's manifest permissions"
+    ))
+}
 
 /// Plugin system managing all loaded plugins and their Lua states.
 pub struct PluginSystem {
@@ -15,6 +116,8 @@ pub struct PluginSystem {
     store: Arc<Store>,
     plugins: Arc<RwLock<HashMap<String, Plugin>>>,
     plugin_dir: Arc<PathBuf>,
+    /// Instruction budget shared with the Lua interrupt callback.
+    budget: Arc<InstructionBudget>,
 }
 
 impl std::fmt::Debug for PluginSystem {
@@ -29,7 +132,8 @@ impl std::fmt::Debug for PluginSystem {
 impl PluginSystem {
     /// Create a new plugin system.
     pub fn new(store: Arc<Store>, data_dir: impl AsRef<Path>) -> Result<Self> {
-        let lua = Arc::new(Mutex::new(Self::create_lua_state()?));
+        let budget = Arc::new(InstructionBudget::default());
+        let lua = Arc::new(Mutex::new(Self::create_lua_state(&budget)?));
         let data_dir = Arc::new(data_dir.as_ref().to_path_buf());
         let plugin_dir = Arc::new(data_dir.join("plugins"));
 
@@ -38,12 +142,14 @@ impl PluginSystem {
             store,
             plugins: Arc::new(RwLock::new(HashMap::new())),
             plugin_dir,
+            budget,
         })
     }
 
     /// Create a sandboxed Lua state with the Mailin API.
-    fn create_lua_state() -> Result<Lua> {
+    fn create_lua_state(budget: &Arc<InstructionBudget>) -> Result<Lua> {
         let lua = Lua::new();
+        budget.install(&lua)?;
 
         // Create the mailin global API
         let api = lua.create_table()?;
@@ -130,30 +236,35 @@ impl PluginSystem {
         api.set("events", events)?;
 
         // mailin.http.get(url) / post(url, body)
+        //
+        // The calls run through `run_blocking` so `reqwest::blocking` never
+        // executes (and panics) inside the tokio runtime, and through a
+        // timeout-guarded client so a hung server cannot pin the Lua mutex.
         let http = lua.create_table()?;
         http.set(
             "get",
             lua.create_function(|lua, url: String| {
-                let resp = reqwest::blocking::get(&url)
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-                let text = resp
-                    .text()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                let text = run_blocking(move || {
+                    http_client()
+                        .get(&url)
+                        .send()
+                        .and_then(|resp| resp.text())
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+                })?;
                 lua.create_string(&text)
             })?,
         )?;
         http.set(
             "post",
             lua.create_function(|lua, (url, body): (String, String)| {
-                let client = reqwest::blocking::Client::new();
-                let resp = client
-                    .post(&url)
-                    .body(body)
-                    .send()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-                let text = resp
-                    .text()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+                let text = run_blocking(move || {
+                    http_client()
+                        .post(&url)
+                        .body(body)
+                        .send()
+                        .and_then(|resp| resp.text())
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+                })?;
                 lua.create_string(&text)
             })?,
         )?;
@@ -163,7 +274,9 @@ impl PluginSystem {
 
         // Set sandbox limits
         lua.set_memory_limit(10 * 1024 * 1024)?; // 10 MB
-        // Note: cpu_limit requires feature "send" in mlua, skip for now
+        // CPU budget: the interrupt callback installed from the shared
+        // `InstructionBudget` terminates runaway loops after
+        // `LUA_INSTRUCTION_BUDGET` VM instructions.
 
         Ok(lua)
     }
@@ -231,11 +344,23 @@ impl PluginSystem {
             return Err(Error::Config("Plugin missing main.lua".into()));
         }
 
+        let permissions = manifest
+            .get("permissions")
+            .and_then(|v| v.as_array())
+            .map(|arr| serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string()))
+            .unwrap_or_else(|| "[]".to_string());
+
+        // Enforce the manifest's HTTP permissions before the plugin script
+        // runs, so a plugin cannot use the network while loading.
+        let allowed_hosts = parse_allowed_hosts(&permissions);
+        self.restrict_http_for_plugin(&allowed_hosts)?;
+
         let script = std::fs::read_to_string(&main_path)?;
 
         // Execute the plugin in the sandboxed Lua state
         {
             let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
+            self.budget.reset();
             lua.load(&script)
                 .set_mode(ChunkMode::Text)
                 .exec()
@@ -258,12 +383,6 @@ impl PluginSystem {
             .and_then(|v| v.as_str())
             .unwrap_or("0.1.0")
             .to_string();
-
-        let permissions = manifest
-            .get("permissions")
-            .and_then(|v| v.as_array())
-            .map(|arr| serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string()))
-            .unwrap_or_else(|| "[]".to_string());
 
         let plugin = Plugin {
             name: name.clone(),
@@ -290,6 +409,60 @@ impl PluginSystem {
         plugins.insert(name.clone(), plugin);
 
         tracing::info!(plugin = %name, "Plugin loaded");
+        Ok(())
+    }
+
+    /// Re-register `mailin.http.get`/`post` with a whitelist derived from the
+    /// plugin's manifest permissions.
+    ///
+    /// All plugins share one Lua state, so these restrictions are global:
+    /// the most recently loaded plugin's permission set applies. A plugin
+    /// that declares no `http:`/`https:` permission denies all HTTP access.
+    fn restrict_http_for_plugin(&self, allowed: &HashSet<String>) -> Result<()> {
+        let allowed = allowed.clone();
+        let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
+        let api: Table = lua
+            .globals()
+            .get("mailin")
+            .map_err(|e| Error::Plugin(e.to_string()))?;
+        let http: Table = api
+            .get("http")
+            .map_err(|e| Error::Plugin(e.to_string()))?;
+
+        let permitted = allowed.clone();
+        http.set(
+            "get",
+            lua.create_function(move |lua, url: String| {
+                if !host_permitted(&url, &permitted) {
+                    return Err(denied_url(&url));
+                }
+                let text = run_blocking(move || {
+                    http_client()
+                        .get(&url)
+                        .send()
+                        .and_then(|resp| resp.text())
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+                })?;
+                lua.create_string(&text)
+            })?,
+        )?;
+        http.set(
+            "post",
+            lua.create_function(move |lua, (url, body): (String, String)| {
+                if !host_permitted(&url, &allowed) {
+                    return Err(denied_url(&url));
+                }
+                let text = run_blocking(move || {
+                    http_client()
+                        .post(&url)
+                        .body(body)
+                        .send()
+                        .and_then(|resp| resp.text())
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+                })?;
+                lua.create_string(&text)
+            })?,
+        )?;
         Ok(())
     }
 
@@ -332,16 +505,38 @@ impl PluginSystem {
     }
 
     /// Execute a plugin hook (e.g., "on_message_received", "on_compose").
+    ///
+    /// The Lua call runs on a blocking thread with a wall-clock timeout so a
+    /// misbehaving plugin cannot stall the async runtime; the instruction
+    /// budget terminates runaway loops inside the VM.
     pub async fn run_hook(&self, hook: &str, args: Value) -> Result<Value> {
-        let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
-        let globals = lua.globals();
-        let hook_fn: mlua::Function = globals
-            .get(hook)
-            .map_err(|e| Error::Plugin(e.to_string()))?;
-        let result = hook_fn
-            .call(args)
-            .map_err(|e| Error::Plugin(format!("Hook {} failed: {}", hook, e)))?;
-        Ok(result)
+        let lua = Arc::clone(&self.lua);
+        let budget = Arc::clone(&self.budget);
+        let hook_name = hook.to_owned();
+        let hook = hook.to_owned();
+        let task = tokio::task::spawn_blocking(move || {
+            let lua = lua.lock().map_err(|_| Error::LockPoisoned)?;
+            budget.reset();
+            let globals = lua.globals();
+            let hook_fn: mlua::Function = globals
+                .get(hook_name.as_str())
+                .map_err(|e| Error::Plugin(e.to_string()))?;
+            hook_fn
+                .call(args)
+                .map_err(|e| Error::Plugin(format!("Hook {hook_name} failed: {e}")))
+        });
+        match tokio::time::timeout(PLUGIN_HOOK_TIMEOUT, task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => Err(Error::Plugin(format!("hook task panicked: {e}"))),
+            Err(_) => {
+                tracing::warn!(
+                    hook = %hook,
+                    timeout = ?PLUGIN_HOOK_TIMEOUT,
+                    "plugin hook timed out"
+                );
+                Err(Error::Plugin(format!("plugin hook '{hook}' timed out")))
+            }
+        }
     }
 
     /// Call a function exported by a specific plugin.
@@ -352,22 +547,44 @@ impl PluginSystem {
         }
         drop(plugins);
 
-        let lua = self.lua.lock().map_err(|_| Error::LockPoisoned)?;
-        let globals = lua.globals();
-        let plugin_table: Table = globals
-            .get(plugin_name)
-            .map_err(|e| Error::Plugin(e.to_string()))?;
-        let func_name = func;
-        let func: mlua::Function = plugin_table
-            .get(func_name)
-            .map_err(|e| Error::Plugin(e.to_string()))?;
-        let result = func.call(args).map_err(|e| {
-            Error::Plugin(format!(
-                "Plugin '{}' function '{}' failed: {}",
-                plugin_name, func_name, e
-            ))
-        })?;
-        Ok(result)
+        let lua = Arc::clone(&self.lua);
+        let budget = Arc::clone(&self.budget);
+        let plugin_name = plugin_name.to_owned();
+        let plugin_name_outer = plugin_name.clone();
+        let func = func.to_owned();
+        let func_outer = func.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let lua = lua.lock().map_err(|_| Error::LockPoisoned)?;
+            budget.reset();
+            let globals = lua.globals();
+            let plugin_table: Table = globals
+                .get(plugin_name.as_str())
+                .map_err(|e| Error::Plugin(e.to_string()))?;
+            let func_value: mlua::Function = plugin_table
+                .get(func.as_str())
+                .map_err(|e| Error::Plugin(e.to_string()))?;
+            func_value.call(args).map_err(|e| {
+                Error::Plugin(format!(
+                    "Plugin '{}' function '{}' failed: {}",
+                    plugin_name, func, e
+                ))
+            })
+        });
+        match tokio::time::timeout(PLUGIN_HOOK_TIMEOUT, task).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => Err(Error::Plugin(format!("plugin task panicked: {e}"))),
+            Err(_) => {
+                tracing::warn!(
+                    plugin = %plugin_name_outer,
+                    function = %func_outer,
+                    timeout = ?PLUGIN_HOOK_TIMEOUT,
+                    "plugin call timed out"
+                );
+                Err(Error::Plugin(format!(
+                    "plugin '{plugin_name_outer}' function '{func_outer}' timed out"
+                )))
+            }
+        }
     }
 }
 
@@ -418,5 +635,43 @@ mod tests {
             created_at: 0,
         };
         assert_eq!(plugin.name, "test");
+    }
+
+    #[test]
+    fn allowed_hosts_are_parsed_from_permissions() {
+        let permissions = r#"["http://localhost:8080/api", "network", "https://example.com/*"]"#;
+        let allowed = parse_allowed_hosts(permissions);
+        assert_eq!(allowed.len(), 2);
+        assert!(allowed.contains("http://localhost:8080/api"));
+        // The wildcard is stripped so the entry can be prefix-matched.
+        assert!(allowed.contains("https://example.com/"));
+    }
+
+    #[test]
+    fn host_permitted_requires_a_matching_prefix() {
+        let allowed: HashSet<String> = ["https://example.com/".to_owned()].into();
+        assert!(host_permitted("https://example.com/data", &allowed));
+        assert!(!host_permitted("https://evil.com/data", &allowed));
+        // An empty allowlist denies everything.
+        assert!(!host_permitted("https://example.com", &HashSet::new()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_hook_is_cancelled_on_timeout() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("test.db")).unwrap());
+        let system = PluginSystem::new(store, dir.path()).unwrap();
+        {
+            let lua = system.lua.lock().unwrap();
+            lua.load(r#"function forever() while true do end end"#)
+                .exec()
+                .unwrap();
+        }
+        let started = std::time::Instant::now();
+        let result = system.run_hook("forever", Value::Nil).await;
+        // The instruction budget terminates the loop well under the 10 s
+        // wall-clock timeout, but the call must return instead of hanging.
+        assert!(result.is_err());
+        assert!(started.elapsed() < PLUGIN_HOOK_TIMEOUT);
     }
 }
