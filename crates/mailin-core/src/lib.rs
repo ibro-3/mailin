@@ -42,7 +42,6 @@ pub use account::{
     Account, AccountId, AccountSyncSettings, AuthMethod, OAuth2Tokens, OAuthProvider, Security,
     ServerSettings,
 };
-pub use imap::validate_flag;
 pub use client::{
     ClientEvent, ConnectionStage, ConnectionTestReport, Event, Mailin, StageTestResult,
     test_connection_staged, test_imap_connection, test_smtp_connection,
@@ -55,6 +54,7 @@ pub use config::{
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
+pub use imap::validate_flag;
 pub use model::{
     AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole,
     FolderSyncState, MessageHeader, MessageId, NewMessage, OutboxEntry, OutboxState,

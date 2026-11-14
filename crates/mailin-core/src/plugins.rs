@@ -99,7 +99,10 @@ fn parse_allowed_hosts(permissions_json: &str) -> HashSet<String> {
 
 /// Whether a URL is covered by at least one allowed prefix.
 fn host_permitted(url: &str, allowed: &HashSet<String>) -> bool {
-    !allowed.is_empty() && allowed.iter().any(|prefix| url.starts_with(prefix.as_str()))
+    !allowed.is_empty()
+        && allowed
+            .iter()
+            .any(|prefix| url.starts_with(prefix.as_str()))
 }
 
 /// The error returned to Lua when a URL is not covered by the plugin's
@@ -425,9 +428,7 @@ impl PluginSystem {
             .globals()
             .get("mailin")
             .map_err(|e| Error::Plugin(e.to_string()))?;
-        let http: Table = api
-            .get("http")
-            .map_err(|e| Error::Plugin(e.to_string()))?;
+        let http: Table = api.get("http").map_err(|e| Error::Plugin(e.to_string()))?;
 
         let permitted = allowed.clone();
         http.set(

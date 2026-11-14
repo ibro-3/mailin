@@ -1116,7 +1116,10 @@ async fn refresh_oauth_tokens(state: &Arc<EngineState>, account: &mut Account) -
     // Persist the refresh tokens (the access token is skipped) and remember
     // the grant in memory for the rest of the process.
     state.mailbox.save_account(account, None)?;
-    let mut grants = state.oauth_grants.write().map_err(|_| Error::LockPoisoned)?;
+    let mut grants = state
+        .oauth_grants
+        .write()
+        .map_err(|_| Error::LockPoisoned)?;
     let entry = grants.entry(account.id).or_default();
     if account.imap.auth_method == AuthMethod::OAuth2 {
         entry.imap = Some(account.imap.oauth2.clone());
@@ -2452,9 +2455,7 @@ async fn sync_calendars(
     let caldav_password = match &account.caldav_password {
         Some(password) if !password.trim().is_empty() => Some(password.trim().to_owned()),
         _ => match state.mailbox.get_caldav_password(&account.id) {
-            Ok(Some(password)) if !password.trim().is_empty() => {
-                Some(password.trim().to_owned())
-            }
+            Ok(Some(password)) if !password.trim().is_empty() => Some(password.trim().to_owned()),
             Ok(_) => {
                 if caldav_url.is_some() {
                     tracing::warn!(
@@ -2471,7 +2472,8 @@ async fn sync_calendars(
         },
     };
 
-    let (Some(url), Some(username), Some(password)) = (caldav_url, caldav_username, caldav_password)
+    let (Some(url), Some(username), Some(password)) =
+        (caldav_url, caldav_username, caldav_password)
     else {
         // No CalDAV configured (or no credentials), skip silently
         return Ok(());

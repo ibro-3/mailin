@@ -112,9 +112,7 @@ impl CalDavClient {
             .map_err(|e| Error::Protocol(format!("HTTP error: {e}")))?;
         let status = resp.status();
         if !(200..300).contains(&status.as_u16()) {
-            return Err(Error::Protocol(format!(
-                "CalDAV discovery error {status}"
-            )));
+            return Err(Error::Protocol(format!("CalDAV discovery error {status}")));
         }
         let final_uri = ureq::ResponseExt::get_uri(&resp).to_string();
         if final_uri.is_empty() {
@@ -439,7 +437,9 @@ pub fn parse_ical_events(ical_data: &str, calendar_id: i64) -> Result<Vec<Calend
     }
 
     if events.is_empty() {
-        return Err(Error::Protocol("no parsable VEVENT in iCalendar data".into()));
+        return Err(Error::Protocol(
+            "no parsable VEVENT in iCalendar data".into(),
+        ));
     }
     Ok(events)
 }

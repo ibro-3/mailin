@@ -946,7 +946,10 @@ mod tests {
     #[test]
     fn quoted_strings_are_never_split_by_folding() {
         let boundary = format!("mailin-{}", "a".repeat(32));
-        let h = fold_header("X-Test", &format!("type=mixed; boundary=\"{boundary}\"; extra=1"));
+        let h = fold_header(
+            "X-Test",
+            &format!("type=mixed; boundary=\"{boundary}\"; extra=1"),
+        );
         // The quoted string must survive verbatim on one line; a fold may
         // land between parameters but never inside the quotes.
         assert!(h.contains(&format!("boundary=\"{boundary}\"")));

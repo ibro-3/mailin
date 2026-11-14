@@ -105,7 +105,9 @@ fn decode_base64_utf16be(encoded: &str) -> Option<String> {
         return None;
     }
     let mut out = String::new();
-    let mut units = bytes.chunks_exact(2).map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+    let mut units = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
     while let Some(unit) = units.next() {
         if (0xD800..0xDC00).contains(&unit) {
             // High surrogate: must pair with the next low surrogate.
@@ -113,9 +115,7 @@ fn decode_base64_utf16be(encoded: &str) -> Option<String> {
             if !(0xDC00..0xE000).contains(&next) {
                 return None;
             }
-            let scalar = 0x10000
-                + (((unit as u32) - 0xD800) << 10)
-                + ((next as u32) - 0xDC00);
+            let scalar = 0x10000 + (((unit as u32) - 0xD800) << 10) + ((next as u32) - 0xDC00);
             out.push(char::from_u32(scalar)?);
         } else if (0xDC00..0xE000).contains(&unit) {
             return None; // unpaired low surrogate

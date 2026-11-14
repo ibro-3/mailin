@@ -348,7 +348,7 @@ impl PendingAuthorization {
                 true,
                 "Mailin is signed in",
                 "You can close this browser tab and return to Mailin.",
-        );
+            );
             return Ok(code.clone());
         }
         Err(Error::OAuth(format!(

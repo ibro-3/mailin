@@ -258,10 +258,7 @@ impl CredentialsStore for KeyringCredentials {
     }
 
     fn get_smtp_secret(&self, account: &AccountId) -> Result<Option<SecretString>> {
-        match self
-            .entry_named(&format!("{account}:smtp"))?
-            .get_password()
-        {
+        match self.entry_named(&format!("{account}:smtp"))?.get_password() {
             Ok(secret) => Ok(Some(SecretString::new(secret.into()))),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(Error::Credentials(e.to_string())),

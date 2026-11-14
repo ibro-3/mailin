@@ -4,14 +4,21 @@
 //! These exercise the public API the way a front-end would, complementing the
 //! unit tests inside the crate.
 
-use mailin_core::{validate_flag, OutgoingMessage};
 use mail_parser::MessageParser;
+use mailin_core::{OutgoingMessage, validate_flag};
 
 // --------------------------------------------------------------------- flags
 
 #[test]
 fn system_flags_and_keywords_are_accepted() {
-    for flag in ["\\Seen", "\\Answered", "\\Flagged", "\\Deleted", "$Junk", "NonJunk"] {
+    for flag in [
+        "\\Seen",
+        "\\Answered",
+        "\\Flagged",
+        "\\Deleted",
+        "$Junk",
+        "NonJunk",
+    ] {
         assert!(validate_flag(flag).is_ok(), "valid flag rejected: {flag}");
     }
 }
@@ -21,22 +28,25 @@ fn flag_injection_attempts_are_rejected() {
     // Each of these would change the meaning of a `UID STORE` command if it
     // reached the wire, because IMAP flags are sent as bare atoms.
     for flag in [
-        "",                        // empty
-        "seen deleted",            // space splits into two flags
-        "seen\r\nBcc: evil@x",     // CRLF injection
-        "bad)flag",                // closes a list
-        "bad{12}",                 // literal syntax
-        "bad*flag",                // list wildcard
-        "bad%flag",                // list wildcard
-        "bad\"flag",               // quoted string
-        "bad\\flag",               // stray backslash
-        "bad]flag",                // section marker
-        "\\",                      // lone backslash
-        "\\1nvalid",               // system flag with non-letter
-        "nönascii",                // non-ASCII byte
-        "ctrl\u{1}",               // control character
+        "",                    // empty
+        "seen deleted",        // space splits into two flags
+        "seen\r\nBcc: evil@x", // CRLF injection
+        "bad)flag",            // closes a list
+        "bad{12}",             // literal syntax
+        "bad*flag",            // list wildcard
+        "bad%flag",            // list wildcard
+        "bad\"flag",           // quoted string
+        "bad\\flag",           // stray backslash
+        "bad]flag",            // section marker
+        "\\",                  // lone backslash
+        "\\1nvalid",           // system flag with non-letter
+        "nönascii",            // non-ASCII byte
+        "ctrl\u{1}",           // control character
     ] {
-        assert!(validate_flag(flag).is_err(), "invalid flag accepted: {flag:?}");
+        assert!(
+            validate_flag(flag).is_err(),
+            "invalid flag accepted: {flag:?}"
+        );
     }
 }
 
@@ -87,7 +97,11 @@ fn folded_recipients_survive_a_round_trip_through_a_parser() {
         .collect();
 
     // Folding must not lose or corrupt any of the fifteen recipients.
-    assert_eq!(addresses.len(), 15, "all recipients must survive: {addresses:?}");
+    assert_eq!(
+        addresses.len(),
+        15,
+        "all recipients must survive: {addresses:?}"
+    );
     for i in 0..15 {
         let expected = format!("user{i}@example{i}.example.com");
         assert!(
@@ -134,5 +148,8 @@ fn html_escaping_neutralizes_markup_in_error_pages() {
     assert!(escaped.contains("&amp;"));
 
     // Plain text is untouched.
-    assert_eq!(escapes("authorization failed: timeout"), "authorization failed: timeout");
+    assert_eq!(
+        escapes("authorization failed: timeout"),
+        "authorization failed: timeout"
+    );
 }
