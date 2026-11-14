@@ -308,6 +308,9 @@ pub struct MainWindow {
     last_draft: RefCell<Option<(MessageId, glib::WeakRef<gtk::Window>)>>,
     /// Expanded thread roots (thread_root_key) for threaded view.
     expanded_threads: RefCell<std::collections::HashSet<String>>,
+    /// Last known sync status per account; drives the header chip so an
+    /// offline or failed account stays visible while another is selected.
+    sync_status: RefCell<std::collections::HashMap<AccountId, mailin_core::model::SyncStatus>>,
     widgets: Widgets,
 }
 
@@ -915,6 +918,7 @@ impl MainWindow {
             preview_inflight: Rc::new(RefCell::new(std::collections::HashSet::new())),
             last_draft: RefCell::new(None),
             expanded_threads: RefCell::new(std::collections::HashSet::new()),
+            sync_status: RefCell::new(std::collections::HashMap::new()),
             widgets: Widgets {
                 window,
                 title,
@@ -1585,7 +1589,7 @@ impl MainWindow {
 
         this.widgets.search.connect_activate({
             let this = Rc::clone(this);
-            move |_| this.run_search()
+            move |_| this.run_search(true)
         });
 
         // M4-D: find in message (HTML reader)
@@ -1681,7 +1685,7 @@ impl MainWindow {
                 this.widgets.scope_button.set_active(active);
                 action.set_state(&active.to_variant());
                 if this.selection.borrow().search {
-                    this.run_search();
+                    this.run_search(false);
                 }
             }
         });
@@ -1772,7 +1776,7 @@ impl MainWindow {
                                     if let Some(folder_id) = folder_id {
                                         this.select_folder_by_id(folder_id);
                                     }
-                                    this.run_search();
+                                    this.run_search(true);
                                 }
                             });
                             history_list.append(&row);
@@ -1881,8 +1885,10 @@ impl MainWindow {
         this.widgets.window.add_action(&move_action);
 
         if let Some(application) = this.widgets.window.application() {
-            for (action, accels) in WINDOW_ACTION_ACCELS {
-                application.set_accels_for_action(action, accels);
+            for entry in SHORTCUT_ENTRIES {
+                if let Some(action) = entry.action {
+                    application.set_accels_for_action(action, &[entry.accel]);
+                }
             }
         }
 
@@ -2107,6 +2113,17 @@ impl MainWindow {
         }
         self.programmatic.set(false);
         *self.accounts.borrow_mut() = accounts;
+        // Seed the per-account status map so the header chip is accurate
+        // from the start, not only after the first sync event. The engine
+        // keeps the last known status in memory, so this is cheap.
+        {
+            let mut map = self.sync_status.borrow_mut();
+            map.retain(|id, _| self.accounts.borrow().iter().any(|a| a.id == *id));
+            for account in self.accounts.borrow().iter() {
+                map.insert(account.id, self.app.engine.sync_status(&account.id));
+            }
+        }
+        self.update_sync_status_chip();
 
         if self.accounts.borrow().is_empty() {
             {
@@ -2213,6 +2230,80 @@ impl MainWindow {
         }
     }
 
+    /// Recompute the header sync-status dot from everything we know.
+    ///
+    /// When nothing is wrong the dot reflects the selected account, exactly
+    /// as before. But any offline or failed account is always reported,
+    /// even when it is not the one being shown, so one unhealthy account is
+    /// never invisible in the unified inbox.
+    fn update_sync_status_chip(&self) {
+        use mailin_core::model::SyncStatus;
+
+        let accounts = self.accounts.borrow().clone();
+        let map = self.sync_status.borrow();
+        let status_of = |id: &AccountId| map.get(id).copied();
+
+        let mut problems: Vec<String> = Vec::new();
+        let mut saw_error = false;
+        for account in &accounts {
+            match status_of(&account.id) {
+                Some(SyncStatus::Error) => {
+                    saw_error = true;
+                    problems.push(format!("{} (error)", account.email));
+                }
+                Some(SyncStatus::Offline) => {
+                    problems.push(format!("{} (offline)", account.email));
+                }
+                _ => {}
+            }
+        }
+
+        let selected = self.selection.borrow().account;
+        let selected_status = selected.and_then(|id| status_of(&id));
+        drop(map);
+
+        let sync_status = &self.widgets.sync_status;
+        for class in [
+            "sync-status-idle",
+            "sync-status-syncing",
+            "sync-status-connected",
+            "sync-status-offline",
+            "sync-status-error",
+        ] {
+            sync_status.remove_css_class(class);
+        }
+
+        let (css_class, summary): (&str, String) = if !problems.is_empty() {
+            if saw_error {
+                (
+                    "sync-status-error",
+                    format!("Sync problem: {}", problems.join(", ")),
+                )
+            } else {
+                (
+                    "sync-status-offline",
+                    format!("Offline: {}", problems.join(", ")),
+                )
+            }
+        } else {
+            match selected_status.unwrap_or(SyncStatus::Idle) {
+                SyncStatus::Idle => ("sync-status-idle", "Sync status: Idle".to_string()),
+                SyncStatus::Syncing => ("sync-status-syncing", "Sync status: Syncing…".to_string()),
+                SyncStatus::Connected => (
+                    "sync-status-connected",
+                    "Sync status: Connected".to_string(),
+                ),
+                SyncStatus::Offline => ("sync-status-offline", "Sync status: Offline".to_string()),
+                SyncStatus::Error => ("sync-status-error", "Sync status: Error".to_string()),
+            }
+        };
+        sync_status.add_css_class(css_class);
+        sync_status.set_tooltip_text(Some(&summary));
+        {
+            sync_status.update_property(&[Property::Label(&summary)]);
+        }
+    }
+
     // -------------------------------------------------------------- folders
 
     fn refresh_folders(&self) {
@@ -2252,24 +2343,24 @@ impl MainWindow {
                 };
                 match mailin.list_folders(&account_id) {
                     Ok(mut folders) => {
-                        // Add virtual Outbox folder at the end
+                        // Add the virtual Outbox folder at the end. It is
+                        // always shown so the user can inspect it even when
+                        // it is empty.
                         let outbox_len = mailin.outbox_len().unwrap_or(0);
-                        if outbox_len > 0 {
-                            folders.push(Folder {
-                                id: FolderId::OUTBOX, // UI virtual: Outbox
-                                account_id,
-                                name: "Outbox".to_owned(),
-                                delimiter: "/".to_owned(),
-                                role: FolderRole::Other,
-                                uid_validity: None,
-                                uid_next: None,
-                                highest_modseq: None,
-                                last_synced_at: None,
-                                subscribed: true,
-                                message_count: outbox_len,
-                                unread_count: outbox_len,
-                            });
-                        }
+                        folders.push(Folder {
+                            id: FolderId::OUTBOX, // UI virtual: Outbox
+                            account_id,
+                            name: "Outbox".to_owned(),
+                            delimiter: "/".to_owned(),
+                            role: FolderRole::Other,
+                            uid_validity: None,
+                            uid_next: None,
+                            highest_modseq: None,
+                            last_synced_at: None,
+                            subscribed: true,
+                            message_count: outbox_len,
+                            unread_count: outbox_len,
+                        });
                         FolderFetch::Folders(folders)
                     }
                     Err(error) => FolderFetch::Failed(error.to_string()),
@@ -2343,7 +2434,7 @@ impl MainWindow {
     }
 
     /// Render a single account's folder list from a background fetch
-    /// (including the virtual Outbox, when it has entries).
+    /// (always including the virtual Outbox).
     fn show_account_folders(&self, folders: Vec<Folder>) {
         let selected_id = self.selection.borrow().folder;
         let index = selected_id
@@ -2711,6 +2802,13 @@ impl MainWindow {
         self.programmatic.set(false);
 
         self.widgets.list_title.set_text(&title);
+        if empty {
+            // The shared empty page doubles as the outbox's empty state.
+            self.widgets.message_empty.set_title("Outbox is empty");
+            self.widgets
+                .message_empty
+                .set_description(Some("Queued mail will appear here."));
+        }
         self.widgets
             .list_stack
             .set_visible_child_name(if empty { "empty" } else { "list" });
@@ -2738,15 +2836,14 @@ impl MainWindow {
         let density = self.app.config.borrow().ui.message_list_density;
         let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
         let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
-        let app = Rc::clone(&self.app);
         for message in &messages {
             let row = message_row(message, now, density);
             if quick_actions_enabled {
                 attach_quick_actions(
                     &row,
-                    Rc::clone(&app),
                     quick_action_items.clone(),
                     message.id,
+                    message.folder_id,
                 );
             }
             // Drag source carrying the message id so it can be dropped onto a
@@ -2805,16 +2902,15 @@ impl MainWindow {
         let density = self.app.config.borrow().ui.message_list_density;
         let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
         let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
-        let app = Rc::clone(&self.app);
 
         for message in &flat_messages {
             let row = message_row(message, now, density);
             if quick_actions_enabled {
                 attach_quick_actions(
                     &row,
-                    Rc::clone(&app),
                     quick_action_items.clone(),
                     message.id,
+                    message.folder_id,
                 );
             }
             let drag_source = gtk::DragSource::new();
@@ -2864,6 +2960,11 @@ impl MainWindow {
         self.selection.borrow_mut().message = None;
         self.widgets.list_stack.set_visible_child_name("empty");
         self.widgets.load_more.set_visible(false);
+        // Reset the shared empty page text in case the outbox reused it.
+        self.widgets.message_empty.set_title("No messages");
+        self.widgets.message_empty.set_description(Some(
+            "This folder is empty, or has not been synchronized yet.",
+        ));
         self.show_reader_empty();
         self.update_bulk_bar();
     }
@@ -2882,17 +2983,42 @@ impl MainWindow {
     fn schedule_search(this: &Rc<Self>) {
         let generation = this.search_generation.get().wrapping_add(1);
         this.search_generation.set(generation);
+        Self::schedule_search_tick(this, generation, 1);
+    }
+
+    /// One debounce tick. Tick 1 runs the search as usual; tick 2 only
+    /// records the history entry, and only when no keystroke landed since
+    /// tick 1. A half-typed query therefore never reaches the history —
+    /// one stable, fully-typed query yields exactly one entry.
+    fn schedule_search_tick(this: &Rc<Self>, generation: u64, tick: u32) {
         let this = Rc::clone(this);
         glib::timeout_add_local_once(SEARCH_DELAY, move || {
-            if this.search_generation.get() == generation {
-                this.run_search();
+            if this.search_generation.get() != generation {
+                // The query changed; a newer chain owns the search.
+                return;
             }
+            if tick >= 2 {
+                let query = this.widgets.search.text().trim().to_owned();
+                if !query.is_empty() {
+                    this.record_search_history(&query);
+                }
+                return;
+            }
+            this.execute_search(false);
+            Self::schedule_search_tick(&this, generation, tick + 1);
         });
     }
 
-    fn run_search(&self) {
+    /// Immediate search, triggered by Enter or a history/scope change.
+    /// Cancels any pending debounce chain. `record_history` controls whether
+    /// the query is stored: Enter and the suggestions do, scope re-runs do not.
+    fn run_search(&self, record_history: bool) {
         self.search_generation
             .set(self.search_generation.get().wrapping_add(1));
+        self.execute_search(record_history);
+    }
+
+    fn execute_search(&self, record_history: bool) {
         let query = self.widgets.search.text().trim().to_owned();
         if query.is_empty() {
             self.clear_search();
@@ -2905,12 +3031,19 @@ impl MainWindow {
             selection.query = query.clone();
             selection.search_all_mail = search_all_mail;
         }
-        // Add to search history. The write goes to the store, so it runs on
-        // a worker: the search itself must not wait for it.
+        if record_history {
+            self.record_search_history(&query);
+        }
+        self.refresh_messages();
+    }
+
+    /// Store a search-history entry for `query`. The write goes to the
+    /// store, so it runs on a worker: the search itself must not wait for it.
+    fn record_search_history(&self, query: &str) {
         if let Some(account) = self.selection.borrow().account {
             let mailin = std::sync::Arc::clone(&self.app.mailin);
             let folder = self.selection.borrow().folder;
-            let query = query.clone();
+            let query = query.to_owned();
             background::spawn_result(
                 move || {
                     mailin
@@ -2924,7 +3057,6 @@ impl MainWindow {
                 },
             );
         }
-        self.refresh_messages();
     }
 
     fn clear_search(&self) {
@@ -4430,6 +4562,79 @@ impl MainWindow {
         self.toast_undo_move(&text, &pairs);
     }
 
+    /// Swipe/quick-action entry point. Mirrors the toolbar actions exactly:
+    /// moves get the same undo/confirm treatment, and the source folder of
+    /// the row is used for undo instead of whatever folder is selected, which
+    /// matters in the unified inbox.
+    fn run_quick_action(
+        &self,
+        action: mailin_core::config::QuickAction,
+        message_id: MessageId,
+        source_folder: FolderId,
+    ) {
+        use mailin_core::config::QuickAction;
+
+        let ids = vec![message_id];
+        match action {
+            QuickAction::Archive => {
+                self.app.engine.archive_messages(&ids);
+                self.toast_undo_move("Archived 1 message", &[(message_id, source_folder)]);
+            }
+            QuickAction::Delete => {
+                let in_trash = self
+                    .app
+                    .mailin
+                    .folder(source_folder)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|folder| folder.role == FolderRole::Trash);
+                if in_trash {
+                    let app = self.app.clone();
+                    let toast = self.widgets.toast.clone();
+                    self.confirm_destructive(
+                        "Delete this message permanently?",
+                        "The message will be deleted from the server and from local storage. This cannot be undone.",
+                        "Delete",
+                        move || {
+                            app.engine.permanently_delete_messages(&ids);
+                            toast.add_toast(adw::Toast::new("Message deleted permanently"));
+                        },
+                    );
+                } else {
+                    self.app.engine.delete_messages(&ids);
+                    self.toast_undo_move(
+                        "Moved 1 message to Trash",
+                        &[(message_id, source_folder)],
+                    );
+                }
+            }
+            QuickAction::Junk => {
+                self.app.engine.mark_messages_junk(&ids, true);
+                self.toast_undo_move("Marked 1 message as Junk", &[(message_id, source_folder)]);
+            }
+            QuickAction::Flag => {
+                self.app
+                    .engine
+                    .bulk_set_flags(&ids, vec!["\\Flagged".to_owned()], Vec::new());
+            }
+            QuickAction::Unflag => {
+                self.app
+                    .engine
+                    .bulk_set_flags(&ids, Vec::new(), vec!["\\Flagged".to_owned()]);
+            }
+            QuickAction::MarkRead => {
+                self.app
+                    .engine
+                    .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
+            }
+            QuickAction::MarkUnread => {
+                self.app
+                    .engine
+                    .bulk_set_flags(&ids, Vec::new(), vec!["\\Seen".to_owned()]);
+            }
+        }
+    }
+
     fn empty_trash(&self) {
         let Some(account_id) = self.selection.borrow().account else {
             return;
@@ -4900,6 +5105,7 @@ impl MainWindow {
         let mut account_error = None;
         let mut outbox_changed = false;
         let mut new_messages = Vec::new();
+        let mut sync_status_changed = false;
 
         loop {
             match events.try_recv() {
@@ -4930,42 +5136,17 @@ impl MainWindow {
                     messages_changed = true;
                 }
                 Ok(ClientEvent::SyncStatusChanged { account_id, status }) => {
-                    // Update sync status indicator for the currently selected account
-                    let selection = self.selection.borrow();
-                    if selection.account == Some(account_id) {
-                        let sync_status = &self.widgets.sync_status;
-                        let (css_class, tooltip) = match status {
-                            mailin_core::model::SyncStatus::Idle => {
-                                ("sync-status-idle", "Sync status: Idle")
-                            }
-                            mailin_core::model::SyncStatus::Syncing => {
-                                ("sync-status-syncing", "Sync status: Syncing...")
-                            }
-                            mailin_core::model::SyncStatus::Connected => {
-                                ("sync-status-connected", "Sync status: Connected")
-                            }
-                            mailin_core::model::SyncStatus::Offline => {
-                                ("sync-status-offline", "Sync status: Offline")
-                            }
-                            mailin_core::model::SyncStatus::Error => {
-                                ("sync-status-error", "Sync status: Error")
-                            }
-                        };
-                        sync_status.remove_css_class("sync-status-idle");
-                        sync_status.remove_css_class("sync-status-syncing");
-                        sync_status.remove_css_class("sync-status-connected");
-                        sync_status.remove_css_class("sync-status-offline");
-                        sync_status.remove_css_class("sync-status-error");
-                        sync_status.add_css_class(css_class);
-                        sync_status.set_tooltip_text(Some(tooltip));
-                        {
-                            sync_status.update_property(&[Property::Label(tooltip)]);
-                        }
-                        if matches!(status, mailin_core::model::SyncStatus::Error) {
-                            self.widgets.banner.set_button_label(Some("Retry"));
-                            self.widgets.banner.set_title("Sync failed");
-                            self.widgets.banner.set_revealed(true);
-                        }
+                    {
+                        let mut map = self.sync_status.borrow_mut();
+                        map.insert(account_id, status);
+                    }
+                    sync_status_changed = true;
+                    if matches!(status, mailin_core::model::SyncStatus::Error)
+                        && self.selection.borrow().account == Some(account_id)
+                    {
+                        self.widgets.banner.set_button_label(Some("Retry"));
+                        self.widgets.banner.set_title("Sync failed");
+                        self.widgets.banner.set_revealed(true);
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -5004,6 +5185,9 @@ impl MainWindow {
         }
         if let Some(message) = account_error {
             self.show_error(&message);
+        }
+        if sync_status_changed {
+            self.update_sync_status_chip();
         }
         if outbox_changed {
             // If we're viewing the outbox, refresh it. Otherwise refresh folders
@@ -5099,14 +5283,36 @@ impl MainWindow {
     // -------------------------------------------------------------- actions
 
     fn sync_now(&self) {
-        let Some(account) = self.selection.borrow().account else {
-            return;
+        let (unified_inbox, selected) = {
+            let selection = self.selection.borrow();
+            (selection.unified_inbox, selection.account)
         };
         self.widgets.banner.set_revealed(false);
+        if unified_inbox {
+            // Sync every account; a silent no-op in unified mode is worse
+            // than N sync passes.
+            let ids: Vec<AccountId> = self
+                .accounts
+                .borrow()
+                .iter()
+                .map(|account| account.id)
+                .collect();
+            if ids.is_empty() {
+                self.toast("No accounts to synchronize");
+                return;
+            }
+            let count = ids.len();
+            for id in ids {
+                self.app.engine.sync_account(id);
+            }
+            self.toast(&format!("Synchronizing {count} accounts…"));
+            return;
+        }
+        let Some(account) = selected else {
+            return;
+        };
         self.app.engine.sync_account(account);
-        self.widgets
-            .toast
-            .add_toast(adw::Toast::new("Synchronizing…"));
+        self.toast("Synchronizing…");
     }
 
     fn move_message_to_folder(&self, message_id: MessageId, target_folder: FolderId) {
@@ -5661,8 +5867,10 @@ fn request_save_attachment(
 
 /// Unread message IDs from the inbox folder of `account`.
 ///
-/// Runs on a background thread: it reads the folder list and the first page
-/// of inbox messages from the store.
+/// Runs on a background thread: it reads the folder list and pages through
+/// the inbox, so a large inbox is fully covered (the first-100 fallback
+/// silently dropped older unread messages). The page count is capped as a
+/// sanity limit.
 fn unread_inbox_message_ids(
     mailin: &std::sync::Arc<mailin_core::client::Mailin>,
     account_id: AccountId,
@@ -5673,14 +5881,22 @@ fn unread_inbox_message_ids(
     let Some(folder) = folders.iter().find(|f| f.role == FolderRole::Inbox) else {
         return Vec::new();
     };
-    let Ok(messages) = mailin.list_messages(folder.id, 0, 100) else {
-        return Vec::new();
-    };
-    messages
-        .into_iter()
-        .filter(|m| !m.is_seen())
-        .map(|m| m.id)
-        .collect()
+    // The store clamps the limit to 1000; 50 pages of 1000 is far beyond any
+    // real inbox, and the bound keeps a pathological store from looping.
+    const PAGE: u32 = 1000;
+    const MAX_PAGES: u32 = 50;
+    let mut ids = Vec::new();
+    for page in 0..MAX_PAGES {
+        let Ok(messages) = mailin.list_messages(folder.id, page * PAGE, PAGE) else {
+            break;
+        };
+        let done = (messages.len() as u32) < PAGE;
+        ids.extend(messages.into_iter().filter(|m| !m.is_seen()).map(|m| m.id));
+        if done {
+            break;
+        }
+    }
+    ids
 }
 
 /// Outcome of saving one attachment in a background batch.
@@ -5812,28 +6028,107 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button
 }
 
-/// Main-window action accelerators. `build_shortcuts_window` renders the
-/// same source of truth so help never drifts from registered shortcuts.
-const WINDOW_ACTION_ACCELS: &[(&str, &[&str])] = &[
-    ("win.search", &["<Control>f"]),
-    ("win.find-message", &["F3"]),
-    ("win.sync", &["F5"]),
-    ("win.add-account", &["<Control><Shift>a"]),
-    ("win.new-folder", &["<Control><Shift>n"]),
-    ("win.compose", &["<Control>n"]),
-    ("win.reply", &["<Control>r"]),
-    ("win.reply-all", &["<Control><Shift>r"]),
-    ("win.forward", &["<Control><Shift>f"]),
-    ("win.preferences", &["<Control>comma"]),
-    ("win.archive", &["<Control><Shift>e"]),
-    ("win.delete", &["Delete"]),
-    ("win.delete-permanent", &["<Control>Delete"]),
-    ("win.junk", &["<Control><Shift>j"]),
-    ("win.not-junk", &["<Control><Shift>k"]),
-    ("win.move", &["<Control>m"]),
+/// Every keyboard shortcut the app exposes: accelerator registration and the
+/// help overlay both render from this table so they cannot drift apart.
+///
+/// `accel` uses GTK's accelerator syntax (as consumed by
+/// `set_accels_for_action` and `gtk::ShortcutsShortcut`). `action` is the
+/// application action the accelerator triggers (`win.*`); entries handled by
+/// a widget-level key controller, or by native GTK behavior, carry `None`.
+const SHORTCUT_ENTRIES: &[ShortcutEntry] = &[
+    ShortcutEntry::action("<Control>n", "New message", "win.compose"),
+    ShortcutEntry::action("<Control>r", "Reply", "win.reply"),
+    ShortcutEntry::action("<Control><Shift>r", "Reply all", "win.reply-all"),
+    ShortcutEntry::action("<Control><Shift>f", "Forward", "win.forward"),
+    ShortcutEntry::action(
+        "<Control>f",
+        "Search mail / find in an HTML message",
+        "win.search",
+    ),
+    ShortcutEntry::action("F3", "Open find bar (find in message)", "win.find-message"),
+    ShortcutEntry::action("F5", "Synchronize", "win.sync"),
+    ShortcutEntry::action("<Control><Shift>a", "Add account", "win.add-account"),
+    ShortcutEntry::action("<Control><Shift>n", "New folder", "win.new-folder"),
+    ShortcutEntry::action("<Control>comma", "Preferences", "win.preferences"),
+    ShortcutEntry::action(
+        "Delete",
+        "Move selected messages to Trash (when the message list is active)",
+        "win.delete",
+    ),
+    ShortcutEntry::action(
+        "<Control>Delete",
+        "Delete selected messages permanently",
+        "win.delete-permanent",
+    ),
+    ShortcutEntry::action(
+        "<Control><Shift>e",
+        "Archive selected messages",
+        "win.archive",
+    ),
+    ShortcutEntry::action(
+        "<Control><Shift>j",
+        "Mark selected messages as Junk",
+        "win.junk",
+    ),
+    ShortcutEntry::action(
+        "<Control><Shift>k",
+        "Mark selected messages as not Junk",
+        "win.not-junk",
+    ),
+    ShortcutEntry::action(
+        "<Control>m",
+        "Move selected messages to a folder",
+        "win.move",
+    ),
+    // Handler-based / native GTK behavior (no application action).
+    ShortcutEntry::native("<Control>Return", "Send message (in composer)"),
+    ShortcutEntry::native("<Control>a", "Select all messages"),
+    ShortcutEntry::native("Escape", "Clear message selection"),
+    ShortcutEntry::native(
+        "space",
+        "Toggle selection of the current message (message list)",
+    ),
+    ShortcutEntry::native("<Shift>Down", "Extend selection downwards"),
+    ShortcutEntry::native("<Shift>Up", "Extend selection upwards"),
+    ShortcutEntry::native("Down", "Navigate message list (down)"),
+    ShortcutEntry::native("Up", "Navigate message list (up)"),
+    ShortcutEntry::native(
+        "Return",
+        "Open selected message; activates the focused control (find bar: find next)",
+    ),
+    ShortcutEntry::native("F1", "Show this help"),
+    ShortcutEntry::native("<Control>slash", "Show this help (alternate)"),
 ];
 
-/// Build the keyboard shortcuts window for the help overlay.
+/// One row of [`SHORTCUT_ENTRIES`].
+struct ShortcutEntry {
+    accel: &'static str,
+    description: &'static str,
+    /// Application action the accelerator triggers (`win.*`), when any.
+    action: Option<&'static str>,
+}
+
+impl ShortcutEntry {
+    const fn action(accel: &'static str, description: &'static str, action: &'static str) -> Self {
+        Self {
+            accel,
+            description,
+            action: Some(action),
+        }
+    }
+
+    const fn native(accel: &'static str, description: &'static str) -> Self {
+        Self {
+            accel,
+            description,
+            action: None,
+        }
+    }
+}
+
+/// Build the keyboard shortcuts window for the help overlay. Every row is
+/// rendered from [`SHORTCUT_ENTRIES`], the same table the accelerators are
+/// registered from.
 fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWindow {
     let shortcuts = gtk::ShortcutsWindow::builder()
         .title("Keyboard Shortcuts")
@@ -5846,43 +6141,10 @@ fn build_shortcuts_window(parent: &adw::ApplicationWindow) -> gtk::ShortcutsWind
         .max_height(300)
         .build();
 
-    let shortcuts_data = [
-        ("<Control>N", "New message"),
-        ("<Control>R", "Reply"),
-        ("<Control><Shift>R", "Reply all"),
-        ("<Control><Shift>F", "Forward"),
-        ("<Control>F", "Search mail / find in message (HTML)"),
-        ("F3", "Find next in message"),
-        ("F5", "Synchronize"),
-        ("<Control><Shift>A", "Add account"),
-        ("<Control><Shift>N", "New folder"),
-        ("<Control>comma", "Preferences"),
-        ("<Control>Return", "Send message (in composer)"),
-        (
-            "Delete",
-            "Move selected messages to Trash (when message list is active)",
-        ),
-        ("<Control>Delete", "Delete selected messages permanently"),
-        ("<Control><Shift>E", "Archive selected messages"),
-        ("<Control><Shift>J", "Mark selected messages as Junk"),
-        ("<Control><Shift>K", "Mark selected messages as not Junk"),
-        ("<Control>M", "Move selected messages to a folder"),
-        ("<Control>A", "Select all messages"),
-        ("Escape", "Clear message selection"),
-        ("<Control>space", "Toggle selection of the current message"),
-        ("Shift+Down", "Extend selection downwards"),
-        ("Shift+Up", "Extend selection upwards"),
-        ("Up", "Navigate message list (up)"),
-        ("Down", "Navigate message list (down)"),
-        ("Return", "Open selected message"),
-        ("F1", "Show this help"),
-        ("<Control>slash", "Show this help (alternate)"),
-    ];
-
-    for (accel, description) in shortcuts_data {
+    for entry in SHORTCUT_ENTRIES {
         let shortcut = gtk::ShortcutsShortcut::builder()
-            .accelerator(accel)
-            .title(description)
+            .accelerator(entry.accel)
+            .title(entry.description)
             .build();
         section.append(&shortcut);
     }
@@ -6235,14 +6497,15 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
 /// swipe left reveals the "destructive" side (archive / delete), swipe right
 /// reveals the "positive" side (flag / mark read). A second swipe in the same
 /// direction, or tapping elsewhere, hides the overlay again.
+///
+/// `source_folder` is the folder the message lives in; it is what undo
+/// restores moved messages to, which matters in the unified inbox.
 fn attach_quick_actions(
     row: &gtk::ListBoxRow,
-    app: Rc<AppState>,
     actions: Vec<mailin_core::config::QuickAction>,
     message_id: MessageId,
+    source_folder: FolderId,
 ) {
-    use mailin_core::config::QuickAction;
-
     // The overlay lives inside the row's child box, aligned to the end.
     // It starts hidden; the swipe gesture toggles it.
     let row_child = match row.child() {
@@ -6286,35 +6549,15 @@ fn attach_quick_actions(
         button.set_margin_start(4);
         button.set_margin_end(4);
         match action {
-            QuickAction::Archive => button.add_css_class("suggested-action"),
-            QuickAction::Delete => button.add_css_class("destructive-action"),
+            mailin_core::config::QuickAction::Archive => button.add_css_class("suggested-action"),
+            mailin_core::config::QuickAction::Delete => button.add_css_class("destructive-action"),
             _ => {}
         }
         let action = *action;
-        let app = Rc::clone(&app);
         let id = message_id;
         button.connect_clicked(move |_| {
-            let ids = vec![id];
-            match action {
-                QuickAction::Archive => app.engine.archive_messages(&ids),
-                QuickAction::Delete => app.engine.delete_messages(&ids),
-                QuickAction::Junk => app.engine.mark_messages_junk(&ids, true),
-                QuickAction::Flag => {
-                    app.engine
-                        .bulk_set_flags(&ids, vec!["\\Flagged".to_owned()], Vec::new());
-                }
-                QuickAction::Unflag => {
-                    app.engine
-                        .bulk_set_flags(&ids, Vec::new(), vec!["\\Flagged".to_owned()]);
-                }
-                QuickAction::MarkRead => {
-                    app.engine
-                        .bulk_set_flags(&ids, vec!["\\Seen".to_owned()], Vec::new());
-                }
-                QuickAction::MarkUnread => {
-                    app.engine
-                        .bulk_set_flags(&ids, Vec::new(), vec!["\\Seen".to_owned()]);
-                }
+            if let Some(this) = live_window() {
+                this.run_quick_action(action, id, source_folder);
             }
         });
         actions_bar.append(&button);
