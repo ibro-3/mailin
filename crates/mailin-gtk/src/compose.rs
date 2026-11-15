@@ -24,35 +24,30 @@ fn prune_unresolved_cid_images(html: &str, attachments: &[ComposeAttachment]) ->
     mailin_core::cid::prune_unresolved_images(html, &valid_cids)
 }
 
+/// Drop `{{…}}` placeholders from a template text. An unterminated
+/// `{{` is kept literally as-is and scanning continues, so one malformed
+/// placeholder does not swallow (or abort) the rest of the text. The first
+/// `}}` terminates a placeholder; everything between it and its opener goes.
 fn strip_template_placeholders(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
-        if c == '{' {
-            if let Some(&(_, '{')) = chars.peek() {
-                // consume second '{'
-                chars.next();
-                // skip until '}}'
-                let mut closed = false;
-                while let Some((_, ch)) = chars.next() {
-                    if ch == '}' {
-                        if let Some(&(_, '}')) = chars.peek() {
-                            chars.next();
-                            closed = true;
-                            break;
-                        }
-                    }
-                }
-                if closed {
-                    continue;
-                }
-                // Unclosed placeholder - keep as-is from original
-                out.push_str(&text[i..]);
-                return out;
+    let mut cursor = 0usize;
+    while let Some(open) = text[cursor..].find("{{") {
+        let open = cursor + open;
+        out.push_str(&text[cursor..open]);
+        match text[open + 2..].find("}}") {
+            Some(end) => {
+                // A complete placeholder: skip over it.
+                cursor = open + 2 + end + 2;
+            }
+            None => {
+                // Unterminated placeholder: emit the opener literally and
+                // keep scanning after it instead of dropping the remainder.
+                out.push_str("{{");
+                cursor = open + 2;
             }
         }
-        out.push(c);
     }
+    out.push_str(&text[cursor..]);
     out
 }
 
@@ -634,6 +629,7 @@ pub fn present(
                         encrypt_toggle.set_active(false);
                         state.set(false);
                         encrypt_toggle.remove_css_class("suggested-action");
+                        banner.set_button_label(None::<&str>);
                         banner.set_title(&format!(
                             "Missing public keys for: {}. Encryption turned off — add keys in Key Manager or send without encryption.",
                             missing.join(", ")
@@ -688,6 +684,7 @@ pub fn present(
                     Ok(false) => {
                         sign_toggle.set_active(false);
                         state.set(false);
+                        banner.set_button_label(None::<&str>);
                         banner.set_title(
                             "No secret key available. Add one in Account Settings → Encryption.",
                         );
@@ -696,6 +693,7 @@ pub fn present(
                     Err(failed) => {
                         sign_toggle.set_active(false);
                         state.set(false);
+                        banner.set_button_label(None::<&str>);
                         banner.set_title(&format!(
                             "Could not check the signing key: {}",
                             failed.message
@@ -788,7 +786,13 @@ pub fn present(
             Some("imagePasteHandler"),
             move |_, value: &JSValue| {
                 let raw = value.to_string();
+                // A malformed paste (bad JSON, no data-URL comma, undecodable
+                // base64) is reported on the banner instead of being dropped
+                // silently; oversized payloads already surface from the worker.
                 let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    banner.set_button_label(None::<&str>);
+                    banner.set_title("Could not read the pasted image (malformed clipboard data).");
+                    banner.set_revealed(true);
                     return;
                 };
                 let data_url = payload
@@ -796,6 +800,9 @@ pub fn present(
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
                 let Some((_, encoded)) = data_url.split_once(',') else {
+                    banner.set_button_label(None::<&str>);
+                    banner.set_title("Could not read the pasted image (malformed clipboard data).");
+                    banner.set_revealed(true);
                     return;
                 };
                 // Decoding a pasted image can move tens of megabytes: do it
@@ -838,11 +845,13 @@ pub fn present(
                         let attachment = match result {
                             Ok(Ok(attachment)) => attachment,
                             Ok(Err(error)) => {
+                                banner.set_button_label(None::<&str>);
                                 banner.set_title(&error);
                                 banner.set_revealed(true);
                                 return;
                             }
                             Err(failed) => {
+                                banner.set_button_label(None::<&str>);
                                 banner.set_title(&format!(
                                     "Could not read the pasted image: {}",
                                     failed.message
@@ -1211,17 +1220,32 @@ pub fn present(
             let popover_ref = Rc::new(RefCell::new(Some(popover_clone)));
             let list_box_ref = Rc::new(RefCell::new(Some(list_box_clone)));
 
-            // Connect to entry changes to show/filter suggestions
+            // Connect to entry changes to show/filter suggestions. The
+            // contact search is debounced: each keystroke cancels the
+            // pending timer and re-arms it, so the store query only runs
+            // once typing pauses. The generation counter still discards
+            // results from searches that a later keystroke made obsolete.
+            let debounce_source: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+            // Set by suggestion activation so the programmatic `set_text`
+            // does not re-run the search and re-pop the popover.
+            let suppress_search: Rc<Cell<bool>> = Rc::new(Cell::new(false));
             entry.connect_changed({
                 let entry = entry.clone();
                 let popover_ref = Rc::clone(&popover_ref);
                 let list_box_ref = Rc::clone(&list_box_ref);
                 let app = Rc::clone(&app);
-                // The contact search runs on every keystroke: the generation
-                // discards results that a later keystroke made obsolete.
                 let search_generation = Rc::new(Cell::new(0u64));
+                let debounce_source = Rc::clone(&debounce_source);
+                let suppress_search = Rc::clone(&suppress_search);
                 move |_| {
+                    if suppress_search.replace(false) {
+                        // A suggestion was picked: do not re-trigger the search.
+                        return;
+                    }
                     let query = entry.text().to_string();
+                    if let Some(source) = debounce_source.borrow_mut().take() {
+                        source.remove();
+                    }
                     if query.trim().is_empty() {
                         if let Some(p) = popover_ref.borrow().as_ref() {
                             p.popdown();
@@ -1229,107 +1253,169 @@ pub fn present(
                         return;
                     }
 
-                    // Search contacts
-                    let generation = search_generation.get().wrapping_add(1);
-                    search_generation.set(generation);
-                    let mailin = std::sync::Arc::clone(&app.mailin);
-                    let query = query.clone();
                     let entry = entry.clone();
                     let popover_ref = Rc::clone(&popover_ref);
                     let list_box_ref = Rc::clone(&list_box_ref);
+                    let app = Rc::clone(&app);
                     let search_generation = Rc::clone(&search_generation);
-                    crate::background::spawn_result(
+                    let suppress_search = Rc::clone(&suppress_search);
+                    let account_id = account_id;
+                    let source = glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(150),
                         move || {
-                            mailin
-                                .store()
-                                .search_contacts(&account_id, &query, 10)
-                                .unwrap_or_default()
-                        },
-                        move |result| {
-                            let contacts = match result {
-                                Ok(contacts) => contacts,
-                                Err(failed) => {
-                                    tracing::warn!(
-                                        "the contact search worker failed: {}",
-                                        failed.message
-                                    );
-                                    return;
-                                }
-                            };
-                            if search_generation.get() != generation {
-                                // The query changed while the search ran.
+                            // Read the text at fire time, not at keystroke time.
+                            let query = entry.text().to_string();
+                            if query.trim().is_empty() {
                                 return;
                             }
-                            // Clear list
-                            if let Some(list) = list_box_ref.borrow().as_ref() {
-                                while let Some(child) = list.first_child() {
-                                    list.remove(&child);
-                                }
-                                if contacts.is_empty() {
-                                    if let Some(p) = popover_ref.borrow().as_ref() {
-                                        p.popdown();
+                            let generation = search_generation.get().wrapping_add(1);
+                            search_generation.set(generation);
+                            let mailin = std::sync::Arc::clone(&app.mailin);
+                            let query = query.clone();
+                            let entry = entry.clone();
+                            let popover_ref = Rc::clone(&popover_ref);
+                            let list_box_ref = Rc::clone(&list_box_ref);
+                            let search_generation = Rc::clone(&search_generation);
+                            let suppress_search = Rc::clone(&suppress_search);
+                            crate::background::spawn_result(
+                                move || {
+                                    mailin
+                                        .store()
+                                        .search_contacts(&account_id, &query, 10)
+                                        .unwrap_or_default()
+                                },
+                                move |result| {
+                                    if !entry.has_focus() {
+                                        // The user moved on; never pop the popover up
+                                        // for a result they are no longer looking at.
+                                        return;
                                     }
-                                } else {
-                                    for contact in contacts {
-                                        let row = adw::ActionRow::builder()
-                                            .title(&contact.email)
-                                            .subtitle(if contact.display_name.is_empty() {
-                                                ""
-                                            } else {
-                                                &contact.display_name
-                                            })
-                                            .activatable(true)
-                                            .build();
-                                        let email = contact.email.clone();
-                                        let entry = entry.clone();
-                                        let popover_ref = Rc::clone(&popover_ref);
-                                        row.connect_activated({
-                                            let email = email.clone();
-                                            let entry = entry.clone();
-                                            let popover_ref = Rc::clone(&popover_ref);
-                                            move |_| {
-                                                // Append or replace email in the entry
-                                                let current = entry.text().to_string();
-                                                let new_text = if current.trim().is_empty() {
-                                                    email.clone()
-                                                } else {
-                                                    // Check if we're completing a partial email
-                                                    let parts: Vec<&str> =
-                                                        current.split(',').collect();
-                                                    let mut new_parts = parts.clone();
-                                                    if let Some(last) = new_parts.last_mut() {
-                                                        *last = email.as_str();
+                                    let contacts = match result {
+                                        Ok(contacts) => contacts,
+                                        Err(failed) => {
+                                            tracing::warn!(
+                                                "the contact search worker failed: {}",
+                                                failed.message
+                                            );
+                                            return;
+                                        }
+                                    };
+                                    if search_generation.get() != generation {
+                                        // The query changed while the search ran.
+                                        return;
+                                    }
+                                    // Clear list
+                                    if let Some(list) = list_box_ref.borrow().as_ref() {
+                                        while let Some(child) = list.first_child() {
+                                            list.remove(&child);
+                                        }
+                                        if contacts.is_empty() {
+                                            if let Some(p) = popover_ref.borrow().as_ref() {
+                                                p.popdown();
+                                            }
+                                        } else {
+                                            for contact in contacts {
+                                                let row = adw::ActionRow::builder()
+                                                    .title(&contact.email)
+                                                    .subtitle(if contact.display_name.is_empty() {
+                                                        ""
                                                     } else {
-                                                        new_parts.push(&email);
+                                                        &contact.display_name
+                                                    })
+                                                    .activatable(true)
+                                                    .build();
+                                                let email = contact.email.clone();
+                                                let entry = entry.clone();
+                                                let popover_ref = Rc::clone(&popover_ref);
+                                                let suppress_search = Rc::clone(&suppress_search);
+                                                row.connect_activated({
+                                                    let email = email.clone();
+                                                    let entry = entry.clone();
+                                                    let popover_ref = Rc::clone(&popover_ref);
+                                                    let suppress_search =
+                                                        Rc::clone(&suppress_search);
+                                                    move |_| {
+                                                        // Setting the entry text is
+                                                        // programmatic: it must not
+                                                        // re-run the search popover.
+                                                        suppress_search.set(true);
+                                                        // Append or replace email in the entry
+                                                        let current = entry.text().to_string();
+                                                        let new_text = if current.trim().is_empty()
+                                                        {
+                                                            email.clone()
+                                                        } else {
+                                                            // Check if we're completing a partial email
+                                                            let parts: Vec<&str> =
+                                                                current.split(',').collect();
+                                                            let mut new_parts = parts.clone();
+                                                            if let Some(last) = new_parts.last_mut()
+                                                            {
+                                                                *last = email.as_str();
+                                                            } else {
+                                                                new_parts.push(&email);
+                                                            }
+                                                            new_parts.join(", ")
+                                                        };
+                                                        entry.set_text(&new_text);
+                                                        if let Some(p) =
+                                                            popover_ref.borrow().as_ref()
+                                                        {
+                                                            p.popdown();
+                                                        }
                                                     }
-                                                    new_parts.join(", ")
-                                                };
-                                                entry.set_text(&new_text);
-                                                if let Some(p) = popover_ref.borrow().as_ref() {
-                                                    p.popdown();
+                                                });
+                                                if let Some(list) = list_box_ref.borrow().as_ref() {
+                                                    list.append(&row);
                                                 }
                                             }
-                                        });
-                                        if let Some(list) = list_box_ref.borrow().as_ref() {
-                                            list.append(&row);
+                                            // Position popover under the entry
+                                            if let Some(p) = popover_ref.borrow().as_ref() {
+                                                p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+                                                    0,
+                                                    entry.height(),
+                                                    entry.width(),
+                                                    1,
+                                                )));
+                                                p.popup();
+                                            }
                                         }
                                     }
-                                    // Position popover under the entry
-                                    if let Some(p) = popover_ref.borrow().as_ref() {
-                                        p.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-                                            0,
-                                            entry.height(),
-                                            entry.width(),
-                                            1,
-                                        )));
-                                        p.popup();
-                                    }
-                                }
+                                },
+                            );
+                        },
+                    );
+                    *debounce_source.borrow_mut() = Some(source);
+                }
+            });
+
+            // Close the popover when the entry loses focus. The popdown is
+            // deferred so a click on a suggestion row activates it first.
+            let focus_controller = gtk::EventControllerFocus::new();
+            {
+                let popover_ref = Rc::clone(&popover_ref);
+                let debounce_source = Rc::clone(&debounce_source);
+                let entry = entry.clone();
+                focus_controller.connect_leave(move |_| {
+                    if let Some(source) = debounce_source.borrow_mut().take() {
+                        source.remove();
+                    }
+                    let popover_ref = Rc::clone(&popover_ref);
+                    let entry = entry.clone();
+                    glib::timeout_add_local_once(
+                        std::time::Duration::from_millis(100),
+                        move || {
+                            if entry.has_focus() {
+                                return;
+                            }
+                            if let Some(p) = popover_ref.borrow().as_ref() {
+                                p.popdown();
                             }
                         },
                     );
-                }
-            });
+                });
+            }
+            entry.add_controller(focus_controller);
 
             // Handle key events for navigation
             let key_controller = gtk::EventControllerKey::new();
@@ -1635,20 +1721,6 @@ pub fn present(
         })
     };
 
-    for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
-        let mark_dirty = Rc::clone(&mark_dirty);
-        row.connect_changed(move |_| {
-            mark_dirty();
-        });
-    }
-    {
-        let _dirty = Rc::clone(&dirty);
-        let webview = webview.clone();
-        // WebView doesn't have a simple "changed" signal; rely on auto-save timer
-        // and manual save. We could add a timeout to check for changes if needed.
-        let _ = webview;
-    }
-
     save.connect_clicked({
         let save_draft = Rc::clone(&save_draft);
         move |_| save_draft(true)
@@ -1824,6 +1896,7 @@ pub fn present(
                 // The body could not be read from the WebView: do not send a
                 // message whose content was never captured.
                 Err(error) => {
+                    banner.set_button_label(None::<&str>);
                     banner.set_title(&format!("Could not send: {error}"));
                     banner.set_revealed(true);
                     send_for_report.set_sensitive(true);
@@ -1838,6 +1911,7 @@ pub fn present(
                     .as_deref()
                     .is_none_or(|html| html.trim().is_empty())
             {
+                banner.set_button_label(None::<&str>);
                 banner.set_title("The message body is empty");
                 banner.set_revealed(true);
                 send_for_report.set_sensitive(true);
@@ -1879,11 +1953,13 @@ pub fn present(
                         close_window.close();
                     }
                     Ok(Err(error)) => {
+                        banner.set_button_label(None::<&str>);
                         banner.set_title(&format!("Could not queue the message: {error}"));
                         banner.set_revealed(true);
                         send_for_report.set_sensitive(true);
                     }
                     Err(failed) => {
+                        banner.set_button_label(None::<&str>);
                         banner.set_title(&format!("Could not send: {}", failed.message));
                         banner.set_revealed(true);
                         send_for_report.set_sensitive(true);
@@ -1945,6 +2021,7 @@ fn attach_files(
             let (loaded, failed) = match result {
                 Ok(value) => value,
                 Err(failed) => {
+                    banner.set_button_label(None::<&str>);
                     banner.set_title(&format!("Could not read the files: {}", failed.message));
                     banner.set_revealed(true);
                     return;
@@ -1955,6 +2032,7 @@ fn attach_files(
                 mark_dirty();
             }
             if let Some(message) = failed {
+                banner.set_button_label(None::<&str>);
                 banner.set_title(&message);
                 banner.set_revealed(true);
             }
@@ -2000,7 +2078,7 @@ fn rebuild_attachments(
     let items = attachments.borrow();
     for (index, attachment) in items.iter().enumerate() {
         let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&attachment.filename))
+            .title(&attachment.filename)
             .subtitle(format!(
                 "{} · {}",
                 attachment.mime_type,
@@ -2248,9 +2326,7 @@ fn save_as_template_dialog(
     webview: &WebView,
     banner: &adw::Banner,
 ) {
-    let dialog = adw::MessageDialog::builder()
-        .transient_for(parent)
-        .modal(true)
+    let dialog = adw::AlertDialog::builder()
         .heading("Save as template")
         .body("Enter a name for this template. Templates store plain text; formatting and attachments are not saved.")
         .build();
@@ -2267,75 +2343,87 @@ fn save_as_template_dialog(
     dialog.set_extra_child(Some(&entry));
 
     let entry_clone = entry.clone();
-    let subject_text = subject_row.text().to_string();
-
-    // Query the body asynchronously: the result callback runs on the GTK main
-    // loop, so it is populated by the time the user answers the dialog. Blocking
-    // here with `recv_timeout` would deadlock the very callback we await.
-    let body_text = Rc::new(RefCell::new(String::new()));
-    {
-        let body_text = Rc::clone(&body_text);
-        webview.evaluate_javascript(
-            "document.body.innerText",
-            None,
-            None,
-            None::<&gio::Cancellable>,
-            move |result| {
-                if let Ok(value) = result {
-                    *body_text.borrow_mut() = jsc_string(&value);
-                }
-            },
-        );
-    }
 
     let app = Rc::clone(app);
     let banner = banner.clone();
+    let webview = webview.clone();
+    let subject_row = subject_row.clone();
 
-    dialog.connect_response(None, move |dialog: &adw::MessageDialog, response| {
+    dialog.connect_response(None, move |_dialog: &adw::AlertDialog, response| {
         if response == "save" {
             let name = entry_clone.text().to_string().trim().to_owned();
             if !name.is_empty() {
-                let body_text = body_text.borrow().clone();
-                let subject_text = subject_text.clone();
-                // Writing to the store happens on a worker.
+                // Capture the subject and body at save time, not when the
+                // dialog opened: the user may have edited either in the
+                // meantime. The body is read asynchronously from the WebView
+                // and the template is stored from within that callback, so
+                // the saved template always carries the current content.
+                // Blocking here with `recv_timeout` would deadlock the very
+                // callback we await.
+                let subject_text = subject_row.text().to_string();
                 let mailin = std::sync::Arc::clone(&app.mailin);
                 let banner = banner.clone();
-                crate::background::spawn_result(
-                    move || {
-                        mailin
-                            .store()
-                            .upsert_template(&account_id, &name, &subject_text, &body_text)
-                            .map(|_| ())
-                            .map_err(|error| error.to_string())
-                    },
-                    move |result| match result {
-                        Ok(Ok(())) => {
-                            banner.set_title("Template saved");
+                let webview = webview.clone();
+                webview.evaluate_javascript(
+                    "document.body.innerText",
+                    None,
+                    None,
+                    None::<&gio::Cancellable>,
+                    move |result| {
+                        let Ok(value) = result else {
+                            banner.set_button_label(None::<&str>);
+                            banner.set_title(
+                                "Could not save template: the message body could not be read.",
+                            );
                             banner.set_revealed(true);
-                            let banner_hide = banner.clone();
-                            glib::timeout_add_seconds_local_once(3, move || {
-                                if banner_hide.title().as_str() == "Template saved" {
-                                    banner_hide.set_revealed(false);
+                            return;
+                        };
+                        let body_text = jsc_string(&value);
+                        // Writing to the store happens on a worker.
+                        let mailin = std::sync::Arc::clone(&mailin);
+                        let banner = banner.clone();
+                        crate::background::spawn_result(
+                            move || {
+                                mailin
+                                    .store()
+                                    .upsert_template(&account_id, &name, &subject_text, &body_text)
+                                    .map(|_| ())
+                                    .map_err(|error| error.to_string())
+                            },
+                            move |result| match result {
+                                Ok(Ok(())) => {
+                                    banner.set_button_label(None::<&str>);
+                                    banner.set_title("Template saved");
+                                    banner.set_revealed(true);
+                                    let banner_hide = banner.clone();
+                                    glib::timeout_add_seconds_local_once(3, move || {
+                                        if banner_hide.title().as_str() == "Template saved" {
+                                            banner_hide.set_revealed(false);
+                                        }
+                                    });
                                 }
-                            });
-                        }
-                        Ok(Err(error)) => {
-                            banner.set_title(&format!("Could not save template: {error}"));
-                            banner.set_revealed(true);
-                        }
-                        Err(failed) => {
-                            banner
-                                .set_title(&format!("Could not save template: {}", failed.message));
-                            banner.set_revealed(true);
-                        }
+                                Ok(Err(error)) => {
+                                    banner.set_button_label(None::<&str>);
+                                    banner.set_title(&format!("Could not save template: {error}"));
+                                    banner.set_revealed(true);
+                                }
+                                Err(failed) => {
+                                    banner.set_button_label(None::<&str>);
+                                    banner.set_title(&format!(
+                                        "Could not save template: {}",
+                                        failed.message
+                                    ));
+                                    banner.set_revealed(true);
+                                }
+                            },
+                        );
                     },
                 );
             }
         }
-        dialog.close();
     });
 
-    dialog.present();
+    dialog.present(Some(parent));
     entry.grab_focus();
 }
 
@@ -2460,5 +2548,51 @@ mod tests {
         let draft = reply(&account(), &message(), Some("Hello"));
         assert!(draft.body.starts_with("\n\nOn "));
         assert!(!draft.body.contains("-- \n"));
+    }
+
+    #[test]
+    fn placeholders_are_stripped_from_subjects_and_bodies() {
+        assert_eq!(
+            strip_template_placeholders("Hello {{name}}, welcome"),
+            "Hello , welcome"
+        );
+        assert_eq!(strip_template_placeholders("{{a}}{{b}} x"), " x");
+        assert_eq!(
+            strip_template_placeholders("before {{mid}} after"),
+            "before  after"
+        );
+        assert_eq!(
+            strip_template_placeholders("no placeholders"),
+            "no placeholders"
+        );
+        assert_eq!(strip_template_placeholders(""), "");
+        assert_eq!(strip_template_placeholders("}"), "}");
+    }
+
+    #[test]
+    fn an_unterminated_placeholder_is_kept_verbatim() {
+        assert_eq!(strip_template_placeholders("{{oops"), "{{oops");
+        assert_eq!(
+            strip_template_placeholders("prefix {{oops"),
+            "prefix {{oops"
+        );
+        // An unterminated `{{` must not swallow the rest of the text: the
+        // scan resumes after it and any further unterminated openers are
+        // kept as literals too.
+        assert_eq!(
+            strip_template_placeholders("{{oops {{also_open"),
+            "{{oops {{also_open"
+        );
+        assert_eq!(
+            strip_template_placeholders("a {{broken } still open"),
+            "a {{broken } still open"
+        );
+    }
+
+    #[test]
+    fn the_first_closing_brace_terminates_a_placeholder() {
+        // Greedy to the first `}}`, matching the documented semantics.
+        assert_eq!(strip_template_placeholders("{{a {{b}} c"), " c");
+        assert_eq!(strip_template_placeholders("{{a}}b{{c}}"), "b");
     }
 }

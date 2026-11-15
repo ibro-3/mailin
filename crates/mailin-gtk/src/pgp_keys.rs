@@ -3,7 +3,6 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::glib;
 use libadwaita as adw;
 
 use mailin_core::{Account, AccountId};
@@ -154,11 +153,13 @@ fn populate(
             let rows = match result {
                 Ok(Ok(rows)) => rows,
                 Ok(Err(error)) => {
+                    banner.set_button_label(None::<&str>);
                     banner.set_title(&format!("Could not load keys: {error}"));
                     banner.set_revealed(true);
                     return;
                 }
                 Err(failed) => {
+                    banner.set_button_label(None::<&str>);
                     banner.set_title(&format!("Could not load keys: {}", failed.message));
                     banner.set_revealed(true);
                     return;
@@ -193,8 +194,8 @@ fn build_key_rows(
 
     for key in rows {
         let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&key.title))
-            .subtitle(glib::markup_escape_text(&key.subtitle))
+            .title(&key.title)
+            .subtitle(&key.subtitle)
             .build();
 
         let delete = gtk::Button::builder()
@@ -217,9 +218,7 @@ fn build_key_rows(
         let window_for_delete = window.clone();
         let banner_for_delete = banner.clone();
         delete.connect_clicked(move |_| {
-            let confirm = adw::MessageDialog::builder()
-                .transient_for(&window_for_delete)
-                .modal(true)
+            let confirm = adw::AlertDialog::builder()
                 .heading("Delete key?")
                 .body(format!(
                     "The key {fingerprint} will be removed from this account. This cannot be undone."
@@ -235,9 +234,8 @@ fn build_key_rows(
             let window = window_for_delete.clone();
             let banner = banner_for_delete.clone();
             let fingerprint = fingerprint.clone();
-            confirm.connect_response(None, move |dialog, response| {
-                dialog.close();
-                if response != "delete" {
+            confirm.connect_response(None, move |_dialog, response| {
+                    if response != "delete" {
                     return;
                 }
                 // Deleting the key touches the store and the keyring: run it
@@ -253,10 +251,12 @@ fn build_key_rows(
                     move |result| match result {
                         Ok(Ok(_)) => populate(&group, &app, account, &window, &banner),
                         Ok(Err(error)) => {
+                            banner.set_button_label(None::<&str>);
                             banner.set_title(&format!("Could not delete the key: {error}"));
                             banner.set_revealed(true);
                         }
                         Err(failed) => {
+                            banner.set_button_label(None::<&str>);
                             banner.set_title(&format!(
                                 "Could not delete the key: {}",
                                 failed.message
@@ -266,7 +266,7 @@ fn build_key_rows(
                     },
                 );
             });
-            confirm.present();
+            confirm.present(Some(&window_for_delete));
         });
 
         group.add(&row);
@@ -280,9 +280,7 @@ fn import_dialog(
     group: &adw::PreferencesGroup,
     banner: &adw::Banner,
 ) {
-    let dialog = adw::MessageDialog::builder()
-        .transient_for(parent)
-        .modal(true)
+    let dialog = adw::AlertDialog::builder()
         .heading("Import PGP key")
         .body("Paste an armored public or secret key block.")
         .build();
@@ -308,8 +306,8 @@ fn import_dialog(
     let group = group.clone();
     let banner = banner.clone();
     let parent = parent.clone();
-    dialog.connect_response(None, move |dialog, response| {
-        dialog.close();
+    let present_parent = parent.clone();
+    dialog.connect_response(None, move |_dialog, response| {
         if response != "import" {
             return;
         }
@@ -317,6 +315,7 @@ fn import_dialog(
         let (start, end) = buffer.bounds();
         let armored = buffer.text(&start, &end, false).to_string();
         if armored.trim().is_empty() {
+            banner.set_button_label(None::<&str>);
             banner.set_title("No key data provided");
             banner.set_revealed(true);
             return;
@@ -324,6 +323,7 @@ fn import_dialog(
 
         // Parsing an armored key (and the keyring write that follows) can take
         // seconds: run it off the main thread.
+        banner.set_button_label(None::<&str>);
         banner.set_title("Importing key…");
         banner.set_revealed(true);
         let mailin = std::sync::Arc::clone(&app.mailin);
@@ -365,7 +365,7 @@ fn import_dialog(
             },
         );
     });
-    dialog.present();
+    dialog.present(Some(&present_parent));
     view.grab_focus();
 }
 
@@ -377,9 +377,7 @@ fn generate_dialog(
     group: &adw::PreferencesGroup,
     banner: &adw::Banner,
 ) {
-    let dialog = adw::MessageDialog::builder()
-        .transient_for(parent)
-        .modal(true)
+    let dialog = adw::AlertDialog::builder()
         .heading("Generate key pair")
         .body("The secret key is stored in the system keyring.")
         .build();
@@ -401,19 +399,21 @@ fn generate_dialog(
     let group = group.clone();
     let banner = banner.clone();
     let parent = parent.clone();
-    dialog.connect_response(None, move |dialog, response| {
-        dialog.close();
+    let present_parent = parent.clone();
+    dialog.connect_response(None, move |_dialog, response| {
         if response != "generate" {
             return;
         }
         let user_id = entry_clone.text().to_string();
         if user_id.trim().is_empty() {
+            banner.set_button_label(None::<&str>);
             banner.set_title("Enter a user ID (name and email)");
             banner.set_revealed(true);
             return;
         }
         // Generating a key pair is CPU-heavy (RSA parameters): run it off the
         // main thread so the dialog keeps responding.
+        banner.set_button_label(None::<&str>);
         banner.set_title("Generating key pair…");
         banner.set_revealed(true);
         let mailin = std::sync::Arc::clone(&app.mailin);
@@ -449,6 +449,6 @@ fn generate_dialog(
             },
         );
     });
-    dialog.present();
+    dialog.present(Some(&present_parent));
     entry.grab_focus();
 }

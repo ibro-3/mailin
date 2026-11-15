@@ -498,7 +498,7 @@ pub fn show_preferences(
                 }
                 for (account, key_count) in rows {
                     let row = adw::ActionRow::builder()
-                        .title(gtk::glib::markup_escape_text(&account.email))
+                        .title(&account.email)
                         .subtitle(match key_count {
                             1 => "1 key".to_owned(),
                             count => format!("{count} keys"),
@@ -561,11 +561,8 @@ pub fn show_preferences(
             } else {
                 for plugin in plugins {
                     let row = adw::ActionRow::builder()
-                        .title(gtk::glib::markup_escape_text(&plugin.name))
-                        .subtitle(gtk::glib::markup_escape_text(&format!(
-                            "v{} · {}",
-                            plugin.version, plugin.source_path
-                        )))
+                        .title(&plugin.name)
+                        .subtitle(format!("v{} · {}", plugin.version, plugin.source_path))
                         .build();
                     let toggle = gtk::Switch::new();
                     toggle.set_active(plugin.enabled);

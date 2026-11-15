@@ -260,6 +260,15 @@ pub fn handle_compose_requested() {
     }
 }
 
+/// One error to surface on the banner. `account_id` is `None` for
+/// background-worker failures that carry no account context.
+struct BannerError {
+    account_id: Option<AccountId>,
+    friendly: String,
+    retryable: bool,
+    details: String,
+}
+
 pub struct MainWindow {
     app: Rc<AppState>,
     selection: RefCell<Selection>,
@@ -311,6 +320,12 @@ pub struct MainWindow {
     /// Last known sync status per account; drives the header chip so an
     /// offline or failed account stays visible while another is selected.
     sync_status: RefCell<std::collections::HashMap<AccountId, mailin_core::model::SyncStatus>>,
+    /// Technical details of the currently shown error banner, for the
+    /// Details dialog. Empty while no error is showing.
+    error_details: RefCell<String>,
+    /// Whether the banner's action button is "Retry" (retryable errors) or
+    /// "Details" (at least one non-retryable error in the cycle).
+    error_button_is_retry: Cell<bool>,
     widgets: Widgets,
 }
 
@@ -919,6 +934,8 @@ impl MainWindow {
             last_draft: RefCell::new(None),
             expanded_threads: RefCell::new(std::collections::HashSet::new()),
             sync_status: RefCell::new(std::collections::HashMap::new()),
+            error_details: RefCell::new(String::new()),
+            error_button_is_retry: Cell::new(false),
             widgets: Widgets {
                 window,
                 title,
@@ -1280,24 +1297,9 @@ impl MainWindow {
             move |_| list_box.unselect_all()
         });
 
-        let message_menu = gio::Menu::new();
-        message_menu.append(Some("Archive"), Some("win.archive"));
-        message_menu.append(Some("Move to Trash"), Some("win.delete"));
-        message_menu.append(Some("Move to Folder…"), Some("win.move"));
-        message_menu.append(Some("Mark as Junk"), Some("win.junk"));
-        message_menu.append(Some("Not Junk"), Some("win.not-junk"));
-        let outbox_section = gio::Menu::new();
-        outbox_section.append(Some("Retry"), Some("win.outbox-retry"));
-        outbox_section.append(Some("Discard"), Some("win.outbox-discard"));
-        outbox_section.append(Some("Edit"), Some("win.outbox-edit"));
-        message_menu.append_section(None, &outbox_section);
-        let destructive = gio::Menu::new();
-        destructive.append(Some("Delete Permanently"), Some("win.delete-permanent"));
-        destructive.append(Some("Empty Trash"), Some("win.empty-trash"));
-        message_menu.append_section(None, &destructive);
-        this.widgets
-            .message_menu_button
-            .set_menu_model(Some(&message_menu));
+        // The message menu is rebuilt whenever the view switches between
+        // the outbox and the message list: it cannot hide a section.
+        this.rebuild_message_menu();
 
         // Hamburger button click handler (mobile sidebar toggle)
         this.widgets.hamburger_button.connect_clicked({
@@ -1597,8 +1599,6 @@ impl MainWindow {
             let entry = this.widgets.reader_find_entry.clone();
             let status = this.widgets.reader_find_status.clone();
             let find_target = Rc::clone(&this.find_target_view);
-            let fallback_view = this.html_view.borrow().clone();
-            let _ = fallback_view; // may be unused if target is set
             entry.connect_search_changed(move |entry| {
                 let text = entry.text().to_string();
                 let view_opt = find_target.borrow().clone();
@@ -1995,13 +1995,17 @@ impl MainWindow {
         });
         this.widgets.window.add_action(&undo_move_action);
 
-        // Surface a Retry button on the account/sync error banner. Activating
-        // it runs the same action as the F5 "Synchronize now" shortcut.
-        this.widgets.banner.set_button_label(Some("Retry"));
+        // The error banner's action button is contextual: "Retry" (re-sync)
+        // while a retryable error is showing, "Details" otherwise. It is set
+        // by `show_errors` and stays hidden for informational banners.
         this.widgets.banner.connect_button_clicked({
             let this = Rc::clone(this);
             move |_| {
-                this.sync_now();
+                if this.error_button_is_retry.get() {
+                    this.sync_now();
+                } else {
+                    this.show_error_details();
+                }
             }
         });
 
@@ -2027,7 +2031,6 @@ impl MainWindow {
                     .version(env!("CARGO_PKG_VERSION"))
                     .developer_name("Mailin contributors")
                     .developers(["Mailin contributors"])
-                    .translator_credits("translator-credits")
                     .license_type(gtk::License::MitX11)
                     .comments("Native desktop email client for IMAP and SMTP. Keeps a local SQLite cache for offline reading and stores passwords in the system keyring.")
                     .copyright("© 2026 Mailin contributors")
@@ -2502,6 +2505,8 @@ impl MainWindow {
             selection.show_outbox = is_outbox;
             selection.limit = self.page_size();
         }
+        // The message menu shows the outbox actions only in the outbox view.
+        self.rebuild_message_menu();
         self.reset_mobile_nav();
         self.programmatic.set(true);
         self.widgets.search.set_text("");
@@ -5102,7 +5107,9 @@ impl MainWindow {
         let mut folders_changed = false;
         let mut messages_changed = false;
         let mut body_ready = None;
-        let mut account_error = None;
+        // Every error of this drain cycle; an aggregate banner is shown at
+        // the end instead of only the last one.
+        let mut account_errors: Vec<BannerError> = Vec::new();
         let mut outbox_changed = false;
         let mut new_messages = Vec::new();
         let mut sync_status_changed = false;
@@ -5125,29 +5132,32 @@ impl MainWindow {
                 }) => new_messages.push((account_id, count, message_ids)),
                 Ok(ClientEvent::BodyReady { message_id }) => body_ready = Some(message_id),
                 Ok(ClientEvent::OutboxChanged) => outbox_changed = true,
-                Ok(ClientEvent::AccountError { message, .. }) => account_error = Some(message),
-                Ok(ClientEvent::ActionFailed { message, .. }) => {
-                    self.widgets.banner.set_title(&message);
-                    self.widgets.banner.set_revealed(true);
-                }
+                Ok(ClientEvent::AccountError {
+                    account_id,
+                    message,
+                    retryable,
+                    details,
+                })
+                | Ok(ClientEvent::ActionFailed {
+                    account_id,
+                    message,
+                    retryable,
+                    details,
+                }) => account_errors.push(BannerError {
+                    account_id: Some(account_id),
+                    friendly: message,
+                    retryable,
+                    details,
+                }),
                 Ok(ClientEvent::ScheduledActionRan { .. }) => {
                     // Scheduled action completed, refresh folders and messages
                     folders_changed = true;
                     messages_changed = true;
                 }
                 Ok(ClientEvent::SyncStatusChanged { account_id, status }) => {
-                    {
-                        let mut map = self.sync_status.borrow_mut();
-                        map.insert(account_id, status);
-                    }
+                    let mut map = self.sync_status.borrow_mut();
+                    map.insert(account_id, status);
                     sync_status_changed = true;
-                    if matches!(status, mailin_core::model::SyncStatus::Error)
-                        && self.selection.borrow().account == Some(account_id)
-                    {
-                        self.widgets.banner.set_button_label(Some("Retry"));
-                        self.widgets.banner.set_title("Sync failed");
-                        self.widgets.banner.set_revealed(true);
-                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {
@@ -5183,8 +5193,8 @@ impl MainWindow {
         for (account_id, count, message_ids) in new_messages {
             self.notify_new_mail(account_id, count, &message_ids);
         }
-        if let Some(message) = account_error {
-            self.show_error(&message);
+        if !account_errors.is_empty() {
+            self.show_errors(&account_errors);
         }
         if sync_status_changed {
             self.update_sync_status_chip();
@@ -5268,16 +5278,112 @@ impl MainWindow {
         application.send_notification(Some(&format!("mailin-{account_id}")), &notification);
     }
 
-    fn show_error(&self, message: &str) {
-        self.widgets.banner.set_button_label(Some("Retry"));
-        let mut text = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.chars().count() > 180 {
-            text = text.chars().take(179).collect();
-            text.push('…');
-        }
-        self.widgets.banner.set_title(&format!("Problem: {text}"));
+    /// Show one banner for every error of a drain cycle. The banner's
+    /// action is "Retry" when every error is connectivity-related (a
+    /// re-sync may succeed) and "Details" otherwise; the unprettified error
+    /// text is one dialog away instead of being truncated.
+    fn show_errors(&self, errors: &[BannerError]) {
+        let all_retryable = errors.iter().all(|error| error.retryable);
+        let collapsed = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let title = if errors.len() == 1 {
+            format!("Problem: {}", collapsed(&errors[0].friendly))
+        } else {
+            format!("{} problems occurred", errors.len())
+        };
+        let accounts = self.accounts.borrow();
+        let details = errors
+            .iter()
+            .map(|error| {
+                let details = collapsed(&error.details);
+                match error.account_id {
+                    Some(account_id) => {
+                        let label = accounts
+                            .iter()
+                            .find(|account| account.id == account_id)
+                            .map(|account| account.email.clone())
+                            .unwrap_or_else(|| account_id.to_string());
+                        format!("{label}:\n  {details}")
+                    }
+                    None => details,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        drop(accounts);
+        *self.error_details.borrow_mut() = details;
+        self.error_button_is_retry.set(all_retryable);
+        self.widgets
+            .banner
+            .set_button_label(Some(if all_retryable { "Retry" } else { "Details" }));
+        self.widgets.banner.set_title(&title);
         self.widgets.banner.set_revealed(true);
-        tracing::debug!(%message, "account error surfaced in the UI");
+        tracing::warn!(count = errors.len(), "errors surfaced in the UI");
+    }
+
+    /// Single-error convenience wrapper for background-worker failures
+    /// (fetch/store errors, not core events). Same banner treatment.
+    fn show_error(&self, message: &str) {
+        self.show_errors(&[BannerError {
+            account_id: None,
+            friendly: message.to_owned(),
+            retryable: false,
+            details: message.to_owned(),
+        }]);
+    }
+
+    /// Open a dialog with the unprettified text of the current error
+    /// banner — for support and bug reports. Never empty for a banner set
+    /// by [`Self::show_errors`].
+    /// Build the message-menu model for the current view. A `gio::Menu`
+    /// section cannot be hidden, so the outbox actions (Retry/Discard/Edit)
+    /// are only included while the outbox is being shown.
+    fn rebuild_message_menu(&self) {
+        let show_outbox = self.selection.borrow().show_outbox;
+        let menu = gio::Menu::new();
+        menu.append(Some("Archive"), Some("win.archive"));
+        menu.append(Some("Move to Trash"), Some("win.delete"));
+        menu.append(Some("Move to Folder…"), Some("win.move"));
+        menu.append(Some("Mark as Junk"), Some("win.junk"));
+        menu.append(Some("Not Junk"), Some("win.not-junk"));
+        if show_outbox {
+            let outbox_section = gio::Menu::new();
+            outbox_section.append(Some("Retry"), Some("win.outbox-retry"));
+            outbox_section.append(Some("Discard"), Some("win.outbox-discard"));
+            outbox_section.append(Some("Edit"), Some("win.outbox-edit"));
+            menu.append_section(None, &outbox_section);
+        }
+        let destructive = gio::Menu::new();
+        destructive.append(Some("Delete Permanently"), Some("win.delete-permanent"));
+        destructive.append(Some("Empty Trash"), Some("win.empty-trash"));
+        menu.append_section(None, &destructive);
+        self.widgets.message_menu_button.set_menu_model(Some(&menu));
+    }
+
+    fn show_error_details(&self) {
+        let text = self.error_details.borrow().clone();
+        if text.is_empty() {
+            return;
+        }
+        let dialog = adw::AlertDialog::builder()
+            .heading("Technical details")
+            .body("The unedited error text, for support or bug reports.")
+            .build();
+        dialog.add_response("close", "Close");
+        dialog.set_default_response(Some("close"));
+        dialog.set_close_response("close");
+        let view = gtk::TextView::new();
+        view.set_editable(false);
+        view.set_monospace(true);
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        view.buffer().set_text(&text);
+        let scroll = gtk::ScrolledWindow::new();
+        scroll.set_min_content_width(440);
+        scroll.set_min_content_height(150);
+        scroll.set_max_content_height(320);
+        scroll.set_child(Some(&view));
+        dialog.set_extra_child(Some(&scroll));
+        let window = self.widgets.window.clone();
+        dialog.choose(Some(&window), None::<&gio::Cancellable>, |_| {});
     }
 
     // -------------------------------------------------------------- actions
@@ -5469,9 +5575,7 @@ impl MainWindow {
         let Some(account_id) = this.selection.borrow().account else {
             return;
         };
-        let dialog = adw::MessageDialog::builder()
-            .transient_for(&this.widgets.window)
-            .modal(true)
+        let dialog = adw::AlertDialog::builder()
             .heading("New folder")
             .body("Enter the name of the new folder. Use “/” to nest it, for example Archive/2025.")
             .build();
@@ -5492,8 +5596,8 @@ impl MainWindow {
         let entry_for_response = entry.clone();
         let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
         let win = this.widgets.window.clone();
-        dialog.connect_response(None, move |dialog, response| {
-            dialog.close();
+        let win_present = this.widgets.window.clone();
+        dialog.connect_response(None, move |_dialog, response| {
             if response == "create" {
                 let name = entry_for_response.text().trim().to_owned();
                 if !name.is_empty() {
@@ -5508,7 +5612,7 @@ impl MainWindow {
                 let _ = win.grab_focus();
             }
         });
-        dialog.present();
+        dialog.present(Some(&win_present));
         entry.grab_focus();
     }
 
@@ -5530,9 +5634,7 @@ impl MainWindow {
             return;
         }
 
-        let dialog = adw::MessageDialog::builder()
-            .transient_for(&this.widgets.window)
-            .modal(true)
+        let dialog = adw::AlertDialog::builder()
             .heading("Rename folder")
             .body(format!("Choose a new name for “{}”.", folder.name))
             .build();
@@ -5554,8 +5656,8 @@ impl MainWindow {
         let entry_for_response = entry.clone();
         let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
         let win = this.widgets.window.clone();
-        dialog.connect_response(None, move |dialog, response| {
-            dialog.close();
+        let win_present = this.widgets.window.clone();
+        dialog.connect_response(None, move |_dialog, response| {
             if response == "rename" {
                 let name = entry_for_response.text().trim().to_owned();
                 if !name.is_empty() && name != folder.name {
@@ -5569,7 +5671,7 @@ impl MainWindow {
                 let _ = win.grab_focus();
             }
         });
-        dialog.present();
+        dialog.present(Some(&win_present));
         entry.grab_focus();
     }
 
@@ -5660,9 +5762,7 @@ impl MainWindow {
             return;
         };
 
-        let dialog = adw::MessageDialog::builder()
-            .transient_for(&this.widgets.window)
-            .modal(true)
+        let dialog = adw::AlertDialog::builder()
             .heading("Folder properties")
             .body(format!(
                 "Details reported by the server for “{}”.",
@@ -5674,8 +5774,8 @@ impl MainWindow {
         dialog.set_close_response("close");
         let prior_focus = gtk::prelude::RootExt::focus(&this.widgets.window);
         let win = this.widgets.window.clone();
-        dialog.connect_response(None, move |d, _| {
-            d.close();
+        let win_present = this.widgets.window.clone();
+        dialog.connect_response(None, move |_d, _| {
             if let Some(focus) = prior_focus.clone() {
                 let _ = focus.grab_focus();
             } else {
@@ -5737,7 +5837,7 @@ impl MainWindow {
             .child(&rows)
             .build();
         dialog.set_extra_child(Some(&scroller));
-        dialog.present();
+        dialog.present(Some(&win_present));
     }
 }
 

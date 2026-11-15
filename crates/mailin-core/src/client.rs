@@ -65,16 +65,26 @@ pub enum Event {
         action_id: i64,
         kind: String,
     },
+    /// `retryable` tells the UI whether re-running the sync is likely to
+    /// help (connectivity problems). It is `false` for auth, configuration,
+    /// protocol and server-side failures. `details` is the unprettified
+    /// error text, surfaced behind a "Details" affordance instead of being
+    /// truncated away.
     AccountError {
         account_id: AccountId,
         message: String,
+        retryable: bool,
+        details: String,
     },
     /// A user-initiated action (archive, delete, send…) failed. The message
     /// is user-facing (see [`crate::error::Error::friendly`]); the technical
-    /// details are only in the log.
+    /// text goes in `details`. `retryable` is always `false`: the right
+    /// remedy is to redo the action, not a full sync.
     ActionFailed {
         account_id: AccountId,
         message: String,
+        retryable: bool,
+        details: String,
     },
     /// Sync status changed for an account.
     SyncStatusChanged {

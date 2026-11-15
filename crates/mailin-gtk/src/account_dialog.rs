@@ -277,9 +277,7 @@ pub fn present(
 
     // Compatibility aliases for existing code that references the groups/captions.
     let incoming = server_expander.clone();
-    let outgoing = server_expander.clone();
     let incoming_default_desc = server_default_subtitle;
-    let outgoing_default_desc = server_default_subtitle;
 
     let update_security_warnings = {
         let imap_security = imap_security.clone();
@@ -865,11 +863,9 @@ pub fn present(
     let autoconfig_caption_active = Rc::new(std::cell::Cell::new(false));
     let clear_autoconfig_caption = {
         let incoming = incoming.clone();
-        let _outgoing = outgoing.clone();
         let autoconfig_caption_active = Rc::clone(&autoconfig_caption_active);
         let autoconfig_reset = autoconfig_reset.clone();
         let incoming_default_desc = incoming_default_desc.to_owned();
-        let _outgoing_default_desc = outgoing_default_desc.to_owned();
         move || {
             if autoconfig_caption_active.replace(false) {
                 incoming.set_subtitle(&incoming_default_desc);
@@ -890,9 +886,7 @@ pub fn present(
         let autoconfig_caption_active = Rc::clone(&autoconfig_caption_active);
         let autoconfig_reset = autoconfig_reset.clone();
         let incoming = incoming.clone();
-        let _outgoing = outgoing.clone();
         let incoming_default_desc = incoming_default_desc.to_owned();
-        let _outgoing_default_desc = outgoing_default_desc.to_owned();
         move |row| {
             let email = row.text();
             let Some(suggestion) = autoconfig::suggest(&email) else {
@@ -987,9 +981,7 @@ pub fn present(
         let autoconfig_caption_active = Rc::clone(&autoconfig_caption_active);
         let autoconfig_reset = autoconfig_reset.clone();
         let incoming = incoming.clone();
-        let _outgoing = outgoing.clone();
         let incoming_default_desc = incoming_default_desc.to_owned();
-        let _outgoing_default_desc = outgoing_default_desc.to_owned();
         let imap_host = imap_host.clone();
         let imap_port = imap_port.clone();
         let imap_security = imap_security.clone();
@@ -1357,42 +1349,77 @@ pub fn present(
                                     );
                                 }
                             });
-                            delete_btn.connect_clicked(move |_| {
-                                // Deleting writes to the store: keep it off
-                                // the UI thread.
-                                let mailin = std::sync::Arc::clone(&app_for_delete.mailin);
-                                let name = template_name_for_delete.clone();
-                                let error_label = error_label_for_delete.clone();
-                                let refresh = Rc::clone(&refresh_for_delete);
-                                crate::background::spawn_result(
-                                    move || {
-                                        mailin
-                                            .store()
-                                            .delete_template(&account_id, &name)
-                                            .map_err(|error| error.to_string())
-                                    },
-                                    move |result| match result {
-                                        Ok(Ok(_)) => {
-                                            error_label.set_visible(false);
-                                            if let Some(refresh) = refresh.borrow().as_ref() {
-                                                refresh();
+                            delete_btn.connect_clicked({
+                                let dialog = dialog.clone();
+                                move |_| {
+                                    // Deleting is destructive and permanent:
+                                    // confirm first.
+                                    let confirm = adw::AlertDialog::builder()
+                                        .heading("Delete template?")
+                                        .body(format!(
+                                            "The template “{}” will be permanently deleted.",
+                                            template_name_for_delete
+                                        ))
+                                        .build();
+                                    confirm.add_response("cancel", "Cancel");
+                                    confirm.add_response("delete", "Delete");
+                                    confirm.set_response_appearance(
+                                        "delete",
+                                        adw::ResponseAppearance::Destructive,
+                                    );
+                                    confirm.set_default_response(Some("cancel"));
+                                    confirm.set_close_response("cancel");
+                                    let mailin = std::sync::Arc::clone(&app_for_delete.mailin);
+                                    let name = template_name_for_delete.clone();
+                                    let error_label = error_label_for_delete.clone();
+                                    let refresh = Rc::clone(&refresh_for_delete);
+                                    confirm.choose(
+                                        Some(&dialog),
+                                        None::<&gtk::gio::Cancellable>,
+                                        move |response| {
+                                            if response.as_str() != "delete" {
+                                                return;
                                             }
-                                        }
-                                        Ok(Err(error)) => {
-                                            error_label.set_text(&format!(
-                                                "Could not delete template: {error}"
-                                            ));
-                                            error_label.set_visible(true);
-                                        }
-                                        Err(failed) => {
-                                            error_label.set_text(&format!(
-                                                "Could not delete template: {}",
-                                                failed.message
-                                            ));
-                                            error_label.set_visible(true);
-                                        }
-                                    },
-                                );
+                                            // Deleting writes to the store: keep it off
+                                            // the UI thread.
+                                            let mailin = mailin.clone();
+                                            let name = name.clone();
+                                            let error_label = error_label.clone();
+                                            let refresh = Rc::clone(&refresh);
+                                            crate::background::spawn_result(
+                                                move || {
+                                                    mailin
+                                                        .store()
+                                                        .delete_template(&account_id, &name)
+                                                        .map_err(|error| error.to_string())
+                                                },
+                                                move |result| match result {
+                                                    Ok(Ok(_)) => {
+                                                        error_label.set_visible(false);
+                                                        if let Some(refresh) =
+                                                            refresh.borrow().as_ref()
+                                                        {
+                                                            refresh();
+                                                        }
+                                                    }
+                                                    Ok(Err(error)) => {
+                                                        error_label.set_text(&format!(
+                                                            "Could not delete template: {error}"
+                                                        ));
+                                                        error_label.set_visible(true);
+                                                    }
+                                                    Err(failed) => {
+                                                        error_label.set_text(&format!(
+                                                            "Could not delete template: {}",
+                                                            failed.message
+                                                        ));
+                                                        error_label.set_visible(true);
+                                                    }
+                                                },
+                                            );
+                                        },
+                                    );
+                                }
                             });
                             templates_list.append(&row);
                         }
@@ -1512,42 +1539,77 @@ pub fn present(
                                         );
                                     }
                                 });
-                                delete_btn.connect_clicked(move |_| {
-                                    // Deleting writes to the store: keep it off
-                                    // the UI thread.
-                                    let mailin = std::sync::Arc::clone(&app_for_delete.mailin);
-                                    let email = contact_email_for_delete.clone();
-                                    let error_label = error_label_for_delete.clone();
-                                    let refresh = Rc::clone(&refresh_contacts_for_delete);
-                                    crate::background::spawn_result(
-                                        move || {
-                                            mailin
-                                                .store()
-                                                .delete_contact(&account_id, &email)
-                                                .map_err(|error| error.to_string())
-                                        },
-                                        move |result| match result {
-                                            Ok(Ok(_)) => {
-                                                error_label.set_visible(false);
-                                                if let Some(refresh) = refresh.borrow().as_ref() {
-                                                    refresh();
+                                delete_btn.connect_clicked({
+                                    let dialog = dialog.clone();
+                                    move |_| {
+                                        // Deleting is destructive and permanent:
+                                        // confirm first.
+                                        let confirm = adw::AlertDialog::builder()
+                                            .heading("Delete contact?")
+                                            .body(format!(
+                                                "The contact “{}” will be permanently deleted.",
+                                                contact_email_for_delete
+                                            ))
+                                            .build();
+                                        confirm.add_response("cancel", "Cancel");
+                                        confirm.add_response("delete", "Delete");
+                                        confirm.set_response_appearance(
+                                            "delete",
+                                            adw::ResponseAppearance::Destructive,
+                                        );
+                                        confirm.set_default_response(Some("cancel"));
+                                        confirm.set_close_response("cancel");
+                                        let mailin = std::sync::Arc::clone(&app_for_delete.mailin);
+                                        let email = contact_email_for_delete.clone();
+                                        let error_label = error_label_for_delete.clone();
+                                        let refresh = Rc::clone(&refresh_contacts_for_delete);
+                                        confirm.choose(
+                                            Some(&dialog),
+                                            None::<&gtk::gio::Cancellable>,
+                                            move |response| {
+                                                if response.as_str() != "delete" {
+                                                    return;
                                                 }
-                                            }
-                                            Ok(Err(error)) => {
-                                                error_label.set_text(&format!(
-                                                    "Could not delete contact: {error}"
-                                                ));
-                                                error_label.set_visible(true);
-                                            }
-                                            Err(failed) => {
-                                                error_label.set_text(&format!(
-                                                    "Could not delete contact: {}",
-                                                    failed.message
-                                                ));
-                                                error_label.set_visible(true);
-                                            }
-                                        },
-                                    );
+                                                // Deleting writes to the store: keep it off
+                                                // the UI thread.
+                                                let mailin = mailin.clone();
+                                                let email = email.clone();
+                                                let error_label = error_label.clone();
+                                                let refresh = Rc::clone(&refresh);
+                                                crate::background::spawn_result(
+                                                    move || {
+                                                        mailin
+                                                            .store()
+                                                            .delete_contact(&account_id, &email)
+                                                            .map_err(|error| error.to_string())
+                                                    },
+                                                    move |result| match result {
+                                                        Ok(Ok(_)) => {
+                                                            error_label.set_visible(false);
+                                                            if let Some(refresh) =
+                                                                refresh.borrow().as_ref()
+                                                            {
+                                                                refresh();
+                                                            }
+                                                        }
+                                                        Ok(Err(error)) => {
+                                                            error_label.set_text(&format!(
+                                                                "Could not delete contact: {error}"
+                                                            ));
+                                                            error_label.set_visible(true);
+                                                        }
+                                                        Err(failed) => {
+                                                            error_label.set_text(&format!(
+                                                                "Could not delete contact: {}",
+                                                                failed.message
+                                                            ));
+                                                            error_label.set_visible(true);
+                                                        }
+                                                    },
+                                                );
+                                            },
+                                        );
+                                    }
                                 });
                                 contacts_list.append(&row);
                             }
@@ -1900,7 +1962,7 @@ fn new_template_dialog(
     error_label: &gtk::Label,
     refresh: RefreshFn,
 ) {
-    let dialog = adw::MessageDialog::builder()
+    let dialog = adw::AlertDialog::builder()
         .heading("New Template")
         .body("Enter template details:")
         .build();
@@ -1952,7 +2014,7 @@ fn new_template_dialog(
     let name_c = name_entry.clone();
     let subject_c = subject_entry.clone();
     let body_c = body_view.clone();
-    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+    dialog.connect_response(None, move |_d: &adw::AlertDialog, response| {
         if response == "save" {
             let name = name_c.text().to_string().trim().to_owned();
             let subject = subject_c.text().to_string();
@@ -1998,13 +2060,12 @@ fn new_template_dialog(
                 );
             }
         }
-        d.close();
         if let Some(focus) = prior_focus.clone() {
             let _ = focus.grab_focus();
         }
     });
 
-    dialog.present();
+    dialog.present(Some(parent));
     name_entry.grab_focus();
 }
 
@@ -2020,7 +2081,7 @@ fn edit_template_dialog(
     error_label: &gtk::Label,
     refresh: RefreshFn,
 ) {
-    let dialog = adw::MessageDialog::builder()
+    let dialog = adw::AlertDialog::builder()
         .heading("Edit Template")
         .body("Modify template details:")
         .build();
@@ -2075,7 +2136,7 @@ fn edit_template_dialog(
     let name_c = name_entry.clone();
     let subject_c = subject_entry.clone();
     let body_c = body_view.clone();
-    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+    dialog.connect_response(None, move |_d: &adw::AlertDialog, response| {
         if response == "save" {
             let name = name_c.text().to_string().trim().to_owned();
             let subject = subject_c.text().to_string();
@@ -2093,7 +2154,10 @@ fn edit_template_dialog(
                     move || {
                         // Delete old if name changed
                         if name != old_name {
-                            let _ = mailin.store().delete_template(&account_id, &old_name);
+                            mailin
+                                .store()
+                                .delete_template(&account_id, &old_name)
+                                .map_err(|error| error.to_string())?;
                         }
                         mailin
                             .store()
@@ -2126,13 +2190,12 @@ fn edit_template_dialog(
                 );
             }
         }
-        d.close();
         if let Some(focus) = prior_focus.clone() {
             let _ = focus.grab_focus();
         }
     });
 
-    dialog.present();
+    dialog.present(Some(parent));
     name_entry.grab_focus();
 }
 
@@ -2144,7 +2207,7 @@ fn new_contact_dialog(
     error_label: &gtk::Label,
     refresh: RefreshFn,
 ) {
-    let dialog = adw::MessageDialog::builder()
+    let dialog = adw::AlertDialog::builder()
         .heading("New Contact")
         .body("Enter contact details:")
         .build();
@@ -2179,7 +2242,7 @@ fn new_contact_dialog(
     let prior_focus = root.as_ref().and_then(gtk::prelude::RootExt::focus);
     let email_c = email_entry.clone();
     let name_c = name_entry.clone();
-    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+    dialog.connect_response(None, move |_d: &adw::AlertDialog, response| {
         if response == "save" {
             let email = email_c.text().to_string().trim().to_owned();
             let display_name = name_c.text().to_string();
@@ -2221,13 +2284,12 @@ fn new_contact_dialog(
                 );
             }
         }
-        d.close();
         if let Some(focus) = prior_focus.clone() {
             let _ = focus.grab_focus();
         }
     });
 
-    dialog.present();
+    dialog.present(Some(parent));
     email_entry.grab_focus();
 }
 
@@ -2241,7 +2303,7 @@ fn edit_contact_dialog(
     error_label: &gtk::Label,
     refresh: RefreshFn,
 ) {
-    let dialog = adw::MessageDialog::builder()
+    let dialog = adw::AlertDialog::builder()
         .heading("Edit Contact")
         .body("Modify contact details:")
         .build();
@@ -2279,7 +2341,7 @@ fn edit_contact_dialog(
     let prior_focus = root.as_ref().and_then(gtk::prelude::RootExt::focus);
     let email_c = email_entry.clone();
     let name_c = name_entry.clone();
-    dialog.connect_response(None, move |d: &adw::MessageDialog, response| {
+    dialog.connect_response(None, move |_d: &adw::AlertDialog, response| {
         if response == "save" {
             let email = email_c.text().to_string().trim().to_owned();
             let display_name = name_c.text().to_string();
@@ -2293,7 +2355,10 @@ fn edit_contact_dialog(
                     move || {
                         // Delete old if email changed
                         if email != old_email {
-                            let _ = mailin.store().delete_contact(&account_id, &old_email);
+                            mailin
+                                .store()
+                                .delete_contact(&account_id, &old_email)
+                                .map_err(|error| error.to_string())?;
                         }
                         mailin
                             .store()
@@ -2326,13 +2391,12 @@ fn edit_contact_dialog(
                 );
             }
         }
-        d.close();
         if let Some(focus) = prior_focus.clone() {
             let _ = focus.grab_focus();
         }
     });
 
-    dialog.present();
+    dialog.present(Some(parent));
     email_entry.grab_focus();
 }
 

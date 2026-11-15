@@ -867,6 +867,8 @@ async fn account_worker(
             state.mailbox.publish(Event::AccountError {
                 account_id,
                 message: error.friendly(),
+                retryable: is_retryable(&error),
+                details: error.to_string(),
             });
             tracing::warn!(%account_id, %error, "could not refresh OAuth2 tokens");
             if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
@@ -883,6 +885,8 @@ async fn account_worker(
                 state.mailbox.publish(Event::AccountError {
                     account_id,
                     message: error.friendly(),
+                    retryable: is_retryable(&error),
+                    details: error.to_string(),
                 });
                 tracing::warn!(%account_id, %error, "could not obtain the IMAP credential");
                 if !wait_with_backoff(&mut commands, &mut pending, backoff).await {
@@ -904,12 +908,16 @@ async fn account_worker(
                         state.mailbox.publish(Event::ActionFailed {
                             account_id,
                             message: error.friendly(),
+                            retryable: false,
+                            details: error.to_string(),
                         });
                     }
                     _ => {
                         state.mailbox.publish(Event::AccountError {
                             account_id,
                             message: error.friendly(),
+                            retryable: is_retryable(&error),
+                            details: error.to_string(),
                         });
                     }
                 }
@@ -1014,6 +1022,17 @@ fn is_offline_error(error: &Error) -> bool {
     ]
     .iter()
     .any(|needle| text.contains(needle))
+}
+
+/// Whether an account session failure should offer the user a "Retry" action.
+///
+/// Only connectivity failures are retryable: a re-sync may succeed once the
+/// network or server comes back. Auth, configuration, protocol and
+/// server-side failures keep failing until something changes, so offering
+/// Retry is noise. (User-initiated action failures are published as
+/// `ActionFailed` and never reach the retryable path.)
+fn is_retryable(error: &Error) -> bool {
+    is_offline_error(error)
 }
 
 fn next_backoff(current: Duration) -> Duration {
