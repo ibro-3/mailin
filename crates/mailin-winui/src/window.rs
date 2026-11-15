@@ -19,11 +19,11 @@ use mailin_core::{
 };
 use mailin_winui_sys::{
     Application, AutomationProperties, Button, CheckBox, ComboBox, ContentDialog,
-    ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType, IFrameworkElement,
-    IPanel, IToggleButton, IUIElement, IXmlNodeSerializer, KeyboardAccelerator, MenuFlyout,
-    MenuFlyoutItem, Orientation, ResourceDictionary, ScrollViewer, StackPanel, TextBlock, TextBox,
-    ToastNotification, ToastNotificationManager, VerticalAlignment, VirtualKey,
-    VirtualKeyModifiers, WebView2, Window, XamlRoot,
+    ContentDialogButton, DispatcherQueue, FrameworkElement, Grid, GridUnitType, IControl,
+    IFrameworkElement, IPanel, IToggleButton, IUIElement, IXmlNodeSerializer, KeyboardAccelerator,
+    MenuFlyout, MenuFlyoutItem, Orientation, ResourceDictionary, ScrollViewer, StackPanel,
+    TextBlock, TextBox, ToastNotification, ToastNotificationManager, ToggleButton,
+    VerticalAlignment, VirtualKey, VirtualKeyModifiers, WebView2, Window, XamlRoot,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -63,6 +63,9 @@ struct Selection {
 struct PendingAttachment {
     message_id: MessageId,
     attachment: AttachmentMeta,
+    /// Folder the attachment is written into without a dialog. `None` means
+    /// the user is asked where to save it.
+    target_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Default)]
@@ -74,13 +77,19 @@ struct State {
     /// Rows ticked for bulk actions. Always a subset of `messages`, so the
     /// count shown in the bulk bar matches what is on screen.
     selected: BTreeSet<MessageId>,
+    /// Keyboard cursor over the visible list (arrows/Space/Enter). Distinct
+    /// from the ticked set: ticking is for bulk actions, focus is for
+    /// navigation and opening a message.
+    focus: Option<MessageId>,
     outbox_entries: Vec<OutboxEntry>,
     /// The outbox entry the user picked in the list. The outbox actions work
     /// on this entry, never on an arbitrary one.
     outbox_selected: Option<i64>,
     show_outbox: bool,
     remote_allowed: Option<MessageId>,
-    pending_attachment: Option<PendingAttachment>,
+    /// Attachments whose bytes are still being fetched. A batch download
+    /// queues one entry per attachment.
+    pending_attachments: Vec<PendingAttachment>,
     /// Expanded thread roots (thread_root_key) for threaded view.
     expanded_threads: BTreeSet<String>,
 }
@@ -127,6 +136,13 @@ struct Widgets {
     body_plain: ScrollViewer,
     body_text: TextBlock,
     body_html: WebView2,
+    /// Find bar of the reader (F3). Hidden until the user asks for it.
+    find_bar: StackPanel,
+    find_entry: TextBox,
+    find_prev: Button,
+    find_next: Button,
+    find_status: TextBlock,
+    find_close: Button,
     body_notice: TextBlock,
     html_button: Button,
     reply_button: Button,
@@ -149,6 +165,17 @@ struct Widgets {
     shortcuts_window: std::cell::RefCell<Option<ContentDialog>>,
 }
 
+/// Undo state for move operations: the accumulated (message_id,
+/// source_folder_id) pairs of every action taken inside the current banner
+/// window. Merging keeps an earlier action's Undo alive when a second
+/// action replaces the banner. `batches` counts the merged actions (for
+/// the banner text). Shared via `Rc` so the auto-hide timer can close the
+/// merge window without owning the window.
+struct UndoFollowup {
+    pairs: Vec<(MessageId, FolderId)>,
+    batches: u32,
+}
+
 pub struct MainWindow {
     app: Arc<AppState>,
     state: Mutex<State>,
@@ -157,10 +184,8 @@ pub struct MainWindow {
     /// Whether the current OpenPGP message has been unwrapped.
     pgp_shown: AtomicBool,
     closed: AtomicBool,
-    /// Undo state for move operations: (message_id, source_folder_id) pairs,
-    /// one per message, so mixed selections restore each message to where it
-    /// came from.
-    last_move: Mutex<Option<Vec<(MessageId, FolderId)>>>,
+    /// Undo state for move operations; see [`UndoFollowup`].
+    undo_followup: std::rc::Rc<std::cell::RefCell<UndoFollowup>>,
     /// The auto-hide timer for the undo banner; exactly one at a time.
     undo_timer: std::rc::Rc<std::cell::RefCell<Option<mailin_winui_sys::DispatcherQueueTimer>>>,
     events: ui::Revokers,
@@ -181,6 +206,17 @@ pub struct MainWindow {
     /// Kept in sync with `checkboxes`/`State::messages` on full rebuilds.
     /// Runtime incremental apply/scroll/focus preservation: Windows CI.
     checkboxes_by_id: std::cell::RefCell<HashMap<MessageId, CheckBox>>,
+    /// Row content buttons for the currently rendered list, keyed by id.
+    /// Used to repaint the keyboard focus cursor and reveal the row's
+    /// quick-actions on focus.
+    rows_by_id: std::cell::RefCell<HashMap<MessageId, Button>>,
+    /// Quick-action bars of the currently rendered rows, keyed by id.
+    actions_by_id: std::cell::RefCell<HashMap<MessageId, StackPanel>>,
+    /// Whether the find bar of the reader is open.
+    find_open: std::cell::Cell<bool>,
+    /// Accounts with a sync running; the Sync button stays disabled while
+    /// the set is not empty.
+    syncing_accounts: std::cell::RefCell<std::collections::HashSet<AccountId>>,
     widgets: Widgets,
 }
 
@@ -194,10 +230,87 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.banner, !text.is_empty());
     }
 
+    /// Move the keyboard focus cursor to `focus` (or clear it). Repaints
+    /// the focus ring on the two affected rows and reveals the focused
+    /// row's quick actions.
+    fn set_focus(&self, focus: Option<MessageId>) {
+        let old = {
+            let mut state = self.state();
+            std::mem::replace(&mut state.focus, focus)
+        };
+        if old == focus {
+            return;
+        }
+        if let Some(old) = old {
+            self.style_focused_row(old, false);
+        }
+        if let Some(new) = focus {
+            self.style_focused_row(new, true);
+        }
+    }
+
+    /// Paint the focus ring on a row and show/hide its quick-actions bar.
+    fn style_focused_row(&self, id: MessageId, focused: bool) {
+        let (button, bar) = {
+            let rows = self.rows_by_id.borrow();
+            let bars = self.actions_by_id.borrow();
+            (rows.get(&id).cloned(), bars.get(&id).cloned())
+        };
+        if let Some(button) = button {
+            let hex = if focused {
+                design_tokens::tokens().colors.accent
+            } else {
+                "#00000000"
+            };
+            if let Ok(brush) = ui::solid_brush(hex)
+                && let Ok(control) = button.cast::<IControl>()
+            {
+                let thickness = if focused { 2.0 } else { 0.0 };
+                let _ = control.SetBorderBrush(&brush);
+                let _ = control.SetBorderThickness(mailin_winui_sys::Thickness {
+                    left: thickness,
+                    top: thickness,
+                    right: thickness,
+                    bottom: thickness,
+                });
+            }
+        }
+        if let Some(bar) = bar {
+            let _ = ui::set_visible(&bar, focused);
+        }
+    }
+
+    /// Expand or collapse a thread in the list and rebuild it.
+    fn set_thread_expanded(self: &Rc<Self>, key: &str, expanded: bool) {
+        {
+            let mut state = self.state();
+            if expanded {
+                state.expanded_threads.insert(key.to_owned());
+            } else {
+                state.expanded_threads.remove(key);
+            }
+        }
+        self.refresh_messages();
+    }
+
     /// Show the undo banner for a folder-moving action and remember the
-    /// per-message source folders. Undo is a single fixed button registered
-    /// once at creation time; this only records what undo should do.
+    /// per-message source folders. Pending undo pairs accumulate across
+    /// actions taken inside the same banner window, so a second move never
+    /// discards the first's Undo; the timer hides the banner and drops the
+    /// pending set when the window closes.
     fn show_undo_banner(&self, text: &str, pairs: Vec<(MessageId, FolderId)>) {
+        let banner_text = {
+            let mut followup = self.undo_followup.borrow_mut();
+            let had_pending = !followup.pairs.is_empty();
+            followup.pairs.extend(pairs);
+            followup.batches = followup.batches.saturating_add(1);
+            let total = followup.pairs.len();
+            if had_pending {
+                format!("{total} messages moved — Undo restores all")
+            } else {
+                text.to_owned()
+            }
+        };
         let _ = ui::set_visible(&self.widgets.undo_banner, true);
         // Update the text in the undo banner (first child is the text block)
         if let Ok(children) = self
@@ -209,12 +322,12 @@ impl MainWindow {
             && let Ok(child) = children.GetAt(0)
             && let Ok(text_block) = child.cast::<TextBlock>()
         {
-            let _ = text_block.SetText(text);
+            let _ = text_block.SetText(&banner_text);
         }
-        *self.last_move.lock().unwrap_or_else(|err| err.into_inner()) = Some(pairs);
 
         // Auto-hide after 5 seconds. A newer banner drops the previous timer,
-        // so only the newest one can hide it.
+        // so only the newest one can hide it. Hiding also drops the pending
+        // undo set, closing the merge window.
         let Ok(queue) = DispatcherQueue::GetForCurrentThread() else {
             return;
         };
@@ -232,9 +345,14 @@ impl MainWindow {
         let _ = timer.SetIsRepeating(false);
         let banner = self.widgets.undo_banner.clone();
         let slot = self.undo_timer.clone();
+        let followup = Rc::clone(&self.undo_followup);
         let _ = timer.Tick(move |_, _| {
             let _ = ui::set_visible(&banner, false);
             *slot.borrow_mut() = None;
+            // Close the merge window: the pending pairs go with the banner.
+            let mut followup = followup.borrow_mut();
+            followup.pairs.clear();
+            followup.batches = 0;
         });
         let _ = timer.Start();
         // Dropping the previous timer (if any) cancels its pending hide.
@@ -261,18 +379,18 @@ impl MainWindow {
     /// Restore whatever the last undoable action moved, grouped by the
     /// folder each message came from.
     fn undo_last_move(self: &Rc<Self>) {
-        let pending = self
-            .last_move
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-            .take();
-        let Some(pairs) = pending else {
+        let pending = {
+            let mut followup = self.undo_followup.borrow_mut();
+            followup.batches = 0;
+            std::mem::take(&mut followup.pairs)
+        };
+        if pending.is_empty() {
             let _ = ui::set_visible(&self.widgets.undo_banner, false);
             return;
-        };
+        }
         let mut groups: std::collections::HashMap<FolderId, Vec<MessageId>> =
             std::collections::HashMap::new();
-        for (id, folder) in pairs {
+        for (id, folder) in pending {
             groups.entry(folder).or_default().push(id);
         }
         for (folder, ids) in groups {
@@ -295,13 +413,11 @@ impl MainWindow {
     }
 
     fn show_error(&self, message: &str) {
-        let mut text = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        if text.chars().count() > 180 {
-            text = text.chars().take(179).collect();
-            text.push('…');
-        }
+        // Collapse the whitespace, but keep the whole message: truncating
+        // it hides the interesting part of a chain of errors.
+        let text = message.split_whitespace().collect::<Vec<_>>().join(" ");
         self.show_banner(&format!("Problem: {text}"));
-        tracing::debug!(%message, "account error surfaced in the UI");
+        tracing::warn!(%message, "an error surfaced in the UI");
     }
 
     /// Unwrap a UI-building result, surfacing the failure through
@@ -327,6 +443,42 @@ impl MainWindow {
     }
 
     /// Show a simple toast notification with no action buttons.
+    /// Attach the action buttons to the toast XML. Every step is checked:
+    /// a failure is reported so the caller can fall back to a toast without
+    /// buttons rather than showing a notification that does nothing.
+    fn attach_toast_actions(xml: &mailin_winui_sys::XmlDocument, actions_xml: &str) -> Result<()> {
+        let actions_doc = mailin_winui_sys::activate::<
+            mailin_winui_sys::XmlDocument,
+            mailin_winui_sys::XmlDocument,
+        >()
+        .context("could not create the toast actions document")?;
+        // `LoadXml` lives on `IXmlDocumentIO`, one interface up from the
+        // document's primary interface.
+        let io = actions_doc
+            .cast::<mailin_winui_sys::IXmlDocumentIO>()
+            .context("could not cast the toast actions document")?;
+        io.LoadXml(actions_xml)
+            .context("could not parse the toast actions")?;
+        let actions_element = actions_doc
+            .DocumentElement()
+            .context("could not read the toast actions root")?;
+        let doc_element = xml
+            .DocumentElement()
+            .context("could not read the toast document root")?;
+        // `AppendChild` takes an `IXmlNode`.
+        let doc_node = doc_element
+            .cast::<mailin_winui_sys::IXmlNode>()
+            .context("could not cast the toast root")?;
+        let action_node = actions_element
+            .cast::<mailin_winui_sys::IXmlNode>()
+            .context("could not cast the toast actions")?;
+        doc_node
+            .AppendChild(&action_node)
+            .context("could not attach the toast actions")?;
+        Ok(())
+    }
+
+    /// Show a desktop notification without action buttons.
     fn show_simple_toast(&self, title: &str, body: &str) {
         if !self.app.config().ui.notifications {
             return;
@@ -425,32 +577,13 @@ impl MainWindow {
             </actions>"#
         );
 
-        // Parse the actions XML and append to the toast XML
-        if let Ok(actions_doc) = mailin_winui_sys::activate::<
-            mailin_winui_sys::XmlDocument,
-            mailin_winui_sys::XmlDocument,
-        >() {
-            // `LoadXml` lives on `IXmlDocumentIO`, one interface up from the
-            // document's primary interface.
-            if let Ok(io) = actions_doc.cast::<mailin_winui_sys::IXmlDocumentIO>() {
-                let _ = io.LoadXml(&actions_xml);
-            }
-            if let Ok(actions_element) = actions_doc.DocumentElement() {
-                match xml.DocumentElement() {
-                    Ok(doc_element) => {
-                        // `AppendChild` takes an `IXmlNode`.
-                        if let (Ok(doc_node), Ok(action_node)) = (
-                            doc_element.cast::<mailin_winui_sys::IXmlNode>(),
-                            actions_element.cast::<mailin_winui_sys::IXmlNode>(),
-                        ) {
-                            let _ = doc_node.AppendChild(&action_node);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to read the toast document root")
-                    }
-                }
-            }
+        // Parse the actions XML and append to the toast XML. A failure here
+        // must not lose the notification: fall back to a toast without
+        // buttons instead of dropping it.
+        if let Err(error) = Self::attach_toast_actions(&xml, &actions_xml) {
+            tracing::warn!(%error, "could not attach the toast actions");
+            self.show_simple_toast("New mail", text);
+            return;
         }
 
         let toast = match ToastNotification::CreateToastNotification(&xml) {
@@ -471,14 +604,22 @@ impl MainWindow {
                 let rest = argument.strip_prefix(prefix)?;
                 let mut parts = rest.splitn(2, ':');
                 let account_id: AccountId = parts.next()?.parse().ok()?;
-                let ids: Vec<MessageId> = parts
-                    .next()
-                    .map(|list| {
-                        list.split(',')
-                            .filter_map(|s| s.parse::<i64>().ok().map(MessageId))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let list = parts.next()?;
+                // A truncated or malformed id list must not be turned into
+                // "every unread message": an id that does not parse fails
+                // the whole list, and the list is capped.
+                const MAX_IDS: usize = 500;
+                let mut ids = Vec::new();
+                for entry in list.split(',') {
+                    if ids.len() >= MAX_IDS {
+                        tracing::warn!("the toast carried more than {MAX_IDS} message ids");
+                        return None;
+                    }
+                    ids.push(MessageId(entry.parse::<i64>().ok()?));
+                }
+                if ids.is_empty() {
+                    return None;
+                }
                 Some((account_id, ids))
             }
             // The activation carries the arguments interface behind the
@@ -915,6 +1056,22 @@ impl MainWindow {
                 .all(|(i, o)| *o == Some(i));
         let _ = identical_ids; // reserved for incremental fast-path (Windows CI)
 
+        // Rebuild state: restore the scroll offset and the keyboard cursor
+        // when the rebuilt view is the same view.
+        let (scroll_offset, prior_key, prior_focus) = {
+            let state = self.state();
+            (
+                self.widgets.message_scroll.VerticalOffset().ok(),
+                (
+                    state.selection.folder,
+                    state.selection.search,
+                    state.selection.query.clone(),
+                    state.show_outbox,
+                ),
+                state.focus,
+            )
+        };
+
         self.message_events.replace();
         let _ = ui::clear(&self.widgets.message_list);
         self.checkboxes.borrow_mut().clear();
@@ -925,31 +1082,54 @@ impl MainWindow {
             state.selected.retain(|id| visible.contains(id));
             state.selected.clone()
         };
+        // Keep the keyboard cursor if the focused message is still on screen.
+        let focus = prior_focus.filter(|id| visible.contains(id));
+        {
+            let mut state = self.state();
+            state.focus = focus;
+        }
+        self.checkboxes_by_id.borrow_mut().clear();
+        self.rows_by_id.borrow_mut().clear();
+        self.actions_by_id.borrow_mut().clear();
         let quick_actions_enabled = self.app.config().ui.quick_actions;
         let quick_action_items = self.app.config().ui.quick_action_items.clone();
         for message in &messages {
             let ticked = selected.contains(&message.id);
             let density = self.app.config().ui.message_list_density;
-            if let Ok((row, button, checkbox, actions_bar)) =
-                message_row(message, now, density, ticked)
+            if let Ok((row, button, checkbox, actions_bar, chevron)) =
+                message_row(message, now, density, ticked, false)
             {
-                let this = Rc::clone(self);
-                let open = message.clone();
-                if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
-                {
-                    self.message_events.keep(revoker);
+                // The flat view does not expand threads: the control only
+                // says that the row is a thread root.
+                if let Some(chevron) = &chevron {
+                    let _ = ui::set_enabled(chevron, false);
+                    let _ = AutomationProperties::SetName(chevron, "Thread root");
                 }
                 let id = message.id;
+                let this = Rc::clone(self);
+                let open = message.clone();
+                if let Ok(revoker) = ui::on_click(&button, move || {
+                    this.set_focus(Some(id));
+                    this.open_message(open.clone())
+                }) {
+                    self.message_events.keep(revoker);
+                }
                 if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
                     if let Ok(revoker) = toggle.Checked({
                         let this = Rc::clone(self);
-                        move |_, _| this.set_selected(id, true)
+                        move |_, _| {
+                            this.set_selected(id, true);
+                            this.set_focus(Some(id));
+                        }
                     }) {
                         self.message_events.keep(revoker);
                     }
                     if let Ok(revoker) = toggle.Unchecked({
                         let this = Rc::clone(self);
-                        move |_, _| this.set_selected(id, false)
+                        move |_, _| {
+                            this.set_selected(id, false);
+                            this.set_focus(Some(id));
+                        }
                     }) {
                         self.message_events.keep(revoker);
                     }
@@ -992,6 +1172,23 @@ impl MainWindow {
                     .borrow_mut()
                     .insert(id, checkbox.clone());
                 self.checkboxes.borrow_mut().push(checkbox);
+                self.rows_by_id.borrow_mut().insert(id, button.clone());
+                if let Some(bar) = &actions_bar {
+                    self.actions_by_id.borrow_mut().insert(id, bar.clone());
+                }
+                // U22: the row is focusable by keyboard; moving XAML focus
+                // onto it moves the keyboard cursor too (and reveals the
+                // row's quick actions via `set_focus`).
+                if let Ok(element) = button.cast::<mailin_winui_sys::IUIElement>() {
+                    let this_weak = Rc::downgrade(self);
+                    if let Ok(revoker) = element.GotFocus(move |_, _| {
+                        if let Some(this) = this_weak.upgrade() {
+                            this.set_focus(Some(id));
+                        }
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                }
                 let _ = ui::append(&self.widgets.message_list, &row);
             }
         }
@@ -1014,6 +1211,24 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.archive_button, true);
         let _ = ui::set_visible(&self.widgets.trash_button, true);
         let _ = ui::set_visible(&self.widgets.junk_button, true);
+        // Restore the scroll offset when the rebuilt view is the same view.
+        let current_key = {
+            let state = self.state();
+            (
+                state.selection.folder,
+                state.selection.search,
+                state.selection.query.clone(),
+                state.show_outbox,
+            )
+        };
+        if let Some(offset) = scroll_offset
+            && current_key == prior_key
+        {
+            let _ = self.widgets.message_scroll.ScrollToVerticalOffset(offset);
+        }
+        if let Some(focus) = self.state().focus {
+            self.style_focused_row(focus, true);
+        }
         self.update_bulk_bar();
     }
 
@@ -1062,42 +1277,98 @@ impl MainWindow {
 
         let empty = flat_messages.is_empty();
 
+        // Rebuild state: restore the scroll offset and the keyboard cursor
+        // when the rebuilt view is the same view.
+        let (scroll_offset, prior_key, prior_focus) = {
+            let state = self.state();
+            (
+                self.widgets.message_scroll.VerticalOffset().ok(),
+                (
+                    state.selection.folder,
+                    state.selection.search,
+                    state.selection.query.clone(),
+                    state.show_outbox,
+                ),
+                state.focus,
+            )
+        };
+
         self.message_events.replace();
         let _ = ui::clear(&self.widgets.message_list);
         self.checkboxes.borrow_mut().clear();
         self.checkboxes_by_id.borrow_mut().clear();
-        // The ticked set never outlives the rows that are on screen.
+        self.rows_by_id.borrow_mut().clear();
+        self.actions_by_id.borrow_mut().clear();
         let visible: BTreeSet<MessageId> = flat_messages.iter().map(|message| message.id).collect();
         let selected = {
             let mut state = self.state();
             state.selected.retain(|id| visible.contains(id));
             state.selected.clone()
         };
+        // Keep the keyboard cursor if the focused message is still on screen.
+        let focus = prior_focus.filter(|id| visible.contains(id));
+        {
+            let mut state = self.state();
+            state.focus = focus;
+        }
         let quick_actions_enabled = self.app.config().ui.quick_actions;
         let quick_action_items = self.app.config().ui.quick_action_items.clone();
         for message in &flat_messages {
             let ticked = selected.contains(&message.id);
             let density = self.app.config().ui.message_list_density;
-            if let Ok((row, button, checkbox, actions_bar)) =
-                message_row(message, now, density, ticked)
+            let root_key = message
+                .thread_root_key
+                .as_ref()
+                .or(message.message_id.as_ref())
+                .cloned();
+            let thread_expanded = root_key.as_ref().is_some_and(|key| expanded.contains(key));
+            if let Ok((row, button, checkbox, actions_bar, chevron)) =
+                message_row(message, now, density, ticked, thread_expanded)
             {
-                let this = Rc::clone(self);
-                let open = message.clone();
-                if let Ok(revoker) = ui::on_click(&button, move || this.open_message(open.clone()))
+                // The chevron expands and collapses the thread.
+                if let Some(chevron) = &chevron
+                    && let Some(key) = root_key
+                    && let Ok(toggle) = chevron.cast::<IToggleButton>()
                 {
-                    self.message_events.keep(revoker);
-                }
-                let id = message.id;
-                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                    let key_expand = key.clone();
                     if let Ok(revoker) = toggle.Checked({
                         let this = Rc::clone(self);
-                        move |_, _| this.set_selected(id, true)
+                        move |_, _| this.set_thread_expanded(&key_expand, true)
                     }) {
                         self.message_events.keep(revoker);
                     }
                     if let Ok(revoker) = toggle.Unchecked({
                         let this = Rc::clone(self);
-                        move |_, _| this.set_selected(id, false)
+                        move |_, _| this.set_thread_expanded(&key, false)
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                }
+                let id = message.id;
+                let this = Rc::clone(self);
+                let open = message.clone();
+                if let Ok(revoker) = ui::on_click(&button, move || {
+                    this.set_focus(Some(id));
+                    this.open_message(open.clone())
+                }) {
+                    self.message_events.keep(revoker);
+                }
+                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
+                    if let Ok(revoker) = toggle.Checked({
+                        let this = Rc::clone(self);
+                        move |_, _| {
+                            this.set_selected(id, true);
+                            this.set_focus(Some(id));
+                        }
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                    if let Ok(revoker) = toggle.Unchecked({
+                        let this = Rc::clone(self);
+                        move |_, _| {
+                            this.set_selected(id, false);
+                            this.set_focus(Some(id));
+                        }
                     }) {
                         self.message_events.keep(revoker);
                     }
@@ -1136,10 +1407,31 @@ impl MainWindow {
                         }
                     }
                 }
+                // U22: the row is focusable by keyboard; moving XAML focus
+                // onto it moves the keyboard cursor too (and reveals the
+                // row's quick actions via `set_focus`).
+                if let Ok(element) = button.cast::<mailin_winui_sys::IUIElement>() {
+                    let this_weak = Rc::downgrade(self);
+                    if let Ok(revoker) = element.GotFocus(move |_, _| {
+                        if let Some(this) = this_weak.upgrade() {
+                            this.set_focus(Some(id));
+                        }
+                    }) {
+                        self.message_events.keep(revoker);
+                    }
+                }
                 self.checkboxes_by_id
                     .borrow_mut()
                     .insert(message.id, checkbox.clone());
                 self.checkboxes.borrow_mut().push(checkbox);
+                self.rows_by_id
+                    .borrow_mut()
+                    .insert(message.id, button.clone());
+                if let Some(bar) = &actions_bar {
+                    self.actions_by_id
+                        .borrow_mut()
+                        .insert(message.id, bar.clone());
+                }
                 let _ = ui::append(&self.widgets.message_list, &row);
             }
         }
@@ -1162,6 +1454,24 @@ impl MainWindow {
         let _ = ui::set_visible(&self.widgets.archive_button, true);
         let _ = ui::set_visible(&self.widgets.trash_button, true);
         let _ = ui::set_visible(&self.widgets.junk_button, true);
+        // Restore the scroll offset when the rebuilt view is the same view.
+        let current_key = {
+            let state = self.state();
+            (
+                state.selection.folder,
+                state.selection.search,
+                state.selection.query.clone(),
+                state.show_outbox,
+            )
+        };
+        if let Some(offset) = scroll_offset
+            && current_key == prior_key
+        {
+            let _ = self.widgets.message_scroll.ScrollToVerticalOffset(offset);
+        }
+        if let Some(focus) = self.state().focus {
+            self.style_focused_row(focus, true);
+        }
         self.update_bulk_bar();
     }
 
@@ -1507,8 +1817,78 @@ impl MainWindow {
         self.render_body(message_id);
     }
 
+    /// Show or hide the find bar (F3).
+    fn toggle_find_bar(self: &Rc<Self>) {
+        if self.find_open.get() {
+            self.hide_find_bar();
+        } else {
+            self.show_find_bar();
+        }
+    }
+
+    /// Open the find bar. Only the HTML reader can be searched; the
+    /// plain-text view has no search support.
+    fn show_find_bar(self: &Rc<Self>) {
+        if !self.html_mode.load(Ordering::Relaxed) {
+            self.show_banner("Find works in the HTML view of a message.");
+            return;
+        }
+        self.find_open.set(true);
+        let _ = ui::set_visible(&self.widgets.find_bar, true);
+        if let Ok(element) = self.widgets.find_entry.cast::<IUIElement>() {
+            let _ = element.Focus(mailin_winui_sys::FocusState::Programmatic);
+        }
+    }
+
+    /// Close the find bar and drop the match highlights.
+    fn hide_find_bar(&self) {
+        let was_open = self.find_open.replace(false);
+        let _ = ui::set_visible(&self.widgets.find_bar, false);
+        let _ = self.widgets.find_status.SetText("");
+        if was_open {
+            self.find_clear();
+        }
+    }
+
+    /// Search the open message and highlight every match.
+    fn find_in_message(&self, query: &str) {
+        if query.trim().is_empty() {
+            self.find_clear();
+            return;
+        }
+        let script = format!(
+            "__mailinFind({});",
+            serde_json::to_string(query).unwrap_or_else(|_| "\"\"".to_owned())
+        );
+        if let Err(error) = self.widgets.body_html.ExecuteScriptAsync(&script) {
+            tracing::warn!(%error, "could not run the find script");
+        }
+    }
+
+    /// Move to the next (delta = 1) or previous (delta = -1) match.
+    fn find_step(&self, delta: i32) {
+        let script = format!("__mailinFindStep({delta});");
+        if let Err(error) = self.widgets.body_html.ExecuteScriptAsync(&script) {
+            tracing::warn!(%error, "could not run the find script");
+        }
+    }
+
+    /// Remove the match highlights from the reader.
+    fn find_clear(&self) {
+        if let Err(error) = self
+            .widgets
+            .body_html
+            .ExecuteScriptAsync("__mailinFindClear();")
+        {
+            tracing::warn!(%error, "could not clear the find highlights");
+        }
+    }
+
     fn render_body(self: &Rc<Self>, message_id: MessageId) {
         let html_mode = self.html_mode.load(Ordering::Relaxed);
+        // A new message replaces the reader content: the previous search
+        // and its highlights belong to the old document.
+        self.hide_find_bar();
         let _ = ui::set_visible(&self.widgets.body_plain, false);
         let _ = ui::set_visible(&self.widgets.body_html, false);
         let _ = ui::set_visible(&self.widgets.remote_panel, false);
@@ -1573,7 +1953,11 @@ impl MainWindow {
                         || self.state().remote_allowed == Some(message_id)
                         || trusted;
                     let images = self.inline_images(message_id);
-                    let document = html::document(html_body, allow_remote, &images);
+                    let (document, nonce) =
+                        html::document_with_nonce(html_body, allow_remote, &images);
+                    // The find-in-message script is appended after
+                    // sanitizing, so it never runs message content.
+                    let document = inject_find_script(&document, &nonce);
                     let _ = self.widgets.body_html.NavigateToString(&document);
                     let _ = ui::set_visible(&self.widgets.body_html, true);
                     // M4-D: report inline images whose `cid:` part is missing.
@@ -1754,9 +2138,12 @@ impl MainWindow {
                 let mid = message_id;
                 let visible_clone = visible.clone();
                 let revoker = ui::on_click(&download_all, move || {
-                    for att in &visible_clone {
-                        this.save_attachment(mid, att.clone());
-                    }
+                    // One folder for the whole batch, like the GTK client:
+                    // a dialog per attachment would be a wall of dialogs.
+                    let Some(dir) = platform::pick_folder("Save attachments to…") else {
+                        return;
+                    };
+                    this.download_all_to(mid, &visible_clone, dir);
                 })?;
                 self.attachment_events.keep(revoker);
                 ui::append(&download_all_row, &download_all)?;
@@ -1915,41 +2302,64 @@ impl MainWindow {
     }
 
     fn request_attachment(&self, message_id: MessageId, attachment: AttachmentMeta) {
-        self.state().pending_attachment = Some(PendingAttachment {
+        self.state().pending_attachments.push(PendingAttachment {
             message_id,
             attachment,
+            target_dir: None,
         });
         self.app.engine.refresh_body(message_id);
         self.show_banner("Downloading attachment…");
     }
 
+    /// Queue an attachment whose bytes are not cached yet for a folder
+    /// chosen by the user (the "Download all" flow).
+    fn request_attachment_to(
+        &self,
+        message_id: MessageId,
+        attachment: AttachmentMeta,
+        dir: std::path::PathBuf,
+    ) {
+        self.state().pending_attachments.push(PendingAttachment {
+            message_id,
+            attachment,
+            target_dir: Some(dir),
+        });
+        self.app.engine.refresh_body(message_id);
+    }
+
     fn resolve_pending_attachment(&self, message_id: MessageId) {
+        // Every queued attachment of this message is written now; a batch
+        // download queues one entry per attachment.
         let pending = {
             let mut state = self.state();
-            if state
-                .pending_attachment
-                .as_ref()
-                .is_some_and(|pending| pending.message_id == message_id)
-            {
-                state.pending_attachment.take()
-            } else {
-                None
+            let mut resolved = Vec::new();
+            let mut rest = Vec::new();
+            for entry in state.pending_attachments.drain(..) {
+                if entry.message_id == message_id {
+                    resolved.push(entry);
+                } else {
+                    rest.push(entry);
+                }
             }
+            state.pending_attachments = rest;
+            resolved
         };
-        let Some(pending) = pending else {
-            return;
-        };
-        match self
-            .app
-            .mailin
-            .attachment(message_id, &pending.attachment.part_id)
-            .ok()
-            .flatten()
-            .and_then(|data| data.data)
-        {
-            Some(bytes) => self.write_attachment(&pending.attachment, bytes),
-            None => {
-                self.show_error("Could not load the attachment; it may no longer be available.")
+        for pending in pending {
+            match self
+                .app
+                .mailin
+                .attachment(message_id, &pending.attachment.part_id)
+                .ok()
+                .flatten()
+                .and_then(|data| data.data)
+            {
+                Some(bytes) => match pending.target_dir {
+                    Some(dir) => self.write_attachment_to(&pending.attachment, bytes, &dir),
+                    None => self.write_attachment(&pending.attachment, bytes),
+                },
+                None => {
+                    self.show_error("Could not load the attachment; it may no longer be available.")
+                }
             }
         }
     }
@@ -1962,6 +2372,75 @@ impl MainWindow {
             Ok(()) => self.show_banner("Attachment saved"),
             Err(message) => self.show_error(&message),
         }
+    }
+
+    /// Write an attachment into a folder the user picked earlier.
+    fn write_attachment_to(
+        &self,
+        attachment: &AttachmentMeta,
+        bytes: Vec<u8>,
+        dir: &std::path::Path,
+    ) {
+        let path = dir.join(crate::platform::safe_file_name(&attachment.display_name()));
+        match platform::save_attachment(&path, &bytes) {
+            Ok(()) => self.show_banner(&format!(
+                "Saved {}",
+                crate::platform::safe_file_name(&attachment.display_name())
+            )),
+            Err(message) => self.show_error(&message),
+        }
+    }
+
+    /// Save every attachment of a message into one folder. Attachments whose
+    /// bytes are not cached yet are queued and written when they arrive;
+    /// the failures are reported together.
+    fn download_all_to(
+        self: &Rc<Self>,
+        message_id: MessageId,
+        attachments: &[AttachmentMeta],
+        dir: std::path::PathBuf,
+    ) {
+        let total = attachments.len();
+        let mut saved = 0usize;
+        let mut queued = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for attachment in attachments {
+            let name = crate::platform::safe_file_name(&attachment.display_name());
+            match self.app.mailin.attachment(message_id, &attachment.part_id) {
+                Ok(Some(data)) => match data.data {
+                    Some(bytes) => match platform::save_attachment(&dir.join(&name), &bytes) {
+                        Ok(()) => saved += 1,
+                        Err(error) => failures.push(format!("{name}: {error}")),
+                    },
+                    None => {
+                        queued += 1;
+                        self.request_attachment_to(message_id, attachment.clone(), dir.clone());
+                    }
+                },
+                Ok(None) => {
+                    queued += 1;
+                    self.request_attachment_to(message_id, attachment.clone(), dir.clone());
+                }
+                Err(error) => failures.push(format!("{name}: {error}")),
+            }
+        }
+        let mut message = if queued > 0 {
+            format!("Saved {saved} of {total}; downloading {queued} more…")
+        } else if failures.is_empty() {
+            format!(
+                "Saved {}",
+                mailin_core::plural(saved, "attachment", "attachments")
+            )
+        } else {
+            format!(
+                "Saved {saved}, couldn't save {}",
+                mailin_core::plural(failures.len(), "attachment", "attachments")
+            )
+        };
+        if let Some(first) = failures.first() {
+            message.push_str(&format!(" ({first})"));
+        }
+        self.show_banner(&message);
     }
 
     fn update_actions(&self, message: &MessageHeader) {
@@ -2059,6 +2538,112 @@ impl MainWindow {
         );
     }
 
+    /// The ids an accelerator acts on: everything ticked, or the keyboard
+    /// cursor when nothing is ticked, or the open reader message.
+    fn action_ids(&self) -> Vec<MessageId> {
+        let state = self.state();
+        if !state.selected.is_empty() {
+            return state.selected.iter().copied().collect();
+        }
+        if let Some(focus) = state.focus {
+            return vec![focus];
+        }
+        state.selection.message.into_iter().collect()
+    }
+
+    /// Untick every row, leaving the keyboard cursor alone. Accelerator
+    /// actions call this after the engine acks the command; the row rebuild
+    /// that follows re-syncs the checkboxes anyway.
+    fn clear_tick(&self) {
+        {
+            let mut state = self.state();
+            state.selected.clear();
+        }
+        self.checkboxes.borrow_mut().clear();
+        self.checkboxes_by_id.borrow_mut().clear();
+        self.update_bulk_bar();
+    }
+
+    fn plural_messages(count: usize) -> String {
+        mailin_core::plural(count, "message", "messages")
+    }
+
+    fn archive_ids(&self, ids: &[MessageId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        let pairs = self.undo_pairs(ids);
+        self.app.engine.archive_messages(ids);
+        let text = if count == 1 {
+            "Archived 1 message".to_owned()
+        } else {
+            format!("Archived {}", Self::plural_messages(count))
+        };
+        self.show_undo_banner(&text, pairs);
+        self.clear_tick();
+    }
+
+    fn delete_ids(&self, ids: &[MessageId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        if self.current_folder_is_trash() {
+            self.app.engine.permanently_delete_messages(ids);
+            self.show_banner(&format!(
+                "Deleted {} permanently",
+                Self::plural_messages(count)
+            ));
+            self.clear_tick();
+            return;
+        }
+        let pairs = self.undo_pairs(ids);
+        self.app.engine.delete_messages(ids);
+        let text = if count == 1 {
+            "Moved 1 message to Trash".to_owned()
+        } else {
+            format!("Moved {} to Trash", Self::plural_messages(count))
+        };
+        self.show_undo_banner(&text, pairs);
+        self.clear_tick();
+    }
+
+    fn permanently_delete_ids(&self, ids: &[MessageId]) {
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        self.app.engine.permanently_delete_messages(ids);
+        self.show_banner(&format!(
+            "Deleted {} permanently",
+            Self::plural_messages(count)
+        ));
+        self.clear_tick();
+    }
+
+    fn junk_ids(&self, ids: &[MessageId], junk: bool) {
+        if ids.is_empty() {
+            return;
+        }
+        let count = ids.len();
+        let pairs = self.undo_pairs(ids);
+        self.app.engine.mark_messages_junk(ids, junk);
+        let text = if junk {
+            if count == 1 {
+                "Marked 1 message as Junk".to_owned()
+            } else {
+                format!("Marked {} as Junk", Self::plural_messages(count))
+            }
+        } else if count == 1 {
+            "Moved 1 message to Inbox".to_owned()
+        } else {
+            format!("Moved {} to Inbox", Self::plural_messages(count))
+        };
+        self.show_undo_banner(&text, pairs);
+        self.clear_tick();
+    }
+
     /// Run a quick action on a specific message (from hover/swipe).
     fn run_quick_action(&self, action: mailin_core::config::QuickAction, message_id: MessageId) {
         use mailin_core::config::QuickAction;
@@ -2112,12 +2697,11 @@ impl MainWindow {
     /// `ids` are the message IDs the toast was about; when it is empty the
     /// action falls back to the account's unread inbox messages.
     fn notification_mark_read(&self, account_id: AccountId, ids: Vec<MessageId>) {
-        let ids = if ids.is_empty() {
-            self.get_unread_inbox_messages(account_id)
-        } else {
-            ids
-        };
         if ids.is_empty() {
+            // An empty id list means the toast arguments were truncated or
+            // malformed. Acting on "every unread message" instead would
+            // touch mail the user never saw in the notification.
+            tracing::warn!(%account_id, "the toast carried no message ids; nothing marked");
             return;
         }
         self.app
@@ -2128,12 +2712,9 @@ impl MainWindow {
 
     /// Handle "Archive" action from a notification.
     fn notification_archive(&self, account_id: AccountId, ids: Vec<MessageId>) {
-        let ids = if ids.is_empty() {
-            self.get_unread_inbox_messages(account_id)
-        } else {
-            ids
-        };
         if ids.is_empty() {
+            // See `notification_mark_read`: an empty list never means "all".
+            tracing::warn!(%account_id, "the toast carried no message ids; nothing archived");
             return;
         }
         self.app.engine.archive_messages(&ids);
@@ -2158,25 +2739,6 @@ impl MainWindow {
             return;
         };
         self.open_message(header);
-    }
-
-    /// Get unread message IDs from the inbox folder for an account.
-    fn get_unread_inbox_messages(&self, account_id: AccountId) -> Vec<MessageId> {
-        let Ok(folders) = self.app.mailin.list_folders(&account_id) else {
-            return Vec::new();
-        };
-        let inbox_folder = folders.iter().find(|f| f.role == FolderRole::Inbox);
-        let Some(folder) = inbox_folder else {
-            return Vec::new();
-        };
-        let Ok(messages) = self.app.mailin.list_messages(folder.id, 0, 100) else {
-            return Vec::new();
-        };
-        messages
-            .into_iter()
-            .filter(|m| !m.is_seen())
-            .map(|m| m.id)
-            .collect()
     }
 
     // --------------------------------------------------------- bulk actions
@@ -2301,9 +2863,8 @@ impl MainWindow {
         self.clear_bulk_selection();
     }
 
-    /// Ask for a destination folder and move every ticked row there.
-    fn bulk_move(self: &Rc<Self>) {
-        let ids = self.selected_ids();
+    /// Ask for a destination folder and move the given messages there.
+    fn move_ids(self: &Rc<Self>, ids: Vec<MessageId>) {
         if ids.is_empty() {
             return;
         }
@@ -2337,6 +2898,12 @@ impl MainWindow {
         if let Err(error) = move_dialog::show(&xaml_root, &self.events, &folders, exclude, picked) {
             self.show_error(&format!("Could not open the folder picker: {error:#}"));
         }
+    }
+
+    /// Ask for a destination folder and move every ticked row there.
+    fn bulk_move(self: &Rc<Self>) {
+        let ids = self.selected_ids();
+        self.move_ids(ids);
     }
 
     /// Move a message to a folder without showing the undo banner (used for undo).
@@ -2401,87 +2968,74 @@ impl MainWindow {
     /// Forget the selection entirely, including the checkbox widgets; used
     /// when the list is replaced or the view switches to the outbox.
     fn reset_bulk_selection(&self) {
-        self.state().selected.clear();
+        // Drop any message-row bookkeeping the rows being torn down own:
+        // the keyboard cursor, the focus visuals and the quick-action bars.
+        {
+            let mut state = self.state();
+            state.selected.clear();
+            state.focus = None;
+        }
         self.checkboxes.borrow_mut().clear();
         self.checkboxes_by_id.borrow_mut().clear();
+        self.rows_by_id.borrow_mut().clear();
+        self.actions_by_id.borrow_mut().clear();
         self.update_bulk_bar();
     }
 
-    /// Move selection to the previous message (Up arrow).
-    fn select_previous_message(&self) {
-        let new_idx = {
+    /// The visible-list index of the keyboard cursor. Falls back to the
+    /// last ticked row when the cursor has never been set, matching the
+    /// behavior of the old ticked-set-driven navigation.
+    fn focused_index(state: &State) -> Option<usize> {
+        state
+            .focus
+            .and_then(|id| state.messages.iter().position(|m| m.id == id))
+            .or_else(|| {
+                state
+                    .selected
+                    .iter()
+                    .last()
+                    .and_then(|id| state.messages.iter().position(|m| m.id == *id))
+            })
+    }
+
+    /// Move the keyboard cursor to the previous (Up) or next (Down) visible
+    /// row. Moving the cursor does not tick anything.
+    fn move_focus(&self, delta: i64) {
+        let target = {
             let state = self.state();
-            if state.show_outbox || state.messages.is_empty() {
+            if state.show_outbox {
                 return;
             }
-            if let Some(&last) = state.selected.iter().last() {
-                // Find the index of the last selected message and go to previous
-                state
-                    .messages
-                    .iter()
-                    .position(|m| m.id == last)
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or(0)
-            } else {
-                // Nothing selected, select the first message
-                0
+            let len = state.messages.len();
+            if len == 0 {
+                return;
             }
-        };
-        let mut state = self.state();
-        if let Some(msg_id) = state.messages.get(new_idx).map(|message| message.id) {
-            state.selected.clear();
-            state.selected.insert(msg_id);
-            drop(state);
-            // Update checkbox UI
-            let checkboxes = self.checkboxes.borrow().clone();
-            for (i, checkbox) in checkboxes.iter().enumerate() {
-                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
-                    let _ = toggle.SetIsChecked(Some(i == new_idx));
+            match Self::focused_index(&state) {
+                None => 0,
+                Some(index) => {
+                    let moved = index as i64 + delta;
+                    moved.clamp(0, len as i64 - 1) as usize
                 }
             }
-            self.update_bulk_bar();
+        };
+        if let Some(id) = self.state().messages.get(target).map(|message| message.id) {
+            self.set_focus(Some(id));
         }
     }
 
-    /// Move selection to the next message (Down arrow).
+    /// Move the cursor to the previous message (Up arrow).
+    fn select_previous_message(&self) {
+        self.move_focus(-1);
+    }
+
+    /// Move the cursor to the next message (Down arrow).
     fn select_next_message(&self) {
-        let new_idx = {
-            let state = self.state();
-            if state.show_outbox || state.messages.is_empty() {
-                return;
-            }
-            if let Some(&last) = state.selected.iter().last() {
-                // Find the index of the last selected message and go to next
-                state
-                    .messages
-                    .iter()
-                    .position(|m| m.id == last)
-                    .map(|i| (i + 1).min(state.messages.len().saturating_sub(1)))
-                    .unwrap_or(0)
-            } else {
-                // Nothing selected, select the first message
-                0
-            }
-        };
-        let mut state = self.state();
-        if let Some(msg_id) = state.messages.get(new_idx).map(|message| message.id) {
-            state.selected.clear();
-            state.selected.insert(msg_id);
-            drop(state);
-            // Update checkbox UI
-            let checkboxes = self.checkboxes.borrow().clone();
-            for (i, checkbox) in checkboxes.iter().enumerate() {
-                if let Ok(toggle) = checkbox.cast::<IToggleButton>() {
-                    let _ = toggle.SetIsChecked(Some(i == new_idx));
-                }
-            }
-            self.update_bulk_bar();
-        }
+        self.move_focus(1);
     }
 
     /// Toggle selection of the currently focused message (Space).
     fn toggle_current_selection(&self) {
-        // Resolve the focused row first and drop the state guard before the
+        // Resolve the cursor row first and drop the state guard before the
         // mutation below: update_bulk_bar() locks `state` again, which would
         // deadlock if the guard were still held.
         let target = {
@@ -2489,25 +3043,19 @@ impl MainWindow {
             if state.show_outbox || state.messages.is_empty() {
                 return;
             }
-            // Find the currently focused message (the one with checked checkbox)
-            let checkboxes = self.checkboxes.borrow().clone();
-            let mut target: Option<(usize, MessageId, bool)> = None;
-            for (i, checkbox) in checkboxes.iter().enumerate() {
-                if let Ok(toggle) = checkbox.cast::<IToggleButton>()
-                    && let Ok(true) = toggle.IsChecked()
-                {
-                    if i < state.messages.len() {
-                        let msg = &state.messages[i];
-                        target = Some((i, msg.id, state.selected.contains(&msg.id)));
-                    }
-                    break;
-                }
+            let id = match state
+                .focus
+                .or_else(|| state.messages.first().map(|message| message.id))
+            {
+                Some(id) => id,
+                None => return,
+            };
+            match state.messages.iter().position(|message| message.id == id) {
+                Some(index) => (index, id, state.selected.contains(&id)),
+                None => return,
             }
-            target
         };
-        let Some((index, id, selected_before)) = target else {
-            return;
-        };
+        let (index, id, selected_before) = target;
         {
             let mut state = self.state();
             if selected_before {
@@ -2516,6 +3064,7 @@ impl MainWindow {
                 state.selected.insert(id);
             }
         }
+        self.set_focus(Some(id));
         // Release the borrow before touching the control: `SetIsChecked`
         // raises an event that can rebuild the rows.
         let checkbox = {
@@ -2530,7 +3079,8 @@ impl MainWindow {
         self.update_bulk_bar();
     }
 
-    /// Open the currently selected message (Enter).
+    /// Open the currently focused message (Enter). Falls back to the
+    /// ticked row when the cursor has never been set.
     fn open_selected_message(self: &Rc<Self>) {
         // Copy the target message out and drop the state guard first:
         // open_message() locks `state` again, which would deadlock here.
@@ -2540,10 +3090,9 @@ impl MainWindow {
                 None
             } else {
                 state
-                    .selected
-                    .iter()
-                    .next()
-                    .and_then(|msg_id| state.messages.iter().find(|m| m.id == *msg_id).cloned())
+                    .focus
+                    .or_else(|| state.selected.iter().next().copied())
+                    .and_then(|msg_id| state.messages.iter().find(|m| m.id == msg_id).cloned())
             }
         };
         if let Some(message) = target {
@@ -2824,6 +3373,63 @@ impl MainWindow {
         let _ = dialog.ShowAsync();
     }
 
+    /// Ask for confirmation, then permanently remove everything in the
+    /// selected account's Trash. Offered from the Trash folder's flyout.
+    fn empty_trash_action(self: &Rc<Self>) {
+        let Some(account_id) = self.state().selection.account else {
+            return;
+        };
+        let this = Rc::clone(self);
+        let xaml_root = match ui::window_xaml_root(&self.widgets.window) {
+            Ok(root) => root,
+            Err(error) => {
+                self.show_error(&format!("Could not get window root: {error:#}"));
+                return;
+            }
+        };
+        let Some(dialog) = self.require(mailin_winui_sys::ContentDialog::new(), "create dialog")
+        else {
+            return;
+        };
+        let Some(title) = self.require(ui::text("Empty Trash"), "build dialog text") else {
+            return;
+        };
+        let _ = dialog.SetTitle(&title);
+        let Some(panel) = self.require(
+            ui::stack_sm(mailin_winui_sys::Orientation::Vertical),
+            "lay out dialog",
+        ) else {
+            return;
+        };
+        ui::margin_lg(&panel).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+        });
+        let Some(msg) = self.require(
+            ui::text(
+                "Every message in Trash will be permanently deleted. This action cannot be undone.",
+            ),
+            "build dialog text",
+        ) else {
+            return;
+        };
+        ui::append(&panel, &msg).unwrap_or_else(|error| {
+            self.show_error(&format!("Could not lay out dialog: {error}"));
+        });
+        let _ = ui::set_content(&dialog, &panel);
+        let _ = dialog.SetPrimaryButtonText("Empty Trash");
+        let _ = dialog.SetCloseButtonText("Cancel");
+        let _ = dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Close);
+        let this_clone = this.clone();
+        let _ = dialog.PrimaryButtonClick(move |_, _| {
+            this_clone.app.engine.empty_trash(account_id);
+            this_clone.refresh_folders();
+            this_clone.refresh_messages();
+            this_clone.show_banner("Trash emptied");
+        });
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
+        let _ = dialog.ShowAsync();
+    }
+
     fn subscribe_folder_action(self: &Rc<Self>, folder_id_str: &str, subscribe: bool) {
         let Ok(folder_id) = folder_id_str.parse::<i64>() else {
             return;
@@ -3060,6 +3666,12 @@ impl MainWindow {
                         self.show_error(&message);
                     }
                     Ok(Event::SyncStatusChanged { account_id, status }) => {
+                        // The button follows every account's sync state, so a
+                        // sync of a background account also disables it.
+                        self.update_syncing_accounts(
+                            account_id,
+                            status == mailin_core::model::SyncStatus::Syncing,
+                        );
                         let state = self.state();
                         if state.selection.account == Some(account_id) {
                             sync_status_update = Some(status);
@@ -3156,9 +3768,34 @@ impl MainWindow {
         let Some(account) = self.state().selection.account else {
             return;
         };
-        self.show_banner("");
+        // The sync button stays disabled until the engine reports the
+        // account as idle again, so a second click cannot queue the same
+        // sync twice.
+        self.set_syncing(true);
         self.app.engine.sync_account(account);
-        self.show_banner("Synchronizing…");
+    }
+
+    /// Enable or disable the Sync button and show the progress in the
+    /// status chip.
+    fn set_syncing(&self, syncing: bool) {
+        let _ = ui::set_enabled(&self.widgets.sync, !syncing);
+        if syncing {
+            let _ = self.widgets.sync_status.SetText("Syncing…");
+        }
+    }
+
+    /// Track which accounts are syncing so the button is only re-enabled
+    /// when no account is running a sync.
+    fn update_syncing_accounts(&self, account_id: AccountId, syncing: bool) {
+        let mut accounts = self.syncing_accounts.borrow_mut();
+        if syncing {
+            accounts.insert(account_id);
+        } else {
+            accounts.remove(&account_id);
+        }
+        let busy = !accounts.is_empty();
+        drop(accounts);
+        let _ = ui::set_enabled(&self.widgets.sync, !busy);
     }
 }
 
@@ -3180,8 +3817,121 @@ fn take_mailto_draft() -> Option<OutgoingMessage> {
 }
 
 /// Create and activate the main window.
+/// Script injected into the reader document: it marks the matches of the
+/// current search, scrolls to the active one and reports the match count
+/// back to the front-end. It is appended to the sanitized document, so it
+/// never runs code that came from the message.
+const FIND_BOOTSTRAP: &str = r#"
+(() => {
+  if (window.__mailinFindReady) { return; }
+  window.__mailinFindReady = true;
+  const style = document.createElement('style');
+  style.textContent = 'mark.mailin-find{background:#ffe58f;color:inherit;border-radius:2px}' +
+    'mark.mailin-find-current{background:#f7b500;outline:2px solid #a67c00}';
+  (document.head || document.documentElement).appendChild(style);
+  const state = { marks: [], index: -1 };
+  window.__mailinFindState = state;
+  const unwrap = () => {
+    for (const mark of state.marks) {
+      if (mark.parentNode) { mark.replaceWith(...mark.childNodes); }
+    }
+    state.marks = [];
+    state.index = -1;
+    if (document.body) { document.body.normalize(); }
+  };
+  const report = () => {
+    const payload = { type: 'mailin-find', count: state.marks.length, index: state.index };
+    if (window.chrome && window.chrome.webview) {
+      window.chrome.webview.postMessage(JSON.stringify(payload));
+    }
+  };
+  const highlight = () => {
+    state.marks.forEach((mark, i) => {
+      mark.classList.toggle('mailin-find-current', i === state.index);
+    });
+    const current = state.marks[state.index];
+    if (current && current.scrollIntoView) { current.scrollIntoView({ block: 'center' }); }
+  };
+  window.__mailinFind = (query) => {
+    if (!document.body) {
+      document.addEventListener('DOMContentLoaded', () => window.__mailinFind(query), { once: true });
+      return;
+    }
+    const needle = String(query || '').toLowerCase();
+    unwrap();
+    if (!needle) { report(); return; }
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(needle)) { continue; }
+      const parent = node.parentElement;
+      if (!parent) { continue; }
+      const tag = parent.tagName;
+      if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') { continue; }
+      nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const lower = text.toLowerCase();
+      const fragment = document.createDocumentFragment();
+      let from = 0;
+      let at = lower.indexOf(needle, from);
+      while (at !== -1) {
+        if (at > from) { fragment.appendChild(document.createTextNode(text.slice(from, at))); }
+        const mark = document.createElement('mark');
+        mark.className = 'mailin-find';
+        mark.textContent = text.slice(at, at + needle.length);
+        fragment.appendChild(mark);
+        state.marks.push(mark);
+        from = at + needle.length;
+        at = lower.indexOf(needle, from);
+      }
+      if (from < text.length) { fragment.appendChild(document.createTextNode(text.slice(from))); }
+      node.replaceWith(fragment);
+    }
+    state.index = state.marks.length ? 0 : -1;
+    highlight();
+    report();
+  };
+  window.__mailinFindStep = (delta) => {
+    if (!state.marks.length) { report(); return; }
+    const count = state.marks.length;
+    state.index = ((state.index + Number(delta)) % count + count) % count;
+    highlight();
+    report();
+  };
+  window.__mailinFindClear = () => { unwrap(); report(); };
+})();
+"#;
+
+/// Add the find-in-message script to a reader document. The script is
+/// appended after sanitizing, so it never runs message content, and it
+/// carries the document's nonce so the reader's content security policy
+/// accepts it.
+fn inject_find_script(document: &str, nonce: &str) -> String {
+    let script = format!("<script nonce=\"{nonce}\">{FIND_BOOTSTRAP}</script>");
+    match document.rfind("</body>") {
+        Some(index) => {
+            let mut out = String::with_capacity(document.len() + script.len());
+            out.push_str(&document[..index]);
+            out.push_str(&script);
+            out.push_str(&document[index..]);
+            out
+        }
+        None => format!("{document}{script}"),
+    }
+}
+
 pub fn create(state: &Arc<AppState>) -> Result<Window> {
     install_control_resources()?;
+
+    // Apply the configured theme before the first control is built: a
+    // control captures its brushes when it is created, so the theme has to
+    // be in place before the window exists. Changing it later only reaches
+    // the controls created afterwards — which is why the preferences say
+    // that a theme change takes effect after a restart.
+    design_tokens::apply_config_theme(state.config().ui.theme);
 
     let root = Grid::new().context("could not create the root grid")?;
     ui::auto_row(&root)?;
@@ -3493,14 +4243,39 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::append(&reader_content, &header)?;
 
     let body = Grid::new().context("could not create the reader body")?;
-    // Row 0 holds the "inline images could not be loaded" notice, row 1 the
-    // body itself.
+    // Row 0 holds the find bar, row 1 the "inline images could not be
+    // loaded" notice, row 2 the body itself.
+    ui::auto_row(&body)?;
     ui::auto_row(&body)?;
     ui::star_row(&body)?;
+
+    // Find bar (F3): search the message that is open.
+    let find_bar = ui::stack_sm(Orientation::Horizontal)?;
+    ui::margin(&find_bar, 4.0, 4.0, 4.0, 4.0)?;
+    let find_entry = ui::text_box("Find in message", Some("Find in message"))?;
+    ui::min_width(&find_entry, 220.0)?;
+    let find_prev = ui::button(
+        "Previous",
+        Some("Previous match"),
+        Some("Find the previous match"),
+    )?;
+    let find_next = ui::button("Next", Some("Next match"), Some("Find the next match"))?;
+    let find_status = ui::text("")?;
+    ui::min_width(&find_status, 90.0)?;
+    let find_close = ui::button("Close", Some("Close find bar"), Some("Close the find bar"))?;
+    ui::append(&find_bar, &find_entry)?;
+    ui::append(&find_bar, &find_prev)?;
+    ui::append(&find_bar, &find_next)?;
+    ui::append(&find_bar, &find_status)?;
+    ui::append(&find_bar, &find_close)?;
+    ui::set_visible(&find_bar, false)?;
+    ui::set_row(&find_bar, 0)?;
+    ui::append(&body, &find_bar)?;
+
     let body_notice = ui::text("")?;
     ui::margin(&body_notice, 8.0, 4.0, 8.0, 4.0)?;
     ui::set_visible(&body_notice, false)?;
-    ui::set_row(&body_notice, 0)?;
+    ui::set_row(&body_notice, 1)?;
     ui::append(&body, &body_notice)?;
     let body_text = ui::text("")?;
     body_text.SetIsTextSelectionEnabled(true)?;
@@ -3509,11 +4284,11 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let body_html = WebView2::new().context("could not create the WebView2 control")?;
     ui::set_visible(&body_plain, false)?;
     ui::set_visible(&body_html, false)?;
-    ui::set_row(&body_plain, 1)?;
-    ui::set_row(&body_html, 1)?;
+    ui::set_row(&body_plain, 2)?;
+    ui::set_row(&body_html, 2)?;
     ui::append(&body, &body_plain)?;
     ui::append(&body, &body_html)?;
-    ui::set_row(&body, 1)?;
+    ui::set_row(&body, 2)?;
     ui::append(&reader_content, &body)?;
 
     // ------------------------------------------------------------- window
@@ -3616,7 +4391,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         html_mode: AtomicBool::new(state.config().ui.html_enabled),
         pgp_shown: AtomicBool::new(false),
         closed: AtomicBool::new(false),
-        last_move: Mutex::new(None),
+        undo_followup: std::rc::Rc::new(std::cell::RefCell::new(UndoFollowup {
+            pairs: Vec::new(),
+            batches: 0,
+        })),
         undo_timer: std::rc::Rc::new(std::cell::RefCell::new(None)),
         events: ui::Revokers::default(),
         folder_events: ui::Revokers::default(),
@@ -3626,6 +4404,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         dialog_events: ui::Revokers::default(),
         checkboxes: std::cell::RefCell::new(Vec::new()),
         checkboxes_by_id: std::cell::RefCell::new(HashMap::new()),
+        rows_by_id: std::cell::RefCell::new(HashMap::new()),
+        actions_by_id: std::cell::RefCell::new(HashMap::new()),
+        find_open: std::cell::Cell::new(false),
+        syncing_accounts: std::cell::RefCell::new(std::collections::HashSet::new()),
         widgets: Widgets {
             window: window.clone(),
             title,
@@ -3668,6 +4450,12 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             body_plain,
             body_text,
             body_html,
+            find_bar,
+            find_entry,
+            find_prev,
+            find_next,
+            find_status,
+            find_close,
             body_notice,
             html_button,
             reply_button,
@@ -3835,9 +4623,203 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             }
         },
     )?);
+    // Message actions, scoped to the list pane like Ctrl+A/Escape so they
+    // never fire while the search box or the reader has focus.
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::E,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.archive_ids(&this.action_ids());
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::J,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.junk_ids(&this.action_ids(), true);
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::K,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.junk_ids(&this.action_ids(), false);
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::Delete,
+        None,
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.delete_ids(&this.action_ids());
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::Delete,
+        Some(VirtualKeyModifiers::Control),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.permanently_delete_ids(&this.action_ids());
+                }
+            }
+        },
+    )?);
+    this.events.keep(add_accelerator(
+        &this.widgets.message_scroll,
+        VirtualKey::M,
+        Some(VirtualKeyModifiers::Control),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    let ids = this.action_ids();
+                    this.move_ids(ids);
+                }
+            }
+        },
+    )?);
+    // Find bar of the reader (F3).
+    this.events
+        .keep(ui::on_text_changed(&this.widgets.find_entry, {
+            let this = Rc::clone(&this);
+            move || {
+                let query = ui::text_value(&this.widgets.find_entry);
+                this.find_in_message(&query);
+            }
+        })?);
+    this.events.keep(ui::on_click(&this.widgets.find_next, {
+        let this = Rc::clone(&this);
+        move || this.find_step(1)
+    })?);
+    this.events.keep(ui::on_click(&this.widgets.find_prev, {
+        let this = Rc::clone(&this);
+        move || this.find_step(-1)
+    })?);
+    this.events.keep(ui::on_click(&this.widgets.find_close, {
+        let this = Rc::clone(&this);
+        move || this.hide_find_bar()
+    })?);
+    // Enter finds the next match, Escape closes the bar. (The projection
+    // exposes no key modifiers, so Shift+Enter cannot be distinguished
+    // here; the "Previous" button walks backwards.)
+    this.events
+        .keep(this.widgets.find_entry.cast::<IUIElement>()?.KeyDown({
+            let this = Rc::downgrade(&this);
+            move |_, args| {
+                let Some(args) = args.as_ref() else {
+                    return;
+                };
+                let Ok(key) = args.Key() else {
+                    return;
+                };
+                if key != mailin_winui_sys::VirtualKey::Enter
+                    && key != mailin_winui_sys::VirtualKey::Escape
+                {
+                    return;
+                }
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                if key == mailin_winui_sys::VirtualKey::Escape {
+                    this.hide_find_bar();
+                } else {
+                    this.find_step(1);
+                }
+                let _ = args.SetHandled(true);
+            }
+        })?);
+    // The reader reports the match count back over the WebView bridge.
+    {
+        let find_status = this.widgets.find_status.clone();
+        let find_entry = this.widgets.find_entry.clone();
+        let message_token = this
+            .widgets
+            .body_html
+            .WebMessageReceived(move |_sender, args| {
+                let Some(message) = args
+                    .as_ref()
+                    .and_then(|args| args.TryGetWebMessageAsString().ok())
+                else {
+                    return;
+                };
+                let Ok(payload) = serde_json::from_str::<serde_json::Value>(&message) else {
+                    return;
+                };
+                if payload.get("type").and_then(|value| value.as_str()) != Some("mailin-find") {
+                    return;
+                }
+                let count = payload
+                    .get("count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0) as usize;
+                let index = payload
+                    .get("index")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(-1);
+                let text = if count == 0 {
+                    if ui::text_value(&find_entry).trim().is_empty() {
+                        String::new()
+                    } else {
+                        "No results".to_owned()
+                    }
+                } else {
+                    format!("{} of {count}", index.max(0) + 1)
+                };
+                let _ = find_status.SetText(&text);
+            })?;
+        this.events.keep(message_token);
+    }
+    this.events
+        .keep(add_accelerator(&root, VirtualKey::F3, None, {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.toggle_find_bar();
+                }
+            }
+        })?);
     // This projection exposes no OEM punctuation keys (no `OemComma`/
     // `OemQuestion`), so preferences uses a letter chord instead of the
     // Windows-native `Ctrl+,`.
+    this.events.keep(add_accelerator(
+        &root,
+        VirtualKey::N,
+        Some(VirtualKeyModifiers::Control | VirtualKeyModifiers::Shift),
+        {
+            let this = Rc::downgrade(&this);
+            move || {
+                if let Some(this) = this.upgrade() {
+                    this.new_folder_action();
+                }
+            }
+        },
+    )?);
     this.events.keep(add_accelerator(
         &root,
         VirtualKey::P,
@@ -4191,6 +5173,21 @@ fn role_marker(role: FolderRole) -> &'static str {
     }
 }
 
+/// The spoken name of a folder role, used for the accessibility name of the
+/// role glyph.
+fn role_name(role: FolderRole) -> &'static str {
+    match role {
+        FolderRole::Inbox => "Inbox",
+        FolderRole::Sent => "Sent",
+        FolderRole::Drafts => "Drafts",
+        FolderRole::Trash => "Trash",
+        FolderRole::Junk => "Junk",
+        FolderRole::Archive => "Archive",
+        FolderRole::Snoozed => "Snoozed",
+        FolderRole::Other => "Folder",
+    }
+}
+
 pub(crate) fn folder_title(folder: &Folder) -> String {
     let leaf = if folder.delimiter.is_empty() {
         folder.name.as_str()
@@ -4212,12 +5209,21 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let row = ui::stack(Orientation::Horizontal, 8.0)?;
     ui::padding(&row, 6.0, 6.0, 6.0, 6.0)?;
     let marker = role_marker(folder.role);
-    ui::append(&row, &ui::text(marker)?)?;
+    let marker_block = ui::text(marker)?;
+    // The role glyph is decoration; name it so it is announced as the
+    // folder kind instead of "black circle".
+    AutomationProperties::SetName(&marker_block, role_name(folder.role))?;
+    ui::append(&row, &marker_block)?;
     let name = ui::text(&folder_title(folder))?;
     ui::stretch_horizontal(&name)?;
     ui::append(&row, &name)?;
     if folder.unread_count > 0 {
-        ui::append(&row, &ui::text(&folder.unread_count.to_string())?)?;
+        let badge = ui::text(&folder.unread_count.to_string())?;
+        AutomationProperties::SetName(
+            &badge,
+            &mailin_core::plural(folder.unread_count, "unread message", "unread messages"),
+        )?;
+        ui::append(&row, &badge)?;
     }
     let button = ui::content_button(
         &row,
@@ -4272,6 +5278,18 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     this.folder_events.keep(delete_revoker);
     flyout.Items()?.Append(&item_base(delete_item)?)?;
 
+    // Empty Trash — only for the Trash folder.
+    if folder.role == FolderRole::Trash {
+        let empty_trash_item = MenuFlyoutItem::new()?;
+        empty_trash_item.SetText("Empty Trash…")?;
+        let this_clone = this.clone();
+        let empty_trash_revoker = empty_trash_item.Click(move |_, _| {
+            this_clone.empty_trash_action();
+        })?;
+        this.folder_events.keep(empty_trash_revoker);
+        flyout.Items()?.Append(&item_base(empty_trash_item)?)?;
+    }
+
     // Subscribe/Unsubscribe
     let sub_text = if folder.subscribed {
         "Unsubscribe"
@@ -4308,6 +5326,16 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     Ok(button)
 }
 
+/// The parts of a rendered message row: the row grid, the content button,
+/// the selection checkbox, the quick-action bar and the thread toggle.
+type MessageRowParts = (
+    Grid,
+    Button,
+    CheckBox,
+    Option<StackPanel>,
+    Option<ToggleButton>,
+);
+
 /// Build one message row: a selection checkbox beside the content button.
 ///
 /// Returns the row grid, the content button (single click opens the message)
@@ -4317,7 +5345,8 @@ fn message_row(
     now: i64,
     density: MessageListDensity,
     selected: bool,
-) -> Result<(Grid, Button, CheckBox, Option<StackPanel>)> {
+    thread_expanded: bool,
+) -> Result<MessageRowParts> {
     use MessageListDensity::{Compact, Cozy};
     let seen = message.is_seen();
     let is_thread_root = message.thread_reply_count > 0
@@ -4346,11 +5375,28 @@ fn message_row(
 
     let line = ui::stack(Orientation::Horizontal, 6.0)?;
 
-    // Thread expand/collapse chevron for thread roots
+    // Thread expand/collapse control for thread roots. It is a real toggle
+    // (not a decorative glyph), so assistive technology reports its state.
+    let mut chevron_toggle: Option<ToggleButton> = None;
     if is_thread_root {
-        let chevron = ui::text("▼")?;
-        // Note: WinUI doesn't have easy rotation, so we use text
+        let chevron = ToggleButton::new().context("could not create the thread toggle")?;
+        let content: windows_core::IInspectable = ui::text("▼")?.cast()?;
+        chevron
+            .cast::<mailin_winui_sys::IContentControl>()
+            .context("could not cast the thread toggle")?
+            .SetContent(&content)?;
+        let toggle: IToggleButton = chevron.cast()?;
+        toggle.SetIsChecked(Some(thread_expanded))?;
+        AutomationProperties::SetName(
+            &chevron,
+            if thread_expanded {
+                "Collapse thread"
+            } else {
+                "Expand thread"
+            },
+        )?;
         ui::append(&line, &chevron)?;
+        chevron_toggle = Some(chevron);
     } else if depth > 0 {
         // Placeholder for alignment with thread roots
         let spacer = ui::text("  ")?;
@@ -4370,14 +5416,22 @@ fn message_row(
     // Reply count badge for thread roots
     if is_thread_root && message.thread_reply_count > 0 {
         let badge = ui::text(&format!(" ({})", message.thread_reply_count))?;
+        // The badge is a number in brackets; name it so it is announced as
+        // the reply count instead of a stray "(3)".
+        AutomationProperties::SetName(&badge, &format!("{} replies", message.thread_reply_count))?;
         ui::append(&line, &badge)?;
     }
 
     if message.is_flagged() {
-        ui::append(&line, &ui::text("★")?)?;
+        // A star glyph is read aloud as "black star"; name it instead.
+        let star = ui::text("★")?;
+        AutomationProperties::SetName(&star, "Starred")?;
+        ui::append(&line, &star)?;
     }
     if message.has_attachments {
-        ui::append(&line, &ui::text("📎")?)?;
+        let clip = ui::text("📎")?;
+        AutomationProperties::SetName(&clip, "Has attachments")?;
+        ui::append(&line, &clip)?;
     }
     let timestamp = message.sent_at.unwrap_or(message.received_at);
     ui::append(&line, &ui::text(&format::list_time(now, timestamp))?)?;
@@ -4443,7 +5497,7 @@ fn message_row(
     ui::append(&row, &button)?;
     ui::set_column(&actions_bar, 2)?;
     ui::append(&row, &actions_bar)?;
-    Ok((row, button, checkbox, Some(actions_bar)))
+    Ok((row, button, checkbox, Some(actions_bar), chevron_toggle))
 }
 
 fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
@@ -4454,18 +5508,15 @@ fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> Result<Button> {
 
     let state_text = entry.state.as_str().to_uppercase();
     let state_label = ui::text(&state_text)?;
+    // Use the active palette: the hardcoded light colors were unreadable
+    // in the dark theme.
+    let colors = design_tokens::tokens().colors;
     // Add color based on state
     match entry.state {
-        OutboxState::Queued => {
-            state_label.SetForeground(&ui::solid_brush(design_tokens::Colors::default().info)?)?
-        }
-        OutboxState::Sending => state_label
-            .SetForeground(&ui::solid_brush(design_tokens::Colors::default().warning)?)?,
-        OutboxState::Failed => {
-            state_label.SetForeground(&ui::solid_brush(design_tokens::Colors::default().error)?)?
-        }
-        OutboxState::Sent => state_label
-            .SetForeground(&ui::solid_brush(design_tokens::Colors::default().success)?)?,
+        OutboxState::Queued => state_label.SetForeground(&ui::solid_brush(colors.info)?)?,
+        OutboxState::Sending => state_label.SetForeground(&ui::solid_brush(colors.warning)?)?,
+        OutboxState::Failed => state_label.SetForeground(&ui::solid_brush(colors.error)?)?,
+        OutboxState::Sent => state_label.SetForeground(&ui::solid_brush(colors.success)?)?,
     }
     ui::append(&line, &state_label)?;
 
@@ -4668,6 +5719,80 @@ fn build_shortcuts_window(xaml_root: &XamlRoot) -> Result<ContentDialog> {
                     <TextBlock Grid.Column="0" Text="F1" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
                     <TextBlock Grid.Column="2" Text="Show this help"/>
                 </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="F3" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Find in message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Delete" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Move the focused message to Trash"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Del" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Delete the focused message permanently"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+M" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Move the focused message to a folder"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+E" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Archive the focused message"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+J" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Mark the focused message as junk"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+K" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="Move the focused message out of Junk"/>
+                </Grid>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="24"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="Ctrl+Shift+N" FontFamily="Consolas,Monospace" FontWeight="SemiBold"/>
+                    <TextBlock Grid.Column="2" Text="New folder"/>
+                </Grid>
+                <TextBlock Text="Ctrl+Shift+P opens Preferences: this build has no Ctrl+, chord." FontSize="12" Opacity="0.7" TextWrapping="Wrap"/>
+                <TextBlock Text="Ctrl+/ is not available in this build." FontSize="12" Opacity="0.7" TextWrapping="Wrap"/>
             </StackPanel>
         </StackPanel>
         "#,

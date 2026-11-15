@@ -17,6 +17,19 @@ use base64::engine::general_purpose::STANDARD;
 /// document always renders with the palette the reader is also themed with
 /// and no palette values are duplicated in the core.
 pub fn document(html: &str, allow_remote: bool, inline_images: &[(String, String)]) -> String {
+    document_with_nonce(html, allow_remote, inline_images).0
+}
+
+/// The document and the nonce its scripts must carry.
+///
+/// The policy only allows scripts with that nonce, so a front-end that
+/// needs a script of its own (the Windows reader adds a find-in-message
+/// helper) can add one that the browser accepts.
+pub fn document_with_nonce(
+    html: &str,
+    allow_remote: bool,
+    inline_images: &[(String, String)],
+) -> (String, String) {
     let html = rewrite_cid_images(html, inline_images);
     let image_sources = if allow_remote {
         "data: cid: http: https:"
@@ -60,7 +73,7 @@ pub fn document(html: &str, allow_remote: bool, inline_images: &[(String, String
     );
     let head = format!("{head}{navigation_guard}");
     let html = ensure_document_lang(html.as_ref());
-    inject_head(&html, &head)
+    (inject_head(&html, &head), nonce)
 }
 
 /// Whether the HTML refers to a network resource that the policy would block.
@@ -1300,6 +1313,19 @@ mod tests {
         assert_ne!(nonce1, nonce2);
         assert!(nonce1.starts_with("mailin-"));
         assert!(nonce2.starts_with("mailin-"));
+    }
+
+    #[test]
+    fn document_with_nonce_hands_out_the_policy_nonce() {
+        let (doc, nonce) = document_with_nonce("<p>test</p>", false, &[]);
+        // The script policy only accepts the nonce that is handed out, so a
+        // front-end script added with it runs and a mail-authored one does
+        // not.
+        assert!(doc.contains(&format!("script-src 'nonce-{nonce}'")));
+        assert_eq!(extract_nonce(&doc), nonce);
+        assert!(doc.contains(&format!("<script nonce=\"{nonce}\">")));
+        // The plain helper returns the same document without the nonce.
+        assert!(document("<p>test</p>", false, &[]).contains("script-src 'nonce-"));
     }
 
     #[test]

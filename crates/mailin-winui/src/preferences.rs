@@ -181,7 +181,10 @@ pub fn show_preferences(
                 }
                 guard.clone()
             };
-            // Apply theme immediately (on UI thread)
+            // The theme of the controls that already exist cannot change
+            // at runtime (every control captured its brushes when it was
+            // created), so the new palette only reaches the controls built
+            // from now on. The field says so.
             apply_theme(candidate.ui.theme);
             let _ = ui::set_visible(&error_text, false);
             on_saved();
@@ -197,13 +200,10 @@ pub fn show_preferences(
 
 fn apply_theme(theme: Theme) {
     use crate::design_tokens;
-    // Apply theme immediately by updating global tokens
-    let mode = match theme {
-        Theme::System => design_tokens::ThemeMode::System,
-        Theme::Light => design_tokens::ThemeMode::Light,
-        Theme::Dark => design_tokens::ThemeMode::Dark,
-    };
-    design_tokens::apply_theme(mode);
+    // Apply the palette to the controls created from now on. The controls
+    // that already exist keep the palette they were created with; a
+    // restart picks the new one up for the whole window.
+    design_tokens::apply_config_theme(theme);
 }
 
 fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> {
@@ -216,7 +216,10 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         Theme::Dark => 2,
     };
     let theme = ui::combo(&["System", "Light", "Dark"], theme_index, Some("Theme"))?;
-    ui::append(&panel, &ui::field("Theme", &theme)?)?;
+    ui::append(
+        &panel,
+        &ui::field("Theme (takes effect after restart)", &theme)?,
+    )?;
 
     let density_index = match config.ui.message_list_density {
         MessageListDensity::Comfortable => 0,

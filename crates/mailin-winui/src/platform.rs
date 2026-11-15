@@ -13,7 +13,10 @@ use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
     OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::Shell::{
+    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, ILFree, SHBrowseForFolderW,
+    SHGetPathFromIDListW, ShellExecuteW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 /// Maximum size of a single attached file. The same limit is enforced by the
@@ -67,6 +70,72 @@ pub fn open_url(url: &str) {
     if result as usize <= 32 {
         tracing::warn!(url = %url, code = result as usize, "ShellExecuteW could not open the URL");
     }
+}
+
+/// Turn a display name into a file name that is safe to write into a
+/// folder: path separators and characters Windows rejects are replaced,
+/// and the result is capped in length.
+pub fn safe_file_name(name: &str) -> String {
+    let mut cleaned = String::with_capacity(name.len());
+    for character in name.chars() {
+        let replacement = match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            control if control.is_control() => '_',
+            other => other,
+        };
+        cleaned.push(replacement);
+    }
+    let trimmed = cleaned.trim().trim_end_matches('.').to_owned();
+    let trimmed = if trimmed.is_empty() {
+        "attachment".to_owned()
+    } else {
+        trimmed
+    };
+    if trimmed.chars().count() > 120 {
+        let mut shortened: String = trimmed.chars().take(120).collect();
+        shortened.push('…');
+        shortened
+    } else {
+        trimmed
+    }
+}
+
+/// Ask the user for a folder. Returns `None` when the dialog is cancelled.
+///
+/// The classic folder browser is used for the same reason as the file
+/// dialogs above: the WinRT pickers need an `HWND` interop object that the
+/// filtered projection does not offer. It returns a filesystem directory
+/// only, so the caller can save a batch of files into it.
+pub fn pick_folder(title: &str) -> Option<PathBuf> {
+    let title = wide(title);
+    let mut display_name = vec![0u16; 260];
+
+    let mut info: BROWSEINFOW = unsafe { std::mem::zeroed() };
+    info.hwndOwner = std::ptr::null_mut();
+    info.pidlRoot = std::ptr::null_mut();
+    info.pszDisplayName = display_name.as_mut_ptr();
+    info.lpszTitle = title.as_ptr();
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    let item = unsafe { SHBrowseForFolderW(&info) };
+    if item.is_null() {
+        return None;
+    }
+    let mut path = vec![0u16; 260];
+    let ok = unsafe { SHGetPathFromIDListW(item, path.as_mut_ptr()) };
+    unsafe { ILFree(item as *const _) };
+    if ok == 0 {
+        return None;
+    }
+    let length = path
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(path.len());
+    let path = String::from_utf16_lossy(&path[..length]);
+    if path.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(path))
 }
 
 /// Show the common save dialog. Returns `None` when the user cancels.

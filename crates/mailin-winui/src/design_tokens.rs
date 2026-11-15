@@ -323,6 +323,22 @@ pub fn apply_theme(mode: ThemeMode) {
     set_tokens(new_tokens);
 }
 
+/// Apply the theme stored in the configuration.
+///
+/// This has to run before the widgets are built: a control captures its
+/// brushes when it is created, so a theme that changes later only reaches
+/// the controls created afterwards. The preferences therefore say that a
+/// theme change takes effect after a restart.
+#[cfg(windows)]
+pub fn apply_config_theme(theme: mailin_core::Theme) {
+    let mode = match theme {
+        mailin_core::Theme::System => ThemeMode::System,
+        mailin_core::Theme::Light => ThemeMode::Light,
+        mailin_core::Theme::Dark => ThemeMode::Dark,
+    };
+    apply_theme(mode);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
