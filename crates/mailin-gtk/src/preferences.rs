@@ -292,22 +292,8 @@ pub fn show_preferences(
         let config = Rc::clone(&config);
         move |row| config.borrow_mut().ui.notifications = row.is_active()
     });
+    // B1: a single row does not need a restore-defaults button.
     notifications_group.add(&notifications_row);
-    let restore_notifications = gtk::Button::builder()
-        .label("Restore defaults")
-        .valign(gtk::Align::Center)
-        .build();
-    restore_notifications.add_css_class("flat");
-    restore_notifications.connect_clicked({
-        let config = Rc::clone(&config);
-        let notifications_row = notifications_row.clone();
-        move |_| {
-            let defaults = Config::default();
-            config.borrow_mut().ui.notifications = defaults.ui.notifications;
-            notifications_row.set_active(defaults.ui.notifications);
-        }
-    });
-    notifications_group.set_header_suffix(Some(&restore_notifications));
 
     general_page.add(&notifications_group);
 
@@ -542,10 +528,45 @@ pub fn show_preferences(
     plugins_page.add(&plugins_group);
     dialog.add(&plugins_page);
 
-    // Advanced page: diagnostics and a local-data backup (D4/D5).
-    let advanced_page = adw::PreferencesPage::new();
-    advanced_page.set_title("Advanced");
-    advanced_page.set_icon_name(Some("applications-system-symbolic"));
+    // About page: application information, support actions and a
+    // preferences reset (B1/B2).
+    let about_page = adw::PreferencesPage::new();
+    about_page.set_title("About");
+    about_page.set_icon_name(Some("help-about-symbolic"));
+
+    let mailin_group = adw::PreferencesGroup::builder().title("Mailin").build();
+    let version_row = adw::ActionRow::builder()
+        .title("Mailin")
+        .subtitle(format!("Version {}", env!("CARGO_PKG_VERSION")))
+        .build();
+    let version_icon = gtk::Image::from_icon_name("dev.mailin.Mailin");
+    version_icon.set_pixel_size(32);
+    version_row.add_prefix(&version_icon);
+    mailin_group.add(&version_row);
+    let source_row = adw::ActionRow::builder()
+        .title("Source code")
+        .subtitle("github.com/ibro-3/mailin")
+        .activatable(true)
+        .build();
+    source_row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
+    source_row.connect_activated(|_| {
+        let uri = "https://github.com/ibro-3/mailin";
+        let _ = gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>);
+    });
+    mailin_group.add(&source_row);
+    let bug_row = adw::ActionRow::builder()
+        .title("Report a bug")
+        .subtitle("File an issue on the issue tracker")
+        .activatable(true)
+        .build();
+    bug_row.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
+    bug_row.connect_activated(|_| {
+        let uri = "https://github.com/ibro-3/mailin/issues";
+        let _ = gtk::gio::AppInfo::launch_default_for_uri(uri, None::<&gtk::gio::AppLaunchContext>);
+    });
+    mailin_group.add(&bug_row);
+    about_page.add(&mailin_group);
+
     let support_group = adw::PreferencesGroup::builder()
         .title("Support")
         .description("Share diagnostics or keep a copy of your local mail cache.")
@@ -580,7 +601,7 @@ pub fn show_preferences(
     backup_row.add_suffix(&gtk::Image::from_icon_name("document-save-symbolic"));
     {
         let paths = paths.clone();
-        let parent = parent_window;
+        let parent = parent_window.clone();
         backup_row.connect_activated(move |_| {
             let file_dialog = gtk::FileDialog::builder()
                 .title("Back up local data")
@@ -630,12 +651,74 @@ pub fn show_preferences(
         });
     }
     support_group.add(&backup_row);
-    advanced_page.add(&support_group);
-    dialog.add(&advanced_page);
+    about_page.add(&support_group);
+
+    let preferences_group = adw::PreferencesGroup::builder()
+        .title("Preferences")
+        .build();
+    let reset_all_row = adw::ActionRow::builder()
+        .title("Reset all preferences")
+        .subtitle("Restore every preference to its default. Accounts and mail are not affected.")
+        .activatable(true)
+        .build();
+    reset_all_row.add_suffix(&gtk::Image::from_icon_name("edit-undo-symbolic"));
+    {
+        let config = Rc::clone(&config);
+        let app = Rc::clone(app);
+        let paths = paths.clone();
+        let dialog = dialog.clone();
+        let parent = parent_window.clone();
+        let on_saved = on_saved.clone();
+        reset_all_row.connect_activated(move |_| {
+            let confirm = adw::AlertDialog::builder()
+                .heading("Reset all preferences?")
+                .body(
+                    "Every preference returns to its default value. Accounts, mail, templates \\
+                     and contacts are not affected.",
+                )
+                .build();
+            confirm.add_responses(&[("cancel", "Cancel"), ("reset", "Reset preferences")]);
+            confirm.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+            confirm.set_default_response(Some("cancel"));
+            confirm.set_close_response("cancel");
+            let config = Rc::clone(&config);
+            let app = Rc::clone(&app);
+            let paths = paths.clone();
+            let dialog = dialog.clone();
+            let on_saved = on_saved.clone();
+            let parent = parent.clone();
+            gtk::glib::spawn_future_local(async move {
+                let response = confirm.choose_future(parent.as_ref()).await;
+                if response.as_str() != "reset" {
+                    return;
+                }
+                let defaults = Config::default();
+                if let Err(error) = defaults.save(&paths) {
+                    show_config_error(&format!("Could not write the configuration file: {error}"));
+                    return;
+                }
+                apply_theme(defaults.ui.theme);
+                if let Err(error) = app.mailin.install_config(defaults.clone()) {
+                    tracing::warn!(%error, "could not install the reset configuration in the running client");
+                }
+                *app.config.borrow_mut() = defaults.clone();
+                // The dialog's rows are bound to the old working copy; load
+                // the defaults there too so the closed handler re-saves a
+                // consistent state.
+                *config.borrow_mut() = defaults;
+                on_saved();
+                dialog.close();
+            });
+        });
+    }
+    preferences_group.add(&reset_all_row);
+    about_page.add(&preferences_group);
+    dialog.add(&about_page);
 
     // Validate, persist and hand the new configuration back to the window.
     // Writing the configuration file touches the disk, so it happens on a
-    // worker; the new settings are installed when the write succeeded.
+    // worker; on failure the user can retry the write or discard the
+    // changes — the error text is shown in the alert.
     dialog.connect_closed({
         let config = config.clone();
         let paths = paths.clone();
@@ -647,31 +730,11 @@ pub fn show_preferences(
                 show_config_error(&error.to_string());
                 return;
             }
-            let paths = paths.clone();
-            let app = Rc::clone(&app);
-            let on_saved = on_saved.clone();
-            let saved = candidate.clone();
-            crate::background::spawn_result(
-                move || {
-                    saved
-                        .save(&paths)
-                        .map_err(|e| format!("Could not write the configuration file: {e}"))
-                },
-                move |result| match result {
-                    Ok(Ok(())) => {
-                        // Apply theme immediately
-                        apply_theme(candidate.ui.theme);
-                        // Workers (engine) read the same configuration the
-                        // UI sees.
-                        if let Err(error) = app.mailin.install_config(candidate.clone()) {
-                            tracing::warn!(%error, "could not install the saved configuration in the running client");
-                        }
-                        *app.config.borrow_mut() = candidate;
-                        on_saved();
-                    }
-                    Ok(Err(message)) => show_config_error(&message),
-                    Err(failed) => show_config_error(&failed.message),
-                },
+            attempt_save(
+                candidate,
+                paths.clone(),
+                Rc::clone(&app),
+                Rc::clone(&on_saved),
             );
         }
     });
@@ -689,5 +752,71 @@ fn show_config_error(message: &str) {
     alert.set_default_button(0);
     gtk::glib::spawn_future_local(async move {
         let _ = alert.choose_future(None::<&gtk::Window>).await;
+    });
+}
+
+/// Validate-on-close succeeded: persist the candidate configuration on a
+/// worker and hand it to the running application. On failure offer Retry
+/// (which re-runs this same save) or Discard.
+fn attempt_save(
+    candidate: mailin_core::Config,
+    paths: mailin_core::Paths,
+    app: Rc<AppState>,
+    on_saved: Rc<dyn Fn()>,
+) {
+    let saved = candidate.clone();
+    let paths_c = paths.clone();
+    let app_err = Rc::clone(&app);
+    let on_saved_err = Rc::clone(&on_saved);
+    let candidate_success = candidate.clone();
+    crate::background::spawn_result(
+        move || {
+            saved
+                .save(&paths_c)
+                .map_err(|e| format!("Could not write the configuration file: {e}"))
+        },
+        move |result| match result {
+            Ok(Ok(())) => {
+                // Apply theme immediately
+                apply_theme(candidate_success.ui.theme);
+                // Workers (engine) read the same configuration the UI sees.
+                if let Err(error) = app.mailin.install_config(candidate_success.clone()) {
+                    tracing::warn!(%error, "could not install the saved configuration in the running client");
+                }
+                *app.config.borrow_mut() = candidate_success;
+                on_saved();
+            }
+            Ok(Err(message)) => show_save_error(&message, candidate, paths, app_err, on_saved_err),
+            Err(failed) => {
+                show_save_error(&failed.message, candidate, paths, app_err, on_saved_err)
+            }
+        },
+    );
+}
+
+/// The write failed: show the error with a Retry button so the user's
+/// changes are not silently lost (B2).
+fn show_save_error(
+    message: &str,
+    candidate: mailin_core::Config,
+    paths: mailin_core::Paths,
+    app: Rc<AppState>,
+    on_saved: Rc<dyn Fn()>,
+) {
+    let alert = gtk::AlertDialog::builder()
+        .message("Couldn't save preferences")
+        .detail(format!(
+            "{message}\n\nYour changes are kept in this window's memory; retry the save or discard them."
+        ))
+        .build();
+    alert.set_buttons(&["Discard changes", "Retry save"]);
+    alert.set_cancel_button(0);
+    alert.set_default_button(1);
+    gtk::glib::spawn_future_local(async move {
+        let response = alert.choose_future(None::<&gtk::Window>).await;
+        // 1 = Retry save, 0/discarded = Discard changes.
+        if matches!(response, Ok(1)) {
+            attempt_save(candidate, paths, app, on_saved);
+        }
     });
 }

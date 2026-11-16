@@ -72,6 +72,23 @@ pub fn show_preferences(
     let encryption_panel = create_encryption_section(state, events)?;
     ui::append(&main_panel, &encryption_panel)?;
     let plugins_panel = create_plugins_section(state, events)?;
+    // Advanced section: restore every preference to its default (B2).
+    let advanced_panel = ui::stack_md(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&advanced_panel, &ui::heading3("Advanced")?)?;
+    ui::append(
+        &advanced_panel,
+        &ui::body_text(
+            "Restore every preference to its default. Accounts and mail are not affected.",
+        )?,
+    )?;
+    let reset_all = ui::button(
+        "Reset all preferences",
+        Some("Reset all preferences"),
+        Some("Restore every preference to its default value"),
+    )?;
+    ui::append(&advanced_panel, &reset_all)?;
+    ui::append(&main_panel, &advanced_panel)?;
+
     ui::append(&main_panel, &plugins_panel)?;
 
     // Inline error line; shown when the configuration is rejected and the
@@ -102,13 +119,82 @@ pub fn show_preferences(
         .SetXamlRoot(xaml_root)
         .context("could not attach the dialog to the window")?;
 
+    // Wire the reset-all-preferences button. Confirmation first; on success
+    // every preference is replaced by the defaults, installed and saved.
+    let on_saved = Arc::new(on_saved);
+    events.keep(ui::on_click(&reset_all, {
+        let dialog = dialog.clone();
+        let state = Arc::clone(state);
+        let config = Arc::clone(&config);
+        let paths = paths.clone();
+        let xaml_root = xaml_root.clone();
+        let on_saved = Arc::clone(&on_saved);
+        move || {
+            let Ok(confirm) = mailin_winui_sys::ContentDialog::new() else {
+                return;
+            };
+            let Ok(title) = ui::text("Reset all preferences?") else {
+                return;
+            };
+            let title: windows_core::IInspectable = match title.cast::<windows_core::IInspectable>() {
+                Ok(title) => title,
+                Err(_) => return,
+            };
+            let _ = confirm.SetTitle(&title);
+            let Ok(panel) = ui::stack_sm(mailin_winui_sys::Orientation::Vertical) else {
+                return;
+            };
+            let _ = ui::margin_xl(&panel);
+            let Ok(body) = ui::body_text(
+                "Every preference returns to its default value. Accounts, mail, templates and contacts are not affected.",
+            ) else {
+                return;
+            };
+            let _ = ui::append(&panel, &body);
+            if ui::set_content(&confirm, &panel).is_err() {
+                return;
+            }
+            let _ = confirm.SetPrimaryButtonText("Reset preferences");
+            let _ = confirm.SetCloseButtonText("Cancel");
+            let _ = confirm.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Close);
+            let Ok(element) = confirm.cast::<mailin_winui_sys::IUIElement>() else {
+                return;
+            };
+            if element.SetXamlRoot(&xaml_root).is_err() {
+                return;
+            }
+            let state = Arc::clone(&state);
+            let config = Arc::clone(&config);
+            let paths = paths.clone();
+            let dialog = dialog.clone();
+            let on_saved = Arc::clone(&on_saved);
+            let _ = confirm.PrimaryButtonClick({
+                move |_, _| {
+                    let defaults = Config::default();
+                    if defaults.save(&paths).is_err() {
+                        tracing::error!("could not write the reset configuration");
+                        return;
+                    }
+                    if let Err(error) = state.mailin.install_config(defaults.clone()) {
+                        tracing::warn!(%error, "could not install the reset configuration");
+                    }
+                    *config.write().unwrap_or_else(|err| err.into_inner()) = defaults.clone();
+                    apply_theme(defaults.ui.theme);
+                    on_saved();
+                    let _ = dialog.Hide();
+                }
+            });
+            let _ = confirm.ShowAsync();
+        }
+    })?);
+
     events.keep(dialog.PrimaryButtonClick({
         let dialog = dialog.clone();
         let config = Arc::clone(&config);
         let paths = paths.clone();
         let mailin = Arc::clone(&state.mailin);
         let error_text = error_text.clone();
-        let on_saved = Box::new(on_saved) as Box<dyn Fn()>;
+        let on_saved = Arc::clone(&on_saved);
         move |_, args| {
             let candidate = {
                 let mut guard = config.write().unwrap_or_else(|err| err.into_inner());

@@ -94,7 +94,7 @@ fn prune_old_backups(db_path: &std::path::Path, keep: usize) {
             }
         }
     }
-    backups.sort_by(|a, b| b.0.cmp(&a.0));
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.0));
     for (_, path) in backups.into_iter().skip(keep) {
         if let Err(error) = std::fs::remove_file(&path) {
             tracing::warn!(%error, path = %path.display(), "could not remove an old pre-migration backup");
