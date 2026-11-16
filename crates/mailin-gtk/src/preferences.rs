@@ -62,7 +62,6 @@ pub fn show_preferences(
                 _ => Theme::System,
             };
             config.borrow_mut().ui.theme = theme;
-            apply_theme(theme);
         }
     });
     appearance_group.add(&theme_row);
@@ -140,7 +139,6 @@ pub fn show_preferences(
             theme_row.set_selected(0);
             density_row.set_selected(0);
             thread_row.set_selected(0);
-            apply_theme(Theme::System);
         }
     });
     appearance_group.set_header_suffix(Some(&restore_appearance));
