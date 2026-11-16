@@ -146,7 +146,7 @@ pub fn present(
     mode: AccountDialogMode,
     existing_account: Option<Account>,
     on_saved: impl Fn(AccountId) + 'static,
-) {
+) -> adw::Dialog {
     let (title, subtitle, save_label) = match mode {
         AccountDialogMode::Add => (
             "Add Account",
@@ -169,7 +169,7 @@ pub fn present(
     let password_row = adw::PasswordEntryRow::builder().title("Password").build();
     let auth_method_row = adw::ComboRow::builder()
         .title("Authentication")
-        .model(&gtk::StringList::new(&["Password", "OAuth2 (recommended)"]))
+        .model(&gtk::StringList::new(&["Password", "OAuth2"]))
         .build();
     let auth_method_row = auth_method_row;
     let oauth_provider_row = adw::ComboRow::builder()
@@ -221,6 +221,8 @@ pub fn present(
     oauth_group.add(&oauth_client_id_row);
     oauth_group.add(&oauth_sign_in);
     oauth_group.add(&oauth_status);
+    // Password is the default auth method; OAuth2 stays hidden until chosen.
+    oauth_group.set_visible(false);
 
     let server_default_subtitle =
         "IMAP and SMTP settings — auto-detected when possible. Edit to override.";
@@ -660,9 +662,9 @@ pub fn present(
         let oauth_group = oauth_group.clone();
         let password_row = password_row.clone();
         move |row| {
-            let oauth = row.selected() == auth_index(AuthMethod::OAuth2);
-            oauth_group.set_visible(oauth);
-            password_row.set_visible(!oauth);
+            let (oauth_visible, password_visible) = auth_visibility(row.selected());
+            oauth_group.set_visible(oauth_visible);
+            password_row.set_visible(password_visible);
         }
     });
 
@@ -706,11 +708,12 @@ pub fn present(
             .borrow()
             .set_text(account.signature_html.as_str());
 
-        let oauth = account.imap.auth_method == AuthMethod::OAuth2;
+        let (oauth_visible, password_visible) =
+            auth_visibility(auth_index(account.imap.auth_method));
         auth_method_row.set_selected(auth_index(account.imap.auth_method));
-        oauth_group.set_visible(oauth);
-        password_row.set_visible(!oauth);
-        if oauth {
+        oauth_group.set_visible(oauth_visible);
+        password_row.set_visible(password_visible);
+        if oauth_visible {
             *oauth_tokens.borrow_mut() = account.imap.oauth2.clone();
             oauth_provider_row.set_selected(provider_index(account.imap.oauth2.provider));
             oauth_client_id_row.set_text(&account.imap.oauth2.client_id);
@@ -1840,6 +1843,7 @@ pub fn present(
     glib::idle_add_local_once(move || {
         let _ = focus_row.grab_focus();
     });
+    dialog
 }
 
 struct FormRows {
@@ -1908,6 +1912,13 @@ fn security_at(index: u32) -> Security {
         2 => Security::None,
         _ => Security::Tls,
     }
+}
+
+/// Which auth sections are visible for a combo selection: always exactly
+/// one. Kept pure so the wiring has something testable behind it.
+fn auth_visibility(selected: u32) -> (bool, bool) {
+    let oauth = selected == auth_index(AuthMethod::OAuth2);
+    (oauth, !oauth)
 }
 
 fn auth_index(method: AuthMethod) -> u32 {
@@ -2493,46 +2504,45 @@ mod tests {
     }
 
     #[test]
+    fn auth_visibility_shows_exactly_one_group() {
+        for method in [AuthMethod::Password, AuthMethod::OAuth2] {
+            let (oauth, password) = auth_visibility(auth_index(method));
+            assert_ne!(oauth, password, "exactly one group must be visible");
+            assert_eq!(oauth, method == AuthMethod::OAuth2);
+        }
+    }
+
+    #[test]
     fn security_round_trips_through_combo_index() {
         for security in [Security::Tls, Security::StartTls, Security::None] {
             assert_eq!(security_at(security_index(security)), security);
         }
     }
 
-    /// Manual smoke test: renders the wizard for a few seconds. Ignored by
-    /// default because CI has no display server.
-    #[test]
-    #[ignore = "requires a display; run manually to inspect the wizard"]
-    fn wizard_renders_on_a_desktop() {
+    /// Start the app state and window a wizard UI test needs. Requires a
+    /// display; used by the ignored tests only.
+    fn wizard_app() -> (Rc<crate::app::AppState>, gtk::Window) {
         use std::sync::Arc;
-        use std::time::Duration;
 
         use mailin_core::{Config, Engine, Mailin, MemoryCredentials, Store};
 
-        gtk::init().expect("GTK initializes");
-        libadwaita::init().expect("libadwaita initializes");
+        static GTK_INIT: std::sync::Once = std::sync::Once::new();
+        GTK_INIT.call_once(|| {
+            gtk::init().expect("GTK initializes");
+            libadwaita::init().expect("libadwaita initializes");
+        });
 
-        let gtk_app = adw::Application::builder()
-            .application_id("dev.mailin.MailinWizardTest")
-            .build();
-        gtk_app.register(None::<&gtk::gio::Cancellable>).ok();
-        let window = adw::ApplicationWindow::builder()
-            .application(&gtk_app)
-            .default_width(900)
-            .default_height(700)
-            .build();
+        let window = gtk::Window::new();
         window.present();
 
         let paths =
             mailin_core::config::Paths::with_root(tempfile::tempdir().expect("temp dir").path());
         let config = Config::default();
-        let config_cache = Arc::new(std::sync::RwLock::new(Some(config)));
-        let config_paths = Arc::new(paths);
         let mailin = Arc::new(Mailin::with_parts(
             Arc::new(Store::open_in_memory().expect("store")),
             Arc::new(MemoryCredentials::new()),
-            config_cache,
-            config_paths,
+            Arc::new(std::sync::RwLock::new(Some(config))),
+            Arc::new(paths),
         ));
         let engine = Engine::start(Arc::clone(&mailin)).expect("engine");
         let app = Rc::new(crate::app::AppState {
@@ -2541,8 +2551,98 @@ mod tests {
             engine,
         });
 
-        present(&window, app, AccountDialogMode::Add, None, |_| {});
+        (app, window)
+    }
 
+    /// Recursively search the widget tree below `root` for the first widget
+    /// of type `T` matching `pred`.
+    fn find_widget<T: IsA<gtk::Widget> + glib::types::StaticType + Clone>(
+        root: &gtk::Widget,
+        pred: &dyn Fn(&T) -> bool,
+    ) -> Option<T> {
+        if let Some(found) = root.downcast_ref::<T>()
+            && pred(found)
+        {
+            return Some(found.clone());
+        }
+        let children = root.observe_children();
+        for i in 0..children.n_items() {
+            let Some(child) = children.item(i).and_downcast::<gtk::Widget>() else {
+                continue;
+            };
+            if let Some(found) = find_widget(&child, pred) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn find_group_by_title(root: &gtk::Widget, title: &str) -> Option<adw::PreferencesGroup> {
+        find_widget(root, &|group: &adw::PreferencesGroup| {
+            group.title() == title
+        })
+    }
+
+    fn find_password_row(root: &gtk::Widget) -> Option<adw::PasswordEntryRow> {
+        find_widget(root, &|row: &adw::PasswordEntryRow| {
+            row.title() == "Password"
+        })
+    }
+
+    /// The OAuth2 group must be hidden and the password row visible unless
+    /// OAuth2 is selected — in both modes.
+    fn auth_sections_visible(dialog: &adw::Dialog) -> (bool, bool) {
+        let root = dialog.upcast_ref::<gtk::Widget>();
+        let oauth = find_group_by_title(root, "OAuth2 sign-in")
+            .expect("OAuth2 group exists")
+            .is_visible();
+        let password = find_password_row(root)
+            .expect("Password row exists")
+            .is_visible();
+        (oauth, password)
+    }
+
+    /// Manual smoke test: renders the wizard for a few seconds and checks
+    /// which auth section is visible in both modes. GTK requires all display
+    /// work to happen on the thread that called `gtk::init`, so the
+    /// assertions live in this one ignored test.
+    #[test]
+    #[ignore = "requires a display; run manually to inspect the wizard"]
+    fn wizard_on_a_desktop() {
+        let (app, window) = wizard_app();
+
+        // Add mode: exactly the password section is visible.
+        let dialog = present(
+            &window,
+            Rc::clone(&app),
+            AccountDialogMode::Add,
+            None,
+            |_| {},
+        );
+        assert_eq!(auth_sections_visible(&dialog), (false, true));
+        dialog.close();
+
+        // Edit mode, password account: exactly the password section.
+        let account = sample().build(true).expect("valid draft");
+        let dialog = present(
+            &window,
+            Rc::clone(&app),
+            AccountDialogMode::Edit,
+            Some(account),
+            |_| {},
+        );
+        assert_eq!(auth_sections_visible(&dialog), (false, true));
+        dialog.close();
+
+        // Edit mode, OAuth2 account: exactly the OAuth2 section.
+        let mut account = sample().build(true).expect("valid draft");
+        account.imap.auth_method = AuthMethod::OAuth2;
+        account.smtp.auth_method = AuthMethod::OAuth2;
+        account.imap.oauth2.provider = OAuthProvider::Google;
+        let dialog = present(&window, app, AccountDialogMode::Edit, Some(account), |_| {});
+        assert_eq!(auth_sections_visible(&dialog), (true, false));
+
+        // Hold the OAuth2 dialog on screen for a moment for visual inspection.
         let main_loop = gtk::glib::MainLoop::new(None, false);
         let quit = main_loop.clone();
         gtk::glib::timeout_add_local_once(Duration::from_secs(5), move || quit.quit());

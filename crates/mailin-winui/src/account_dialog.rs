@@ -222,11 +222,7 @@ pub fn present(
     let name = ui::text_box("Ada Lovelace", Some("Account name"))?;
     let email = ui::text_box("ada@example.com", Some("Email address"))?;
     let password = ui::password_box("Password")?;
-    let auth_method = ui::combo(
-        &["Password", "OAuth2 (recommended)"],
-        0,
-        Some("Authentication"),
-    )?;
+    let auth_method = ui::combo(&["Password", "OAuth2"], 0, Some("Authentication"))?;
     let password_field = ui::field("Password", &password)?;
     ui::append(&form, &ui::field("Display name", &name)?)?;
     ui::append(&form, &ui::field("Email address", &email)?)?;
