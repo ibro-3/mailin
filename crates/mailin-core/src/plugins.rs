@@ -311,10 +311,10 @@ impl PluginSystem {
                         else {
                             continue;
                         };
-                        if !loaded.contains_key(&name) {
-                            if let Err(e) = self.load_plugin_from_dir(&path).await {
-                                tracing::warn!(plugin_dir = %path.display(), error = %e, "Failed to load plugin from directory");
-                            }
+                        if !loaded.contains_key(&name)
+                            && let Err(e) = self.load_plugin_from_dir(&path).await
+                        {
+                            tracing::warn!(plugin_dir = %path.display(), error = %e, "Failed to load plugin from directory");
                         }
                     }
                 }

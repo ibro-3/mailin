@@ -691,14 +691,14 @@ pub fn present(
         move |row| {
             let provider = provider_at(row.selected());
             let previous = previous_provider.replace(provider);
-            if let Ok(mut tokens) = oauth_tokens.try_borrow_mut() {
-                if tokens.provider != provider {
-                    // Tokens from a different provider cannot be reused.
-                    tokens.access_token.clear();
-                    tokens.refresh_token.clear();
-                    tokens.expires_at = 0;
-                    tokens.provider = provider;
-                }
+            if let Ok(mut tokens) = oauth_tokens.try_borrow_mut()
+                && tokens.provider != provider
+            {
+                // Tokens from a different provider cannot be reused.
+                tokens.access_token.clear();
+                tokens.refresh_token.clear();
+                tokens.expires_at = 0;
+                tokens.provider = provider;
             }
             let current = oauth_client_id_row.text().to_string();
             let previous_default = previous.default_client_id();

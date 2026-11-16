@@ -106,7 +106,9 @@ fn decode_base64_utf16be(encoded: &str) -> Option<String> {
     }
     let mut out = String::new();
     let mut units = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
     while let Some(unit) = units.next() {
         if (0xD800..0xDC00).contains(&unit) {

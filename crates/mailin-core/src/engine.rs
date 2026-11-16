@@ -1911,22 +1911,22 @@ async fn unsnooze_messages(
             })
             .or_else(|| find_role(&folders, FolderRole::Inbox).map(|f| f.id));
 
-        if let Some(return_folder_id) = return_folder_id {
-            if let Some(return_folder) = folders.iter().find(|f| f.id == return_folder_id) {
-                let uids = vec![message.uid];
-                session.select(&snoozed.name).await?;
-                session.move_messages(&uids, &return_folder.name).await?;
-                let _ = store.delete_message_by_id(*message_id)?;
-                if let Some(a) = action {
-                    store.set_action_state(a.id, "done", None)?;
-                }
-                state.mailbox.publish(Event::MessagesChanged {
-                    folder_id: snoozed.id,
-                });
-                state.mailbox.publish(Event::MessagesChanged {
-                    folder_id: return_folder_id,
-                });
+        if let Some(return_folder_id) = return_folder_id
+            && let Some(return_folder) = folders.iter().find(|f| f.id == return_folder_id)
+        {
+            let uids = vec![message.uid];
+            session.select(&snoozed.name).await?;
+            session.move_messages(&uids, &return_folder.name).await?;
+            let _ = store.delete_message_by_id(*message_id)?;
+            if let Some(a) = action {
+                store.set_action_state(a.id, "done", None)?;
             }
+            state.mailbox.publish(Event::MessagesChanged {
+                folder_id: snoozed.id,
+            });
+            state.mailbox.publish(Event::MessagesChanged {
+                folder_id: return_folder_id,
+            });
         }
     }
 
@@ -2651,10 +2651,10 @@ async fn sync_calendars(
         }
 
         // Update ctag if we got one from the sync
-        if let Some(ref new_ctag) = calendar.ctag {
-            if let Err(error) = state.mailbox.store().update_calendar_ctag(cal_id, new_ctag) {
-                tracing::debug!(%error, "could not update calendar ctag");
-            }
+        if let Some(ref new_ctag) = calendar.ctag
+            && let Err(error) = state.mailbox.store().update_calendar_ctag(cal_id, new_ctag)
+        {
+            tracing::debug!(%error, "could not update calendar ctag");
         }
     }
 

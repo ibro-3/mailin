@@ -14,6 +14,19 @@ use crate::window::MainWindow;
 
 const APP_ID: &str = "dev.mailin.Mailin";
 
+/// One-shot notice left by a panic in the previous run (D3).
+static STARTUP_NOTICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_startup_notice(text: String) {
+    if let Ok(mut slot) = STARTUP_NOTICE.lock() {
+        *slot = Some(text);
+    }
+}
+
+pub(crate) fn take_startup_notice() -> Option<String> {
+    STARTUP_NOTICE.lock().ok()?.take()
+}
+
 /// Everything that lives for the whole process. The UI keeps an `Rc` of this.
 ///
 /// The config sits behind an `Rc<RefCell<…>>` so the preferences dialog can
@@ -136,10 +149,10 @@ pub fn run() -> glib::ExitCode {
                 let arg = arg.to_string_lossy();
                 if arg == "--compose" || arg == "-c" {
                     crate::window::set_compose_requested();
-                } else if arg.starts_with("mailto:") {
-                    if let Some(draft) = parse_mailto_uri(arg.as_ref()) {
-                        crate::window::set_mailto_draft(draft);
-                    }
+                } else if arg.starts_with("mailto:")
+                    && let Some(draft) = parse_mailto_uri(arg.as_ref())
+                {
+                    crate::window::set_mailto_draft(draft);
                 }
             }
             application.activate();

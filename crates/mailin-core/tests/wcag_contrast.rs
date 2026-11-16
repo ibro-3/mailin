@@ -55,3 +55,15 @@ fn winui_dark_tokens_meet_wcag_aa() {
     assert_contrast("#FF99A4", bg, 4.5, "dark destructive");
     assert_contrast("#FCE100", bg, 4.5, "dark warning");
 }
+
+#[test]
+fn winui_high_contrast_tokens_meet_wcag_aa() {
+    // Windows high contrast uses a black canvas (E17).
+    let bg = "#000000";
+    assert_contrast("#FFFFFF", bg, 4.5, "hc muted");
+    assert_contrast("#1AEBFF", bg, 4.5, "hc accent");
+    assert_contrast("#FF0000", bg, 4.5, "hc destructive");
+    assert_contrast("#FFFF00", bg, 4.5, "hc warning");
+    assert_contrast("#3FF23F", bg, 4.5, "hc success");
+    assert_contrast("#000000", "#FFFFFF", 4.5, "hc on-accent text");
+}

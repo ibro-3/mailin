@@ -22,6 +22,9 @@ fn main() -> gtk::glib::ExitCode {
             eprintln!("Mailin: could not initialize the log file: {error}");
         }
         mailin_core::logging::install_panic_hook(paths);
+        if let Some(notice) = mailin_core::logging::take_panic_notice(paths) {
+            app::set_startup_notice(notice);
+        }
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(

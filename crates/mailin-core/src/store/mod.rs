@@ -69,16 +69,16 @@ pub struct Store {
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-                // Restrict what we just created; a pre-existing user directory
-                // is left alone.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-                }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)?;
+            // Restrict what we just created; a pre-existing user directory
+            // is left alone.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
             }
         }
         let conn = Connection::open(path)?;
@@ -966,12 +966,12 @@ impl Store {
                     // Parse References header (space-separated Message-IDs)
                     for ref_msg_id in refs_str.split_whitespace() {
                         let ref_msg_id = ref_msg_id.trim_matches(|c| c == '<' || c == '>');
-                        if let Some(&parent_db_id) = msg_id_to_db_id.get(ref_msg_id) {
-                            if let Some(&parent_depth) = depths.get(&parent_db_id) {
-                                depths.insert(*db_id, parent_depth + 1);
-                                changed = true;
-                                break;
-                            }
+                        if let Some(&parent_db_id) = msg_id_to_db_id.get(ref_msg_id)
+                            && let Some(&parent_depth) = depths.get(&parent_db_id)
+                        {
+                            depths.insert(*db_id, parent_depth + 1);
+                            changed = true;
+                            break;
                         }
                     }
                 }
@@ -1448,13 +1448,12 @@ impl Store {
         })?;
         for row in rows {
             let action = row?;
-            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&action.payload_json) {
-                if payload
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&action.payload_json)
+                && payload
                     .get(payload_field)
                     .is_some_and(|value| json_value_equals(value, payload_value))
-                {
-                    return Ok(Some(action));
-                }
+            {
+                return Ok(Some(action));
             }
         }
         Ok(None)

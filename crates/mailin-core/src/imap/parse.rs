@@ -131,14 +131,13 @@ fn pgp_from_raw(raw: &[u8]) -> Option<ParsedPgp> {
                 continue;
             };
             let part_lower = part_headers.to_ascii_lowercase();
-            if part_lower.contains("application/pgp-encrypted")
+            if (part_lower.contains("application/pgp-encrypted")
                 || part_lower.contains("multipart/encrypted")
                 || part_lower.contains("multipart/signed")
-                || part_lower.contains("multipart/")
+                || part_lower.contains("multipart/"))
+                && let Some(pgp) = pgp_from_raw(part.as_bytes())
             {
-                if let Some(pgp) = pgp_from_raw(part.as_bytes()) {
-                    return Some(pgp);
-                }
+                return Some(pgp);
             }
         }
     }

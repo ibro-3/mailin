@@ -69,10 +69,8 @@ fn attr_values(tag: &str, attr: &str) -> Vec<String> {
             let right_ok = !bytes
                 .get(after)
                 .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_');
-            if right_ok {
-                if let Some((start, end)) = attr_value_span(bytes, after) {
-                    values.push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
-                }
+            if right_ok && let Some((start, end)) = attr_value_span(bytes, after) {
+                values.push(String::from_utf8_lossy(&bytes[start..end]).into_owned());
             }
         }
         i = rel + attr_bytes.len();

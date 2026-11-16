@@ -804,12 +804,12 @@ fn split_mime_entity(raw: &[u8]) -> Result<(String, String, String)> {
 fn header_blocks(headers: &str) -> Vec<String> {
     let mut blocks: Vec<String> = Vec::new();
     for line in headers.split("\r\n") {
-        if line.starts_with(' ') || line.starts_with('\t') {
-            if let Some(last) = blocks.last_mut() {
-                last.push_str("\r\n");
-                last.push_str(line);
-                continue;
-            }
+        if (line.starts_with(' ') || line.starts_with('\t'))
+            && let Some(last) = blocks.last_mut()
+        {
+            last.push_str("\r\n");
+            last.push_str(line);
+            continue;
         }
         if !line.is_empty() {
             blocks.push(line.to_owned());
