@@ -125,7 +125,12 @@ impl Mailin {
         let credentials: Arc<dyn CredentialsStore> =
             Arc::new(crate::credentials::MemoryCredentials::new());
 
-        let config = crate::Config::load(paths)?;
+        // A broken config never blocks startup: defaults are used and the
+        // broken file is moved aside. The front-ends surface a warning.
+        let (config, config_warning) = crate::Config::load_recovering(paths)?;
+        if let Some(warning) = config_warning {
+            tracing::warn!(%warning, "preferences were reset to defaults because they were unreadable");
+        }
         let config_cache = Arc::new(RwLock::new(Some(config)));
         let config_paths = Arc::new(paths.clone());
 

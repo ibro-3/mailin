@@ -1142,6 +1142,12 @@ impl MainWindow {
         Self::connect(&this);
         this.refresh_accounts();
 
+        // A broken preferences file was reset to defaults at startup; say
+        // so once the window is up.
+        if let Some(warning) = this.app.config_warning.clone() {
+            this.show_error(&warning);
+        }
+
         // A mailto: draft or a "compose" request that arrived before the
         // window was created is handled once the accounts are loaded and an
         // account is selected (see `apply_accounts`).

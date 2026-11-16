@@ -39,6 +39,9 @@ pub struct AppState {
     pub mailin: Arc<Mailin>,
     pub engine: Engine,
     pub toast_notifier: Option<ToastNotifier>,
+    /// Set when startup had to reset a broken preferences file to defaults;
+    /// shown as a banner once the window is up.
+    pub config_warning: Option<String>,
 }
 
 impl AppState {
@@ -55,8 +58,12 @@ impl AppState {
     fn open() -> Result<Self> {
         let paths = Paths::discover()?;
         paths.ensure()?;
-        let config = Config::load(&paths)?;
-        config.validate()?;
+        // A broken preferences file never blocks startup: defaults are
+        // used and the broken file moved aside. The banner says so.
+        let (config, config_warning) = Config::load_recovering(&paths)?;
+        if let Some(warning) = &config_warning {
+            tracing::warn!(%warning, "preferences were reset to defaults");
+        }
         let mailin = Arc::new(Mailin::open(&paths)?);
         let engine = Engine::start(Arc::clone(&mailin))?;
 
@@ -70,6 +77,7 @@ impl AppState {
             mailin,
             engine,
             toast_notifier,
+            config_warning,
         })
     }
 }
@@ -100,7 +108,23 @@ pub fn run() -> Result<()> {
     let _bootstrap = Bootstrap::initialize()?;
     let _apartment = Apartment::initialize()?;
 
-    let state = Arc::new(AppState::open().context("could not open the Mailin store")?);
+    let state = match AppState::open() {
+        Ok(state) => Arc::new(state),
+        Err(error) => {
+            tracing::error!(%error, "Mailin could not open its local data");
+            eprintln!("Mailin could not open its local data: {error:#}");
+            eprintln!();
+            eprintln!("Your mail on the server is not affected.");
+            if let Ok(paths) = Paths::discover() {
+                eprintln!(
+                    "If the database file is damaged, move it (and its -wal/-shm sidecars) aside and restart Mailin:"
+                );
+                eprintln!("  {}", paths.database_file().display());
+                eprintln!("Mailin will create a fresh database and download your mail again.");
+            }
+            return Err(error);
+        }
+    };
     let accounts = state
         .mailin
         .list_accounts()

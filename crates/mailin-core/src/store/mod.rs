@@ -81,7 +81,16 @@ impl Store {
                 }
             }
         }
-        let mut conn = Connection::open(path)?;
+        let conn = Connection::open(path)?;
+        // Fail fast on a damaged cache file instead of migrating or reading
+        // a broken database. The front-ends turn this error into the
+        // recovery dialog; resetting moves the file aside, never deletes it.
+        match conn.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)) {
+            Ok(result) if result == "ok" => {}
+            Ok(result) => return Err(Error::DatabaseCorrupt(result)),
+            Err(error) => return Err(Error::DatabaseCorrupt(error.to_string())),
+        }
+        let mut conn = conn;
         Self::configure(&mut conn)?;
         #[cfg(unix)]
         {

@@ -2609,6 +2609,7 @@ mod tests {
             config: Rc::new(RefCell::new(Config::default())),
             mailin,
             engine,
+            config_warning: None,
         });
 
         (app, window)

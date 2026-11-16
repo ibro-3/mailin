@@ -23,20 +23,26 @@ pub struct AppState {
     pub config: Rc<RefCell<Config>>,
     pub mailin: std::sync::Arc<Mailin>,
     pub engine: Engine,
+    /// Set when startup had to reset a broken preferences file to defaults.
+    /// Shown as a banner once the window is up.
+    pub config_warning: Option<String>,
 }
 
 impl AppState {
     fn open() -> anyhow::Result<Self> {
         let paths = Paths::discover()?;
         paths.ensure()?;
-        let config = Config::load(&paths)?;
-        config.validate()?;
+        let (config, config_warning) = Config::load_recovering(&paths)?;
+        if let Some(warning) = &config_warning {
+            tracing::warn!(%warning, "preferences were reset to defaults");
+        }
         let mailin = std::sync::Arc::new(Mailin::open(&paths)?);
         let engine = Engine::start(std::sync::Arc::clone(&mailin))?;
         Ok(Self {
             config: Rc::new(RefCell::new(config)),
             mailin,
             engine,
+            config_warning,
         })
     }
 }
@@ -72,14 +78,12 @@ pub fn run() -> glib::ExitCode {
     application.connect_startup({
         let state = Rc::clone(&state);
         let startup_error = Rc::clone(&startup_error);
-        move |_| match AppState::open() {
+        move |_| match attempt_open() {
             Ok(opened) => {
-                apply_theme(opened.config.borrow().ui.theme);
-                install_css();
                 *state.borrow_mut() = Some(Rc::new(opened));
             }
             Err(error) => {
-                *startup_error.borrow_mut() = Some(format!("{error:#}"));
+                *startup_error.borrow_mut() = Some(error);
             }
         }
     });
@@ -93,12 +97,8 @@ pub fn run() -> glib::ExitCode {
                 return;
             }
             if let Some(error) = startup_error.borrow().as_deref() {
-                let dialog = gtk::AlertDialog::builder()
-                    .message("Mailin could not start")
-                    .detail(error)
-                    .build();
-                let parent = application.active_window();
-                dialog.show(parent.as_ref());
+                let error = error.to_owned();
+                show_startup_recovery(application, &state, &startup_error, error);
                 return;
             }
             let Some(state) = state.borrow().clone() else {
@@ -151,6 +151,181 @@ pub fn run() -> glib::ExitCode {
     });
 
     application.run()
+}
+
+/// Attempt to open the application state. Applies the theme and CSS on
+/// success. `Err` carries a user-facing description otherwise.
+fn attempt_open() -> Result<AppState, String> {
+    match AppState::open() {
+        Ok(opened) => {
+            apply_theme(opened.config.borrow().ui.theme);
+            install_css();
+            Ok(opened)
+        }
+        Err(error) => {
+            let friendly = error
+                .downcast_ref::<mailin_core::Error>()
+                .map(|error| error.friendly())
+                .unwrap_or_else(|| format!("{error}"));
+            Err(format!("{friendly}\n\nDetails: {error:#}"))
+        }
+    }
+}
+
+/// The startup failure path: one recovery window with everything the user
+/// needs — retry, open the data folder, reset the local cache (salvages
+/// what it can) or quit. Never a dead-end alert.
+fn show_startup_recovery(
+    application: &adw::Application,
+    state: &Rc<RefCell<Option<Rc<AppState>>>>,
+    startup_error: &Rc<RefCell<Option<String>>>,
+    error: String,
+) {
+    // libadwaita dialogs need a parent window, so the recovery UI is the
+    // window itself.
+    let window = adw::ApplicationWindow::builder()
+        .application(application)
+        .title("Mailin")
+        .default_width(520)
+        .default_height(420)
+        .resizable(false)
+        .build();
+    let page = adw::StatusPage::builder()
+        .icon_name("dialog-error-symbolic")
+        .title("Mailin could not open its local data")
+        .description(error)
+        .build();
+
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::Center);
+    let retry = gtk::Button::with_label("Retry");
+    retry.add_css_class("suggested-action");
+    let folder = gtk::Button::with_label("Open data folder");
+    let reset = gtk::Button::with_label("Reset local cache…");
+    reset.add_css_class("destructive-action");
+    let quit = gtk::Button::with_label("Quit");
+    for button in [&retry, &folder, &reset, &quit] {
+        buttons.append(button);
+    }
+    page.set_child(Some(&buttons));
+    window.set_content(Some(&page));
+    window.present();
+
+    // After a failed retry, say so on the page instead of stacking dialogs.
+    fn note_failure(page: &adw::StatusPage, error: &str) {
+        page.set_description(Some(&format!(
+            "Still could not open the local data:\n\n{error}"
+        )));
+    }
+
+    retry.connect_clicked({
+        let app = application.clone();
+        let window = window.clone();
+        let page = page.clone();
+        let state = Rc::clone(state);
+        let startup_error = Rc::clone(startup_error);
+        move |_| match attempt_open() {
+            Ok(opened) => {
+                *state.borrow_mut() = Some(Rc::new(opened));
+                *startup_error.borrow_mut() = None;
+                window.close();
+                app.activate();
+            }
+            Err(error) => {
+                *startup_error.borrow_mut() = Some(error.clone());
+                note_failure(&page, &error);
+            }
+        }
+    });
+
+    folder.connect_clicked({
+        let window = window.clone();
+        move |_| {
+            if let Ok(paths) = mailin_core::Paths::discover() {
+                let uri = format!("file://{}", paths.data_dir.display());
+                let opened = gtk::gio::AppInfo::launch_default_for_uri(
+                    &uri,
+                    None::<&gtk::gio::AppLaunchContext>,
+                )
+                .is_ok();
+                if !opened {
+                    let fallback = adw::AlertDialog::builder()
+                        .heading("Data folder")
+                        .body(paths.data_dir.display().to_string())
+                        .build();
+                    fallback.add_response("ok", "OK");
+                    let parent = window.clone();
+                    gtk::glib::spawn_future_local(async move {
+                        let _ = fallback.choose_future(Some(&parent)).await;
+                    });
+                }
+            }
+        }
+    });
+
+    reset.connect_clicked({
+        let app = application.clone();
+        let window = window.clone();
+        let page = page.clone();
+        let state = Rc::clone(state);
+        let startup_error = Rc::clone(startup_error);
+        move |_| {
+            let confirm = adw::AlertDialog::builder()
+                .heading("Reset local cache?")
+                .body(
+                    "Mailin will move its local database aside and download your mail again. \
+                     Your accounts and queued mail are recovered from the old database when \
+                     possible; passwords stay in the keyring. Data that cannot be read stays \
+                     in the renamed files (mailin.db.corrupt-…).",
+                )
+                .build();
+            confirm.add_responses(&[("cancel", "Cancel"), ("reset", "Reset local cache")]);
+            confirm.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+            confirm.set_default_response(Some("cancel"));
+            confirm.set_close_response("cancel");
+            let app = app.clone();
+            let window = window.clone();
+            let page = page.clone();
+            let state = Rc::clone(&state);
+            let startup_error = Rc::clone(&startup_error);
+            let parent = window.clone();
+            gtk::glib::spawn_future_local(async move {
+                let response = confirm.choose_future(Some(&parent)).await;
+                if response.as_str() != "reset" {
+                    return;
+                }
+                let outcome = mailin_core::Paths::discover()
+                    .and_then(|paths| mailin_core::reset_local_cache(&paths));
+                match outcome {
+                    Ok(report) => {
+                        tracing::info!(?report, "local cache reset from the recovery window");
+                        match attempt_open() {
+                            Ok(opened) => {
+                                *state.borrow_mut() = Some(Rc::new(opened));
+                                *startup_error.borrow_mut() = None;
+                                window.close();
+                                app.activate();
+                            }
+                            Err(error) => {
+                                *startup_error.borrow_mut() = Some(error.clone());
+                                note_failure(&page, &error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        *startup_error.borrow_mut() = Some(message.clone());
+                        note_failure(&page, &message);
+                    }
+                }
+            });
+        }
+    });
+
+    quit.connect_clicked({
+        let app = application.clone();
+        move |_| app.quit()
+    });
 }
 
 pub fn apply_theme(theme: Theme) {

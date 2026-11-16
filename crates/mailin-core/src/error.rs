@@ -11,6 +11,9 @@ pub enum Error {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    #[error("the local database failed its integrity check: {0}")]
+    DatabaseCorrupt(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -157,6 +160,9 @@ impl Error {
             Error::ActionFailed { action, reason } => friendly_action(action, reason),
             Error::Database(_) => {
                 "The local mail database failed. Restart Mailin and try again.".into()
+            }
+            Error::DatabaseCorrupt(_) => {
+                "The local mail database is damaged. Mailin can reset its local cache and download your mail again; your accounts are recovered when possible.".into()
             }
             Error::Io(io) => match io.kind() {
                 std::io::ErrorKind::ConnectionRefused => {

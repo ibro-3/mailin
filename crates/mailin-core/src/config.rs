@@ -310,6 +310,65 @@ impl SearchHistory {
 }
 
 impl Config {
+    /// Rename `file` out of the way after an unrecoverable read/validation
+    /// failure, best effort. Returns where it went.
+    fn rename_aside(file: &std::path::Path) -> Option<std::path::PathBuf> {
+        let broken = file.with_extension("toml.broken");
+        if std::fs::rename(file, &broken).is_ok() {
+            return Some(broken);
+        }
+        let stamped = file.with_file_name(format!("config.toml.broken-{}", crate::now_unix()));
+        if std::fs::rename(file, &stamped).is_ok() {
+            return Some(stamped);
+        }
+        None
+    }
+
+    /// Describe a recovery that just happened.
+    fn recovery_report(
+        reason: &dyn std::fmt::Display,
+        moved: Option<std::path::PathBuf>,
+    ) -> String {
+        let where_to = moved
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "the configuration file".to_owned());
+        format!(
+            "Mailin couldn't read its preferences ({reason}). Defaults were restored; your previous file was saved as {where_to}."
+        )
+    }
+
+    /// Load `config.toml`, tolerating a broken or invalid file.
+    ///
+    /// A file that fails to parse or validate is renamed to
+    /// `config.toml.broken` and defaults are used, so a damaged preferences
+    /// file never prevents startup. Returns the config and, when recovery
+    /// happened, a user-facing description of what happened.
+    pub fn load_recovering(paths: &Paths) -> Result<(Self, Option<String>)> {
+        let file = paths.config_file();
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Self::default(), None));
+            }
+            Err(e) => return Err(Error::Io(e)),
+        };
+        match toml::from_str::<Self>(&text) {
+            Ok(config) => match config.validate() {
+                Ok(()) => Ok((config, None)),
+                Err(error) => {
+                    let moved = Self::rename_aside(&file);
+                    tracing::error!(%error, path = %file.display(), "ignoring invalid preferences");
+                    Ok((Self::default(), Some(Self::recovery_report(&error, moved))))
+                }
+            },
+            Err(error) => {
+                let moved = Self::rename_aside(&file);
+                tracing::error!(%error, path = %file.display(), "ignoring broken preferences");
+                Ok((Self::default(), Some(Self::recovery_report(&error, moved))))
+            }
+        }
+    }
+
     /// Load `config.toml`, falling back to defaults when it does not exist.
     pub fn load(paths: &Paths) -> Result<Self> {
         let file = paths.config_file();
@@ -517,6 +576,49 @@ mod tests {
         let mut config = Config::default();
         config.sync.poll_interval_secs = 1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn load_recovering_falls_back_to_defaults_and_renames_the_broken_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        paths.ensure().expect("ensure");
+        std::fs::write(paths.config_file(), "this is [ not valid toml").expect("write");
+
+        let (config, warning) = Config::load_recovering(&paths).expect("recovery");
+        assert_eq!(config, Config::default());
+        let warning = warning.expect("a warning is reported");
+        assert!(warning.contains("Defaults were restored"));
+        assert!(paths.config_file().with_extension("toml.broken").exists());
+        assert!(!paths.config_file().exists());
+    }
+
+    #[test]
+    fn load_recovering_rejects_out_of_range_values_the_same_way() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        paths.ensure().expect("ensure");
+        std::fs::write(paths.config_file(), "[ui]\npage_size = 0\n").expect("write");
+
+        let (config, warning) = Config::load_recovering(&paths).expect("recovery");
+        assert_eq!(config, Config::default());
+        assert!(warning.is_some());
+        assert!(paths.config_file().with_extension("toml.broken").exists());
+    }
+
+    #[test]
+    fn load_recovering_passes_a_good_file_through() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        paths.ensure().expect("ensure");
+        let mut config = Config::default();
+        config.sync.poll_interval_secs = 120;
+        config.save(&paths).expect("save");
+
+        let (loaded, warning) = Config::load_recovering(&paths).expect("load");
+        assert_eq!(loaded, config);
+        assert!(warning.is_none());
+        assert!(paths.config_file().exists());
     }
 
     #[test]

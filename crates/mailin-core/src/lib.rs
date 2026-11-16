@@ -32,6 +32,7 @@ pub mod model;
 pub mod oauth;
 pub mod pgp;
 pub mod plugins;
+mod recovery;
 pub mod rules;
 pub mod search;
 mod smtp;
@@ -69,6 +70,7 @@ pub use model::{
 
 pub use oauth::{PendingAuthorization, ProviderEndpoints, ResolvedEndpoints};
 pub use plugins::PluginSystem;
+pub use recovery::{SalvageReport, reset_local_cache};
 pub use store::{FolderUpsert, Store};
 pub use text::{plural, plural_noun, plural_suffix};
 

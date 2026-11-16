@@ -4840,6 +4840,11 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     connect(&this)?;
     this.refresh_accounts();
 
+    // A broken preferences file was reset to defaults at startup; say so.
+    if let Some(warning) = state.config_warning.clone() {
+        this.show_error(&warning);
+    }
+
     // A mailto: draft captured at startup opens the composer once the main
     // window exists. (Protocol activation between launches is not wired yet:
     // that needs AppInstance rather than command-line arguments.)
