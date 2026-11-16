@@ -71,6 +71,9 @@ type SnapshotResult = std::result::Result<OutgoingMessage, String>;
 /// Collects the composer state and hands a finished message to a one-shot callback.
 type SnapshotFn = Rc<dyn Fn(Box<dyn FnOnce(SnapshotResult)>)>;
 
+/// A reusable send action. The flag means "send despite the missing subject".
+type SendAction = Rc<dyn Fn(bool)>;
+
 /// A one-shot message callback shared behind a take-once slot.
 type SnapshotCallback = Rc<RefCell<Option<Box<dyn FnOnce(SnapshotResult)>>>>;
 
@@ -83,6 +86,82 @@ fn jsc_string(value: &JSValue) -> String {
         serde_json::from_str::<String>(&raw).unwrap_or(raw)
     } else {
         raw
+    }
+}
+
+/// One actionable row in the composer's Insert menu (E10).
+fn insert_row(title: &str, subtitle: &str) -> adw::ActionRow {
+    adw::ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .activatable(true)
+        .build()
+}
+
+/// A second-level page of the Insert menu: a Back button, a heading and a
+/// scrollable body. The returned button switches back to the menu page.
+fn insert_subpage(title: &str, content: &impl IsA<gtk::Widget>) -> (gtk::Box, gtk::Button) {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    heading.set_margin_top(6);
+    heading.set_margin_start(6);
+    heading.set_margin_end(6);
+    let back = gtk::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .tooltip_text("Back to the insert menu")
+        .build();
+    back.add_css_class("flat");
+    {
+        use gtk::accessible::Property;
+        back.update_property(&[Property::Label("Back to the insert menu")]);
+    }
+    let label = gtk::Label::builder().label(title).xalign(0.0).build();
+    label.add_css_class("heading");
+    heading.append(&back);
+    heading.append(&label);
+    page.append(&heading);
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(360)
+        .child(content)
+        .build();
+    page.append(&scroller);
+    (page, back)
+}
+
+/// Validate one address-list field and reflect the result on the row, so a
+/// malformed recipient is visible before the user presses Send (E8).
+fn validate_recipient_row(row: &adw::EntryRow) -> bool {
+    let text = row.text().to_string();
+    if text.trim().is_empty() {
+        row.remove_css_class("error");
+        row.set_tooltip_text(None::<&str>);
+        return true;
+    }
+    match recipient_addresses(&text) {
+        Ok(_) => {
+            row.remove_css_class("error");
+            row.set_tooltip_text(None::<&str>);
+            true
+        }
+        Err(error) => {
+            let message = error.to_string();
+            row.add_css_class("error");
+            row.set_tooltip_text(Some(&message));
+            false
+        }
+    }
+}
+
+/// Current local time as `HH:MM`, used by the "Draft saved" confirmation (E9).
+fn now_hh_mm() -> String {
+    match glib::DateTime::now_local() {
+        Ok(now) => now
+            .format("%H:%M")
+            .map(|text| text.to_string())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
     }
 }
 
@@ -164,30 +243,19 @@ pub fn present(
     save.add_css_class("flat");
     header.pack_end(&save);
 
-    let attach = gtk::Button::builder()
-        .icon_name("mail-attachment-symbolic")
-        .tooltip_text("Attach files")
+    // E10: one "Insert" menu (template, contact, signature, attachment)
+    // instead of a header icon per item.
+    let insert_btn = gtk::MenuButton::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Insert a template, contact, signature or attachment")
         .build();
-    attach.add_css_class("flat");
-    attach.set_size_request(32, 32);
+    insert_btn.add_css_class("flat");
+    insert_btn.set_size_request(32, 32);
     {
         use gtk::accessible::Property;
-        attach.update_property(&[Property::Label("Attach files")]);
+        insert_btn.update_property(&[Property::Label("Insert")]);
     }
-    header.pack_start(&attach);
-
-    // Templates menu button
-    let templates_btn = gtk::MenuButton::builder()
-        .icon_name("document-template-symbolic")
-        .tooltip_text("Message templates")
-        .build();
-    templates_btn.add_css_class("flat");
-    templates_btn.set_size_request(32, 32);
-    {
-        use gtk::accessible::Property;
-        templates_btn.update_property(&[Property::Label("Message templates")]);
-    }
-    header.pack_start(&templates_btn);
+    header.pack_start(&insert_btn);
 
     // Rich text editor with WebKit WebView (create early so formatting buttons can use it)
     let user_content = UserContentManager::new();
@@ -504,8 +572,11 @@ pub fn present(
 
     let banner = adw::Banner::new("");
     banner.set_revealed(false);
-    // Banner button action: 0=none, 1=open key manager, 2=send without encryption
+    // Banner button action: 0=none, 1=open key manager, 2=send without encryption,
+    // 3=retry a failed send, 4=send without a subject (E8/E9). The send action
+    // itself is installed once the composer is fully wired, below.
     let banner_action: Rc<Cell<u8>> = Rc::new(Cell::new(0));
+    let send_action: Rc<RefCell<Option<SendAction>>> = Rc::new(RefCell::new(None));
     {
         let app = Rc::clone(&app);
         let window = window.clone();
@@ -514,6 +585,7 @@ pub fn present(
         let encrypt_toggle = encrypt_toggle.clone();
         let pgp_encrypt = Rc::clone(&pgp_encrypt);
         let banner_for_btn = banner.clone();
+        let send_action = Rc::clone(&send_action);
         banner.connect_button_clicked(move |_| match banner_action.get() {
             1 => crate::pgp_keys::present(
                 window.upcast_ref::<gtk::Window>(),
@@ -527,6 +599,12 @@ pub fn present(
                 banner_for_btn.set_revealed(false);
                 banner_for_btn.set_button_label(None);
                 banner_action.set(0);
+            }
+            // Retry a failed send, or send after the "no subject" warning.
+            3 | 4 => {
+                if let Some(send) = send_action.borrow().as_ref() {
+                    send(true);
+                }
             }
             _ => {}
         });
@@ -751,12 +829,18 @@ pub fn present(
             },
         );
     }
-    // M4-E: mark dirty on header edits.
-    for row in [&to_row, &cc_row, &bcc_row, &subject_row] {
+    // M4-E: mark dirty on header edits. E8: validate recipients as they are
+    // typed so a bad address is highlighted before Send.
+    for row in [&to_row, &cc_row, &bcc_row] {
         let mark_dirty = Rc::clone(&mark_dirty);
-        row.connect_changed(move |_| {
+        row.connect_changed(move |row| {
             mark_dirty();
+            validate_recipient_row(row);
         });
+    }
+    {
+        let mark_dirty = Rc::clone(&mark_dirty);
+        subject_row.connect_changed(move |_| mark_dirty());
     }
     rebuild_attachments(
         &attachment_list,
@@ -922,17 +1006,188 @@ pub fn present(
         webview.add_controller(drop);
     }
 
-    // Templates popover
-    let templates_popover = gtk::Popover::builder()
+    // E10: the Insert menu is one popover with three pages — the menu, the
+    // template list and the contact picker — so the header keeps one button.
+    let insert_popover = gtk::Popover::builder()
         .has_arrow(true)
         .position(gtk::PositionType::Bottom)
         .build();
+    let insert_stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::SlideLeftRight)
+        .build();
+    insert_popover.set_child(Some(&insert_stack));
+    insert_btn.set_popover(Some(&insert_popover));
+
+    let menu_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .build();
+    menu_list.add_css_class("boxed-list");
+    let insert_menu_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    insert_menu_page.append(&menu_list);
+    let template_row = insert_row("Template", "Insert a saved message template");
+    let contact_row = insert_row("Contact", "Insert an address from your contacts");
+    let signature_row = insert_row("Signature", "Insert your signature at the cursor");
+    let attachment_row = insert_row("Attachment", "Attach files to this message");
+    for row in [&template_row, &contact_row, &signature_row, &attachment_row] {
+        menu_list.append(row);
+    }
+
     let templates_list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .build();
     templates_list.add_css_class("boxed-list");
-    templates_popover.set_child(Some(&templates_list));
-    templates_btn.set_popover(Some(&templates_popover));
+    let (templates_page, templates_back) = insert_subpage("Templates", &templates_list);
+
+    // Contact picker: a local, account-scoped search over the contacts the
+    // store seeded from mail. Activating a row appends it to "To".
+    let contacts_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    contacts_box.set_margin_start(6);
+    contacts_box.set_margin_end(6);
+    contacts_box.set_margin_bottom(6);
+    let contact_search = gtk::SearchEntry::builder()
+        .placeholder_text("Search contacts")
+        .build();
+    contacts_box.append(&contact_search);
+    let contact_results = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .build();
+    contact_results.add_css_class("boxed-list");
+    contacts_box.append(&contact_results);
+    let (contacts_page, contacts_back) = insert_subpage("Contacts", &contacts_box);
+
+    insert_stack.add_named(&insert_menu_page, Some("menu"));
+    insert_stack.add_named(&templates_page, Some("templates"));
+    insert_stack.add_named(&contacts_page, Some("contacts"));
+    insert_stack.set_visible_child_name("menu");
+    for back in [templates_back, contacts_back] {
+        let stack = insert_stack.clone();
+        back.connect_clicked(move |_| stack.set_visible_child_name("menu"));
+    }
+
+    let contact_generation = Rc::new(Cell::new(0u64));
+    let run_contact_search: Rc<dyn Fn()> = {
+        let app = Rc::clone(&app);
+        let account_id = account.id;
+        let results = contact_results.clone();
+        let search = contact_search.clone();
+        let generation = Rc::clone(&contact_generation);
+        let to_row = to_row.clone();
+        let popover = insert_popover.clone();
+        Rc::new(move || {
+            let query = search.text().to_string();
+            let current = generation.get().wrapping_add(1);
+            generation.set(current);
+            let mailin = std::sync::Arc::clone(&app.mailin);
+            let results = results.clone();
+            let generation = Rc::clone(&generation);
+            let to_row = to_row.clone();
+            let popover = popover.clone();
+            crate::background::spawn_result(
+                move || {
+                    mailin
+                        .store()
+                        .search_contacts(&account_id, &query, 20)
+                        .unwrap_or_default()
+                },
+                move |result| {
+                    if generation.get() != current {
+                        return;
+                    }
+                    let Ok(contacts) = result else {
+                        return;
+                    };
+                    while let Some(child) = results.first_child() {
+                        results.remove(&child);
+                    }
+                    if contacts.is_empty() {
+                        results.append(
+                            &adw::ActionRow::builder()
+                                .title("No matching contacts")
+                                .build(),
+                        );
+                        return;
+                    }
+                    for contact in contacts {
+                        let name = contact.display_name.trim();
+                        let (title, subtitle) = if name.is_empty() {
+                            (contact.email.clone(), String::new())
+                        } else {
+                            (name.to_owned(), contact.email.clone())
+                        };
+                        let row = adw::ActionRow::builder()
+                            .title(&title)
+                            .subtitle(&subtitle)
+                            .activatable(true)
+                            .build();
+                        let email = contact.email.clone();
+                        let to_row = to_row.clone();
+                        let popover = popover.clone();
+                        row.connect_activated(move |_| {
+                            let current = to_row.text().to_string();
+                            let new_text = if current.trim().is_empty() {
+                                email.clone()
+                            } else {
+                                format!("{}, {}", current.trim().trim_end_matches(','), email)
+                            };
+                            to_row.set_text(&new_text);
+                            popover.popdown();
+                        });
+                        results.append(&row);
+                    }
+                },
+            );
+        })
+    };
+    {
+        let run_search = Rc::clone(&run_contact_search);
+        contact_search.connect_search_changed(move |_| run_search());
+    }
+    {
+        let stack = insert_stack.clone();
+        let search = contact_search.clone();
+        let run_search = Rc::clone(&run_contact_search);
+        contact_row.connect_activated(move |_| {
+            stack.set_visible_child_name("contacts");
+            // Seed the list with the most-used contacts before typing.
+            run_search();
+            search.grab_focus();
+        });
+    }
+    {
+        let stack = insert_stack.clone();
+        template_row.connect_activated(move |_| stack.set_visible_child_name("templates"));
+    }
+    {
+        let webview = webview.clone();
+        let mark_dirty = Rc::clone(&mark_dirty);
+        let popover = insert_popover.clone();
+        let signature_html = account.signature_html.clone();
+        let signature = account.signature.clone();
+        signature_row.connect_activated(move |_| {
+            popover.popdown();
+            let block = if signature_html.trim().is_empty() {
+                let plain = mailin_core::compose::signature_block(&signature);
+                if plain.is_empty() {
+                    String::new()
+                } else {
+                    let escaped = mailin_core::html::escape(&plain).replace('\n', "<br>");
+                    format!("<div class=\"mailin-signature\">{escaped}</div>")
+                }
+            } else {
+                mailin_core::compose::signature_html_block(&signature_html)
+            };
+            if block.is_empty() {
+                return;
+            }
+            mark_dirty();
+            let script = format!(
+                "__mailinInsert({});",
+                serde_json::to_string(&format!("<br>{block}"))
+                    .unwrap_or_else(|_| "\"\"".to_owned())
+            );
+            webview.evaluate_javascript(&script, None, None, None::<&gio::Cancellable>, |_| {});
+        });
+    }
 
     // Clone widgets for use in populate_templates closure
     let to_row_for_populate = to_row.clone();
@@ -952,7 +1207,7 @@ pub fn present(
     let populate_templates: Rc<dyn Fn()> = {
         let app = Rc::clone(&app);
         let templates_list = templates_list.clone();
-        let templates_popover = templates_popover.clone();
+        let insert_popover = insert_popover.clone();
         let mark_dirty = Rc::clone(&mark_dirty);
         let banner_action = Rc::clone(&banner_action_for_populate);
         let generation = Rc::clone(&templates_generation);
@@ -972,11 +1227,11 @@ pub fn present(
             let webview = webview_for_populate.clone();
             let app_for_save = Rc::clone(&app);
             let account_id = account.id;
-            let templates_popover_for_save = templates_popover.clone();
+            let insert_popover_for_save = insert_popover.clone();
             let banner = banner_for_populate.clone();
             let window = window_for_populate.clone();
             save_row.connect_activated(move |_| {
-                templates_popover_for_save.popdown();
+                insert_popover_for_save.popdown();
                 save_as_template_dialog(
                     &window,
                     &app_for_save,
@@ -993,7 +1248,7 @@ pub fn present(
             generation.set(current);
             let mailin = std::sync::Arc::clone(&app.mailin);
             let templates_list = templates_list.clone();
-            let templates_popover = templates_popover.clone();
+            let insert_popover = insert_popover.clone();
             let to_row_for_populate = to_row_for_populate.clone();
             let cc_row_for_populate = cc_row_for_populate.clone();
             let bcc_row_for_populate = bcc_row_for_populate.clone();
@@ -1043,7 +1298,7 @@ pub fn present(
                         let subject_row = subject_row_for_populate.clone();
                         let webview = webview_for_populate.clone();
                         let window = window_for_populate.clone();
-                        let templates_popover = templates_popover.clone();
+                        let insert_popover = insert_popover.clone();
                         let banner = banner_for_populate.clone();
                         let banner_action = Rc::clone(&banner_action);
                         let mark_dirty = Rc::clone(&mark_dirty);
@@ -1058,7 +1313,7 @@ pub fn present(
                             let bcc_row = bcc_row.clone();
                             let subject_row = subject_row.clone();
                             let webview = webview.clone();
-                            let templates_popover = templates_popover.clone();
+                            let insert_popover = insert_popover.clone();
                             let banner = banner.clone();
                             let banner_action = Rc::clone(&banner_action);
                             let mark_dirty = Rc::clone(&mark_dirty);
@@ -1123,7 +1378,7 @@ pub fn present(
                                         },
                                     );
                                     mark_dirty();
-                                    templates_popover.popdown();
+                                    insert_popover.popdown();
                                     banner_action.set(0);
                                     banner.set_button_label(None::<&str>);
                                     banner.set_title(if removed {
@@ -1185,14 +1440,18 @@ pub fn present(
             );
         })
     };
-    // Re-populate every time the popover opens so a template saved during this
-    // session (or from elsewhere) appears without reopening the composer.
-    templates_popover.connect_show({
+    // Re-populate every time the menu opens so a template saved during this
+    // session (or from elsewhere) appears without reopening the composer. The
+    // menu always opens on its first page.
+    insert_popover.connect_show({
         let populate = Rc::clone(&populate_templates);
-        move |_| populate()
+        let stack = insert_stack.clone();
+        move |_| {
+            stack.set_visible_child_name("menu");
+            populate();
+        }
     });
-    templates_popover.set_autohide(true);
-    populate_templates();
+    insert_popover.set_autohide(true);
 
     // Contact autocomplete for recipient fields
     let setup_autocomplete = {
@@ -1670,22 +1929,32 @@ pub fn present(
                         move |result| match result {
                             Ok(Ok((_, outgoing))) => {
                                 app.engine.save_draft(account_id, outgoing);
-                                banner_action.set(0);
-                                banner.set_button_label(None::<&str>);
-                                banner.set_title("Draft saved");
-                                banner.set_revealed(true);
                                 // M4-E: the title drops the dirty marker once the draft
                                 // is stored — but only when nothing changed meanwhile.
                                 if generation.get() == captured {
                                     mark_clean();
                                 }
-                                // M4-E: auto-hide transient confirmation.
-                                let banner_hide = banner.clone();
-                                glib::timeout_add_seconds_local_once(3, move || {
-                                    if banner_hide.title().as_str() == "Draft saved" {
-                                        banner_hide.set_revealed(false);
-                                    }
-                                });
+                                // E9: keep a send failure (or the no-subject
+                                // warning) on screen; the 30-second auto-save
+                                // must not replace an action the user still has
+                                // to take.
+                                if !matches!(banner_action.get(), 3 | 4) || !banner.is_revealed() {
+                                    banner_action.set(0);
+                                    banner.set_button_label(None::<&str>);
+                                    let saved_title = format!("Draft saved {}", now_hh_mm())
+                                        .trim_end()
+                                        .to_owned();
+                                    banner.set_title(&saved_title);
+                                    banner.set_revealed(true);
+                                    // M4-E: auto-hide transient confirmation.
+                                    let banner_hide = banner.clone();
+                                    let expected = saved_title;
+                                    glib::timeout_add_seconds_local_once(3, move || {
+                                        if banner_hide.title().as_str() == expected {
+                                            banner_hide.set_revealed(false);
+                                        }
+                                    });
+                                }
                             }
                             Ok(Err(error)) => {
                                 banner_action.set(0);
@@ -1733,6 +2002,23 @@ pub fn present(
         keys.connect_key_pressed(move |_, key, _, state| {
             if state.contains(gdk::ModifierType::CONTROL_MASK) && key == gdk::Key::s {
                 save_draft(true);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(keys);
+    }
+
+    // E14: Escape closes the composer through the same guarded path as the
+    // window close button, so the unsaved-draft prompt still appears. Child
+    // popovers handle their own Escape first.
+    {
+        let keys = gtk::EventControllerKey::new();
+        let window_for_escape = window.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                window_for_escape.close();
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -1831,7 +2117,7 @@ pub fn present(
     let picker_banner_action = Rc::clone(&banner_action);
     let picker_dirty = Rc::clone(&dirty);
     let mark_dirty_for_picker = Rc::clone(&mark_dirty);
-    attach.connect_clicked(move |_| {
+    let pick_attachments: Rc<dyn Fn()> = Rc::new(move || {
         let dialog = gtk::FileDialog::builder().title("Attach files").build();
         let list = picker_list.clone();
         let group = picker_group.clone();
@@ -1868,106 +2154,156 @@ pub fn present(
             },
         );
     });
+    // E10: the Insert menu's "Attachment" row replaces the header attach icon.
+    {
+        let pick = Rc::clone(&pick_attachments);
+        attachment_row.connect_activated(move |_| pick());
+    }
 
-    let close_window = window.clone();
-    let send_snapshot = Rc::clone(&snapshot);
-    let send_key = Rc::clone(&draft_key);
-    let send_sent = Rc::clone(&sent);
-    let send_closed = Rc::clone(&closed);
-    let send_encrypt = Rc::clone(&pgp_encrypt);
-    let send_sign = Rc::clone(&pgp_sign);
-    let send_for_click = send.clone();
-    send.connect_clicked(move |_| {
+    // E8/E9: the send action is reusable so the banner can offer Retry after a
+    // failure, or "Send without subject" after the empty-subject warning.
+    let do_send: SendAction = {
         let app = Rc::clone(&app);
-        let send_for_click = send_for_click.clone();
-        send_for_click.set_sensitive(false);
-        let send_for_report = send_for_click.clone();
+        let send_for_click = send.clone();
+        let snapshot = Rc::clone(&snapshot);
         let banner = banner.clone();
-        let send_key = Rc::clone(&send_key);
-        let send_sent = Rc::clone(&send_sent);
-        let send_closed = Rc::clone(&send_closed);
-        let send_encrypt = Rc::clone(&send_encrypt);
-        let send_sign = Rc::clone(&send_sign);
-        let close_window = close_window.clone();
+        let banner_action = Rc::clone(&banner_action);
+        let send_key = Rc::clone(&draft_key);
+        let send_sent = Rc::clone(&sent);
+        let send_closed = Rc::clone(&closed);
+        let send_encrypt = Rc::clone(&pgp_encrypt);
+        let send_sign = Rc::clone(&pgp_sign);
+        let close_window = window.clone();
         let on_sent = on_sent.clone();
-        send_snapshot(Box::new(move |result| {
-            let outgoing = match result {
-                Ok(outgoing) => outgoing,
-                // The body could not be read from the WebView: do not send a
-                // message whose content was never captured.
-                Err(error) => {
+        let account_id = account.id;
+        let to_row = to_row.clone();
+        let cc_row = cc_row.clone();
+        let bcc_row = bcc_row.clone();
+        let subject_row = subject_row.clone();
+        Rc::new(move |ignore_subject: bool| {
+            // E8: reject malformed recipients before touching the network.
+            let mut recipients_ok = true;
+            for row in [&to_row, &cc_row, &bcc_row] {
+                recipients_ok &= validate_recipient_row(row);
+            }
+            if !recipients_ok {
+                banner.set_button_label(None::<&str>);
+                banner_action.set(0);
+                banner.set_title("Check the highlighted recipient addresses before sending.");
+                banner.set_revealed(true);
+                return;
+            }
+            // E8: a missing subject warns instead of blocking; the banner button
+            // re-runs the send with the warning acknowledged.
+            if !ignore_subject && subject_row.text().trim().is_empty() {
+                banner.set_title("This message has no subject. Send it without one?");
+                banner.set_button_label(Some("Send without subject"));
+                banner_action.set(4);
+                banner.set_revealed(true);
+                return;
+            }
+
+            banner.set_button_label(None::<&str>);
+            banner_action.set(0);
+            banner.set_revealed(false);
+            send_for_click.set_sensitive(false);
+            let send_for_report = send_for_click.clone();
+            let banner = banner.clone();
+            let banner_action = Rc::clone(&banner_action);
+            let send_key = Rc::clone(&send_key);
+            let send_sent = Rc::clone(&send_sent);
+            let send_closed = Rc::clone(&send_closed);
+            let send_encrypt = Rc::clone(&send_encrypt);
+            let send_sign = Rc::clone(&send_sign);
+            let close_window = close_window.clone();
+            let on_sent = on_sent.clone();
+            let app = Rc::clone(&app);
+            snapshot(Box::new(move |result| {
+                let outgoing = match result {
+                    Ok(outgoing) => outgoing,
+                    // The body could not be read from the WebView: do not send a
+                    // message whose content was never captured.
+                    Err(error) => {
+                        banner.set_title(&format!("Could not send: {error}"));
+                        banner.set_button_label(Some("Retry"));
+                        banner_action.set(3);
+                        banner.set_revealed(true);
+                        send_for_report.set_sensitive(true);
+                        return;
+                    }
+                };
+                // Envelope validation only covers sender and recipients; reject
+                // an empty body here instead of silently sending it. A message
+                // carrying attachments is still valid (E8).
+                if outgoing.body.trim().is_empty()
+                    && outgoing
+                        .html_body
+                        .as_deref()
+                        .is_none_or(|html| html.trim().is_empty())
+                    && outgoing.attachments.is_empty()
+                {
                     banner.set_button_label(None::<&str>);
-                    banner.set_title(&format!("Could not send: {error}"));
+                    banner_action.set(0);
+                    banner.set_title("The message body is empty");
                     banner.set_revealed(true);
                     send_for_report.set_sensitive(true);
                     return;
                 }
-            };
-            // Envelope validation only covers sender and recipients; reject
-            // an empty body here instead of silently sending it.
-            if outgoing.body.trim().is_empty()
-                && outgoing
-                    .html_body
-                    .as_deref()
-                    .is_none_or(|html| html.trim().is_empty())
-            {
-                banner.set_button_label(None::<&str>);
-                banner.set_title("The message body is empty");
-                banner.set_revealed(true);
-                send_for_report.set_sensitive(true);
-                return;
-            }
-            let pgp = PgpOptions {
-                encrypt: send_encrypt.get(),
-                sign: send_sign.get(),
-            };
-            // Building the message base64-encodes the body and every
-            // attachment, the PGP step encrypts or signs it, and storing it
-            // writes the whole raw message to the outbox: all of that runs on
-            // a background thread so the composer stays responsive.
-            let mailin = std::sync::Arc::clone(&app.mailin);
-            let account_id = account.id;
-            crate::background::spawn_result(
-                move || {
-                    let (raw, envelope) = mailin
-                        .build_outgoing(&account_id, &outgoing, pgp)
-                        .map_err(|error| error.to_string())?;
-                    let envelope_json =
-                        serde_json::to_string(&envelope).map_err(|error| error.to_string())?;
-                    mailin
-                        .queue_outgoing(&account_id, &raw, &envelope_json)
-                        .map_err(|error| error.to_string())
-                },
-                move |result| match result {
-                    Ok(Ok(_)) => {
-                        // The message is queued: wake the sender so it does
-                        // not wait for its next poll.
-                        app.engine.wake_outbox();
-                        let key = send_key.borrow().clone();
-                        if !key.is_empty() {
-                            app.engine.discard_draft(account_id, key);
+                let pgp = PgpOptions {
+                    encrypt: send_encrypt.get(),
+                    sign: send_sign.get(),
+                };
+                // Building the message base64-encodes the body and every
+                // attachment, the PGP step encrypts or signs it, and storing it
+                // writes the whole raw message to the outbox: all of that runs on
+                // a background thread so the composer stays responsive.
+                let mailin = std::sync::Arc::clone(&app.mailin);
+                crate::background::spawn_result(
+                    move || {
+                        let (raw, envelope) = mailin
+                            .build_outgoing(&account_id, &outgoing, pgp)
+                            .map_err(|error| error.to_string())?;
+                        let envelope_json =
+                            serde_json::to_string(&envelope).map_err(|error| error.to_string())?;
+                        mailin
+                            .queue_outgoing(&account_id, &raw, &envelope_json)
+                            .map_err(|error| error.to_string())
+                    },
+                    move |result| match result {
+                        Ok(Ok(_)) => {
+                            // The message is queued: wake the sender so it does
+                            // not wait for its next poll.
+                            app.engine.wake_outbox();
+                            let key = send_key.borrow().clone();
+                            if !key.is_empty() {
+                                app.engine.discard_draft(account_id, key);
+                            }
+                            send_sent.set(true);
+                            send_closed.set(true);
+                            on_sent();
+                            close_window.close();
                         }
-                        send_sent.set(true);
-                        send_closed.set(true);
-                        on_sent();
-                        close_window.close();
-                    }
-                    Ok(Err(error)) => {
-                        banner.set_button_label(None::<&str>);
-                        banner.set_title(&format!("Could not queue the message: {error}"));
-                        banner.set_revealed(true);
-                        send_for_report.set_sensitive(true);
-                    }
-                    Err(failed) => {
-                        banner.set_button_label(None::<&str>);
-                        banner.set_title(&format!("Could not send: {}", failed.message));
-                        banner.set_revealed(true);
-                        send_for_report.set_sensitive(true);
-                    }
-                },
-            );
-        }));
-    });
+                        Ok(Err(error)) => {
+                            banner.set_title(&format!("Could not queue the message: {error}"));
+                            banner.set_button_label(Some("Retry"));
+                            banner_action.set(3);
+                            banner.set_revealed(true);
+                            send_for_report.set_sensitive(true);
+                        }
+                        Err(failed) => {
+                            banner.set_title(&format!("Could not send: {}", failed.message));
+                            banner.set_button_label(Some("Retry"));
+                            banner_action.set(3);
+                            banner.set_revealed(true);
+                            send_for_report.set_sensitive(true);
+                        }
+                    },
+                );
+            }));
+        })
+    };
+    *send_action.borrow_mut() = Some(Rc::clone(&do_send));
+    send.connect_clicked(move |_| do_send(false));
 
     // Ctrl+Enter sends from anywhere in the composer.
     let controller = gtk::EventControllerKey::new();
