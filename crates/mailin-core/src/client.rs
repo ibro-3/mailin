@@ -426,6 +426,21 @@ impl Mailin {
         self.store.unread_total(account)
     }
 
+    /// Snapshot the preferences the client advertises to workers (the GTK
+    /// and WinUI preferences install into this same cache on save).
+    pub fn config_snapshot(&self) -> Option<crate::Config> {
+        self.config_cache.read().ok().and_then(|c| c.clone())
+    }
+
+    /// Install `config` as the preferences the running client sees. The
+    /// front-ends call this after a valid configuration has been persisted,
+    /// so workers pick up the new values without a restart.
+    pub fn install_config(&self, config: crate::Config) -> Result<()> {
+        let mut cache = self.config_cache.write().map_err(|_| Error::LockPoisoned)?;
+        *cache = Some(config);
+        Ok(())
+    }
+
     pub fn unread_total_all(&self) -> Result<u32> {
         let accounts = self.list_accounts()?;
         let mut total = 0;

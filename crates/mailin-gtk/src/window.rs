@@ -4883,7 +4883,10 @@ impl MainWindow {
         // The reader button reflects the open message; apply its direction
         // to every selected message. Without an open message there is no
         // selection at all, and mark_selected_seen says so.
-        let direction = self.selected_message().map(|m| !m.is_seen()).unwrap_or(true);
+        let direction = self
+            .selected_message()
+            .map(|m| !m.is_seen())
+            .unwrap_or(true);
         self.mark_selected_seen(direction);
     }
 

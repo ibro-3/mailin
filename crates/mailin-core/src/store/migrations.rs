@@ -21,9 +21,13 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         14,
         include_str!("../../migrations/0014_folder_subscribed.sql"),
     ),
+    (
+        15,
+        include_str!("../../migrations/0015_folders_prune_watermark.sql"),
+    ),
 ];
 
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 #[cfg(test)]
 mod tests {

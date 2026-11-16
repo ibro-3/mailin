@@ -216,8 +216,9 @@ pub enum BodySyncPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SyncPreferences {
+    /// Default poll interval used when an account does not override it in
+    /// its own settings.
     pub poll_interval_secs: u64,
-    pub max_parallel_accounts: u8,
     pub body_sync: BodySyncPolicy,
     /// Keep message headers for this many days; `0` disables pruning.
     pub retention_days: u32,
@@ -227,7 +228,6 @@ impl Default for SyncPreferences {
     fn default() -> Self {
         Self {
             poll_interval_secs: 60,
-            max_parallel_accounts: 3,
             body_sync: BodySyncPolicy::OnOpen,
             retention_days: 0,
         }
@@ -342,11 +342,6 @@ impl Config {
         if self.sync.poll_interval_secs < 15 {
             return Err(Error::Config(
                 "sync.poll_interval_secs must be at least 15".into(),
-            ));
-        }
-        if !(1..=16).contains(&self.sync.max_parallel_accounts) {
-            return Err(Error::Config(
-                "sync.max_parallel_accounts must be between 1 and 16".into(),
             ));
         }
         Ok(())
@@ -503,10 +498,6 @@ mod tests {
 
         let mut config = Config::default();
         config.sync.poll_interval_secs = 1;
-        assert!(config.validate().is_err());
-
-        let mut config = Config::default();
-        config.sync.max_parallel_accounts = 0;
         assert!(config.validate().is_err());
     }
 }

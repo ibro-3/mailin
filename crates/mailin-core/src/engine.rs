@@ -35,6 +35,14 @@ use secrecy::ExposeSecret;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
+/// Resolve the IDLE-fallback poll interval: the per-account override wins,
+/// then the global preference, then the built-in default. Clamped to a sane
+/// range.
+fn poll_interval(account_poll: Option<u64>, global_poll: Option<u64>) -> Duration {
+    let secs = account_poll.or(global_poll).unwrap_or(60).clamp(15, 1800);
+    Duration::from_secs(secs)
+}
+
 /// A snoozed-message batch grouped by source folder.
 /// (message id, uid, source folder id, cached Message-ID header)
 type SnoozeGroups = HashMap<FolderId, Vec<(MessageId, u32, FolderId, Option<String>)>>;
@@ -1193,13 +1201,21 @@ async fn run_session(
     let remote = session.list_folders().await?;
     sync::refresh_folders(&state.mailbox, account.id, &remote)?;
 
-    let poll = Duration::from_secs(account.sync.poll_interval_secs.clamp(15, 1800));
+    let global_poll = state
+        .mailbox
+        .config_snapshot()
+        .map(|config| config.sync.poll_interval_secs);
+    let poll = poll_interval(account.sync.poll_interval_secs, global_poll);
     let idle_capable = session.supports_idle();
 
     if let Some(inbox) = inbox_folder(state, account) {
         let mode = initial_mode(&inbox);
         sync_folder_logged(&mut session, state, inbox.id, mode).await;
     }
+    // One retention sweep per session, right after the initial sync: drop
+    // cached messages older than the configured number of days. This only
+    // deletes local rows; the server is never touched.
+    retention_sweep(state, account);
     set_sync_status(state, account.id, SyncStatus::Connected);
     set_last_sync_at(state, account.id, crate::now_unix());
 
@@ -2398,6 +2414,71 @@ async fn sync_folder_logged(
             }
         }
     }
+
+    // Eager body sync: fetch bodies for headers the store does not have
+    // yet instead of waiting for the user to open each message. Bounded
+    // per folder sync; the poll re-fills the remainder.
+    let eager = state
+        .mailbox
+        .config_snapshot()
+        .is_some_and(|config| config.sync.body_sync == crate::config::BodySyncPolicy::Eager);
+    const MAX_EAGER_BODIES: usize = 50;
+    if eager && let Ok(messages) = state.mailbox.store().list_messages(folder.id, 0, 200) {
+        for message in messages
+            .into_iter()
+            .filter(|message| !message.body_fetched)
+            .take(MAX_EAGER_BODIES)
+        {
+            if let Err(error) = fetch_body(session, state, message.id, false).await {
+                tracing::debug!(%error, "could not fetch a body eagerly");
+            }
+        }
+    }
+}
+
+/// Drop cached messages older than the configured number of days in every
+/// folder of `account`, and tell the UIs that their lists shrank. Local
+/// only: the server is never touched, and the retention watermark stops the
+/// next sync from re-importing the pruned messages.
+fn retention_sweep(state: &Arc<EngineState>, account: &Account) {
+    let Some(days) = state
+        .mailbox
+        .config_snapshot()
+        .map(|config| config.sync.retention_days)
+    else {
+        return;
+    };
+    if days == 0 {
+        return;
+    }
+    let cutoff = crate::now_unix() - i64::from(days) * 86_400;
+    match state
+        .mailbox
+        .store()
+        .prune_messages_older_than(&account.id, cutoff)
+    {
+        Ok(folders) => {
+            if !folders.is_empty() {
+                tracing::info!(
+                    account = %account.email,
+                    folders = folders.len(),
+                    retention_days = days,
+                    "retention pruned cached messages"
+                );
+                for folder_id in &folders {
+                    state.mailbox.publish(Event::MessagesChanged {
+                        folder_id: *folder_id,
+                    });
+                }
+                state.mailbox.publish(Event::FoldersChanged {
+                    account_id: account.id,
+                });
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "retention sweep failed");
+        }
+    }
 }
 
 fn inbox_folder(state: &EngineState, account: &Account) -> Option<Folder> {
@@ -2914,6 +2995,24 @@ mod wake_tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Notify;
+
+    use super::poll_interval;
+
+    #[test]
+    fn poll_interval_falls_back_to_the_global_default() {
+        assert_eq!(poll_interval(None, None), Duration::from_secs(60));
+        assert_eq!(poll_interval(None, Some(120)), Duration::from_secs(120));
+        // The account override wins.
+        assert_eq!(
+            poll_interval(Some(300), Some(120)),
+            Duration::from_secs(300)
+        );
+        assert_eq!(poll_interval(Some(300), None), Duration::from_secs(300));
+        // Clamped to a sane range.
+        assert_eq!(poll_interval(Some(1), None), Duration::from_secs(15));
+        assert_eq!(poll_interval(Some(10_000), None), Duration::from_secs(1800));
+        assert_eq!(poll_interval(None, Some(5)), Duration::from_secs(15));
+    }
 
     /// retry_outbox must wake the outbox sender within one poll cycle.
     ///

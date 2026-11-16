@@ -30,7 +30,6 @@ struct GeneralRows {
 #[derive(Clone)]
 struct SyncRows {
     poll_interval: ComboBox,
-    parallel_accounts: ComboBox,
     body_sync: ComboBox,
     retention_days: ComboBox,
 }
@@ -107,6 +106,7 @@ pub fn show_preferences(
         let dialog = dialog.clone();
         let config = Arc::clone(&config);
         let paths = paths.clone();
+        let mailin = Arc::clone(&state.mailin);
         let error_text = error_text.clone();
         let on_saved = Box::new(on_saved) as Box<dyn Fn()>;
         move |_, args| {
@@ -147,8 +147,6 @@ pub fn show_preferences(
                     5 => 600,
                     _ => 1800,
                 };
-                guard.sync.max_parallel_accounts =
-                    (ui::selected_index(&sync.parallel_accounts) + 1) as u8;
                 guard.sync.body_sync = if ui::selected_index(&sync.body_sync) == 1 {
                     mailin_core::config::BodySyncPolicy::Eager
                 } else {
@@ -185,6 +183,9 @@ pub fn show_preferences(
             // at runtime (every control captured its brushes when it was
             // created), so the new palette only reaches the controls built
             // from now on. The field says so.
+            if let Err(error) = mailin.install_config(candidate.clone()) {
+                tracing::warn!(%error, "could not install the saved configuration in the running client");
+            }
             apply_theme(candidate.ui.theme);
             let _ = ui::set_visible(&error_text, false);
             on_saved();
@@ -335,15 +336,11 @@ fn create_sync_section(config: &Config) -> Result<(StackPanel, SyncRows)> {
     )?;
     ui::append(
         &panel,
-        &ui::field("Poll interval (seconds)", &poll_interval)?,
+        &ui::field(
+            "Default poll interval (accounts can override in Edit Account)",
+            &poll_interval,
+        )?,
     )?;
-
-    let parallel_labels = [
-        "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
-    ];
-    let parallel_index = (config.sync.max_parallel_accounts.max(1) - 1).min(15) as usize;
-    let parallel_accounts = ui::combo(&parallel_labels, parallel_index, Some("Parallel accounts"))?;
-    ui::append(&panel, &ui::field("Parallel accounts", &parallel_accounts)?)?;
 
     let body_index = match config.sync.body_sync {
         mailin_core::config::BodySyncPolicy::OnOpen => 0,
@@ -384,14 +381,16 @@ fn create_sync_section(config: &Config) -> Result<(StackPanel, SyncRows)> {
     )?;
     ui::append(
         &panel,
-        &ui::field("Keep messages for (days)", &retention_days)?,
+        &ui::field(
+            "Keep cached messages for (days; server mail is untouched)",
+            &retention_days,
+        )?,
     )?;
 
     Ok((
         panel,
         SyncRows {
             poll_interval,
-            parallel_accounts,
             body_sync,
             retention_days,
         },

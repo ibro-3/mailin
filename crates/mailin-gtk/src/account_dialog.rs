@@ -58,6 +58,9 @@ struct Draft {
     oauth2: OAuth2Tokens,
     imap: ServerDraft,
     smtp: ServerDraft,
+    /// Sync preferences carried from the edited account; new accounts get
+    /// the defaults with the poll override from the row.
+    sync: mailin_core::AccountSyncSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,7 +100,8 @@ impl Draft {
             smtp.auth_method = AuthMethod::OAuth2;
             smtp.oauth2 = self.oauth2.clone();
         }
-        let account = Account::new(display_name, email, imap, smtp);
+        let mut account = Account::new(display_name, email, imap, smtp);
+        account.sync = self.sync.clone();
         account.validate().map_err(|error| error.to_string())?;
         Ok(account)
     }
@@ -441,6 +445,17 @@ pub fn present(
     contacts_group.add(&contacts_scroll);
     contacts_group.set_header_suffix(Some(&contacts_add));
 
+    // Per-account poll interval override; 0 means "use the global default".
+    let poll_group = adw::PreferencesGroup::builder()
+        .title("Synchronization")
+        .description("How often this account is polled for mail.")
+        .build();
+    let poll_row = adw::SpinRow::with_range(0.0, 1800.0, 15.0);
+    poll_row.set_title("Poll interval (seconds)");
+    poll_row.set_subtitle("0 = use the global default (Preferences → Synchronization)");
+    poll_row.set_value(0.0);
+    poll_group.add(&poll_row);
+
     // M4-F: the wizard is split into two steps — "Account" holds the quick
     // form (identity and sign-in), "Server" holds the server details plus
     // the connection test. Editing an account uses the same two steps so
@@ -465,6 +480,7 @@ pub fn present(
     contacts_group.set_visible(mode == AccountDialogMode::Edit);
     server_page.add(&templates_group);
     server_page.add(&contacts_group);
+    server_page.add(&poll_group);
 
     let stack = adw::ViewStack::new();
     stack.add_titled(&account_page, Some("account"), "Account");
@@ -728,6 +744,7 @@ pub fn present(
         imap_port.set_text(&account.imap.port.to_string());
         imap_user.set_text(&account.imap.username);
         imap_security.set_selected(security_index(account.imap.security));
+        poll_row.set_value(account.sync.poll_interval_secs.unwrap_or(0) as f64);
 
         smtp_host.set_text(&account.smtp.host);
         smtp_port.set_text(&account.smtp.port.to_string());
@@ -1045,6 +1062,12 @@ pub fn present(
             smtp_port: smtp_port.clone(),
             smtp_user: smtp_user.clone(),
             smtp_security: smtp_security.clone(),
+            poll_interval: poll_row.clone(),
+            sync: existing_account
+                .as_ref()
+                .map_or_else(mailin_core::AccountSyncSettings::default, |account| {
+                    account.sync.clone()
+                }),
         };
         let error_label = error_label.clone();
         let copy_error = copy_error.clone();
@@ -1676,6 +1699,12 @@ pub fn present(
             smtp_port,
             smtp_user,
             smtp_security,
+            poll_interval: poll_row.clone(),
+            sync: existing_account
+                .as_ref()
+                .map_or_else(mailin_core::AccountSyncSettings::default, |account| {
+                    account.sync.clone()
+                }),
         };
         let error_label = error_label.clone();
         let stack = stack.clone();
@@ -1862,6 +1891,8 @@ struct FormRows {
     smtp_port: adw::EntryRow,
     smtp_user: adw::EntryRow,
     smtp_security: adw::ComboRow,
+    poll_interval: adw::SpinRow,
+    sync: mailin_core::AccountSyncSettings,
 }
 
 impl FormRows {
@@ -1869,6 +1900,9 @@ impl FormRows {
         let mut oauth2 = self.oauth_tokens.borrow().clone();
         oauth2.provider = provider_at(self.oauth_provider.selected());
         oauth2.client_id = self.oauth_client_id.text().to_string();
+        let poll = self.poll_interval.value() as u64;
+        let mut sync = self.sync.clone();
+        sync.poll_interval_secs = if poll == 0 { None } else { Some(poll) };
         Draft {
             display_name: self.name.text().to_string(),
             email: self.email.text().to_string(),
@@ -1887,6 +1921,7 @@ impl FormRows {
                 username: self.smtp_user.text().to_string(),
                 security: security_at(self.smtp_security.selected()),
             },
+            sync,
         }
     }
 }
@@ -2434,6 +2469,7 @@ mod tests {
                 username: String::new(),
                 security: Security::Tls,
             },
+            sync: mailin_core::AccountSyncSettings::default(),
         }
     }
 
@@ -2500,6 +2536,30 @@ mod tests {
 
         let mut draft = sample();
         draft.smtp.host = "  ".into();
+        assert!(draft.build(true).is_err());
+    }
+
+    #[test]
+    fn poll_override_round_trips_through_build() {
+        let mut draft = sample();
+        assert_eq!(
+            draft
+                .build(true)
+                .expect("valid draft")
+                .sync
+                .poll_interval_secs,
+            None
+        );
+        draft.sync.poll_interval_secs = Some(120);
+        assert_eq!(
+            draft
+                .build(true)
+                .expect("valid draft")
+                .sync
+                .poll_interval_secs,
+            Some(120)
+        );
+        draft.sync.poll_interval_secs = Some(5);
         assert!(draft.build(true).is_err());
     }
 

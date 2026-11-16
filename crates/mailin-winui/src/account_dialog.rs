@@ -34,6 +34,11 @@ struct Draft {
     oauth2: OAuth2Tokens,
     imap: ServerDraft,
     smtp: ServerDraft,
+    /// Sync settings carried from the edited account (a new account gets
+    /// the defaults); the poll override comes from the row below.
+    sync: mailin_core::AccountSyncSettings,
+    /// Raw poll interval from the row; "" or "0" means "use the global default".
+    poll_interval_raw: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +78,18 @@ impl Draft {
             smtp.auth_method = AuthMethod::OAuth2;
             smtp.oauth2 = self.oauth2.clone();
         }
-        let account = Account::new(display_name, email, imap, smtp);
+        let poll = self.poll_interval_raw.trim();
+        let mut sync = self.sync.clone();
+        sync.poll_interval_secs = if poll.is_empty() || poll == "0" {
+            None
+        } else {
+            Some(
+                poll.parse::<u64>()
+                    .map_err(|_| "Poll interval must be a number of seconds.".to_owned())?,
+            )
+        };
+        let mut account = Account::new(display_name, email, imap, smtp);
+        account.sync = sync;
         account.validate().map_err(|error| error.to_string())?;
         Ok(account)
     }
@@ -123,6 +139,8 @@ struct FormRows {
     trust_container: mailin_winui_sys::StackPanel,
     allowlist: Arc<Mutex<Vec<String>>>,
     contacts_container: mailin_winui_sys::StackPanel,
+    poll_interval: TextBox,
+    sync: mailin_core::AccountSyncSettings,
 }
 
 impl FormRows {
@@ -152,6 +170,8 @@ impl FormRows {
                 username: ui::text_value(&self.smtp_user),
                 security: security_at(ui::selected_index(&self.smtp_security)),
             },
+            sync: self.sync.clone(),
+            poll_interval_raw: ui::text_value(&self.poll_interval),
         }
     }
 }
@@ -284,6 +304,18 @@ pub fn present(
         ui::body_text("Warning: no encryption. Passwords and mail may be sent in clear text.")?;
     ui::set_visible(&smtp_security_warning, false)?;
     ui::append(&form, &smtp_security_warning)?;
+
+    // Per-account poll interval override; empty or 0 means "use the global default".
+    let sync_heading = ui::subheading("Synchronization")?;
+    ui::append(&form, &sync_heading)?;
+    let poll_interval = ui::text_box("0", Some("Poll interval override (seconds)"))?;
+    poll_interval.SetPlaceholderText(
+        "Seconds between polls for this account; 0 or empty uses the global default (15 or more)",
+    )?;
+    ui::append(
+        &form,
+        &ui::field("Poll interval override (seconds)", &poll_interval)?,
+    )?;
 
     // Signature: plain text, shown under the composer's `-- ` separator.
     let signature_heading = ui::subheading("Signature")?;
@@ -603,6 +635,7 @@ pub fn present(
             &smtp_security_warning,
             account.smtp.security == Security::None,
         );
+        let _ = poll_interval.SetText(&account.sync.poll_interval_secs.unwrap_or(0).to_string());
 
         // Disable email field in edit mode (account identity shouldn't change)
         let _ = ui::set_enabled(&email, false);
@@ -727,6 +760,12 @@ pub fn present(
         }
     })?);
 
+    // Sync settings carried into the saved account; a new account gets the defaults.
+    let sync = existing_account
+        .as_ref()
+        .map_or_else(mailin_core::AccountSyncSettings::default, |a| {
+            a.sync.clone()
+        });
     // Fill server fields from the address domain while they are still the
     // values the previous suggestion put there. Anything the user typed wins.
     let last_suggestion: Arc<Mutex<Option<Suggestion>>> = Arc::new(Mutex::new(None));
@@ -752,6 +791,8 @@ pub fn present(
         trust_container,
         allowlist: Arc::clone(&allowlist),
         contacts_container,
+        poll_interval,
+        sync,
     };
     revokers.keep(ui::on_text_changed(&rows.email, {
         let rows_email = rows.email.clone();
@@ -843,6 +884,8 @@ pub fn present(
             trust_container: rows.trust_container.clone(),
             allowlist: Arc::clone(&rows.allowlist),
             contacts_container: rows.contacts_container.clone(),
+            poll_interval: rows.poll_interval.clone(),
+            sync: rows.sync.clone(),
         };
         let error = error.clone();
         move || {
@@ -956,6 +999,8 @@ pub fn present(
             trust_container: rows.trust_container.clone(),
             allowlist: Arc::clone(&rows.allowlist),
             contacts_container: rows.contacts_container.clone(),
+            poll_interval: rows.poll_interval.clone(),
+            sync: rows.sync.clone(),
         };
         let error = error.clone();
         move || {
@@ -1264,7 +1309,27 @@ mod tests {
                 username: String::new(),
                 security: Security::Tls,
             },
+            sync: mailin_core::AccountSyncSettings::default(),
+            poll_interval_raw: String::new(),
         }
+    }
+
+    #[test]
+    fn poll_override_round_trips_and_validates() {
+        let mut draft = sample();
+        // Empty means inherit the global default.
+        let account = draft.build(true).expect("valid draft");
+        assert_eq!(account.sync.poll_interval_secs, None);
+
+        draft.poll_interval_raw = "300".to_owned();
+        let account = draft.build(true).expect("valid draft");
+        assert_eq!(account.sync.poll_interval_secs, Some(300));
+
+        draft.poll_interval_raw = "5".to_owned();
+        assert!(draft.build(true).is_err());
+
+        draft.poll_interval_raw = "not-a-number".to_owned();
+        assert!(draft.build(true).is_err());
     }
 
     #[test]

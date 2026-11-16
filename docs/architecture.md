@@ -114,13 +114,24 @@ filter off the range quirk, and fetch headers only for the new UIDs. It runs on
 every IDLE wake-up and every poll tick.
 
 `IDLE` watches the INBOX when the server advertises it; otherwise the worker
-polls every `poll_interval_secs`. A full sync of the INBOX runs every ten
+polls every `poll_interval_secs` — the per-account override in Edit Account,
+falling back to the global `sync.poll_interval_secs` preference for accounts
+that do not set one (default 60 s). A full sync of the INBOX runs every ten
 minutes to notice deletions and flag edits made by other clients.
 
 `SELECT` uses the CONDSTORE variant when available, which makes
 `HIGHESTMODSEQ` visible; `CHANGEDSINCE`-based flag deltas are a follow-up to the
 wholesale refresh above. `account.sync.folder_allowlist` limits which folders are
 synchronized.
+
+The **retention pass** (`sync.retention_days`, 0 = keep forever) runs once per
+session after the initial sync: headers, bodies and attachments older than the
+limit are dropped from the local cache (server mail is never touched). A
+per-folder `prune_watermark` records the highest pruned UID so a later full
+re-scan never re-imports the discarded messages; the watermark resets when a
+folder's `UIDVALIDITY` changes. With `sync.body_sync = Eager`, bodies for
+headers the cache does not have yet are fetched in the background (bounded per
+folder sync); `OnOpen` fetches bodies only when a message is opened.
 
 Bodies are fetched with `BODY.PEEK[]` when a message is opened and cached; a body
 is never fetched twice. The full MIME body includes all parts, so decoded

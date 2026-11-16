@@ -563,6 +563,55 @@ fn deleting_an_account_cascades_and_clears_the_index() {
 }
 
 #[test]
+fn retention_prunes_old_messages_and_bumps_the_watermark() {
+    let (store, account) = store_with_account();
+    let inbox = folder(&store, &account, "INBOX", FolderRole::Inbox);
+    let sent = folder(&store, &account, "Sent", FolderRole::Sent);
+    for uid in 1..=5u32 {
+        store
+            .upsert_message(&message(inbox, uid, &format!("inbox {uid}")))
+            .expect("insert inbox");
+    }
+    for uid in 1..=3u32 {
+        store
+            .upsert_message(&message(sent, uid, &format!("sent {uid}")))
+            .expect("insert sent");
+    }
+
+    // received_at = 1_700_000_000 + uid, so UIDs 1..=2 are older than the cutoff.
+    let cutoff = 1_700_000_003;
+    let mut affected = store
+        .prune_messages_older_than(&account.id, cutoff)
+        .expect("prune");
+    affected.sort();
+    assert_eq!(affected, vec![inbox, sent]);
+
+    assert_eq!(store.count_messages(inbox).expect("count"), 3);
+    assert_eq!(store.count_messages(sent).expect("count"), 1);
+    assert_eq!(store.prune_watermark(inbox).expect("watermark"), 2);
+    assert_eq!(store.prune_watermark(sent).expect("watermark"), 2);
+    assert_eq!(
+        store
+            .search(&account.id, "inbox", 10)
+            .expect("search")
+            .len(),
+        3
+    );
+
+    // Pruning again is a no-op.
+    assert!(
+        store
+            .prune_messages_older_than(&account.id, cutoff)
+            .expect("prune again")
+            .is_empty()
+    );
+
+    // Reset clears the watermark.
+    store.reset_prune_watermark(inbox).expect("reset");
+    assert_eq!(store.prune_watermark(inbox).expect("watermark"), 0);
+}
+
+#[test]
 fn outbox_lifecycle() {
     let (store, account) = store_with_account();
     let id = store

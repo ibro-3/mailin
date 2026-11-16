@@ -319,7 +319,9 @@ pub fn show_preferences(
 
     let poll_row = adw::SpinRow::with_range(15.0, 1800.0, 1.0);
     poll_row.set_title("Poll interval");
-    poll_row.set_subtitle("Seconds between automatic folder checks (when IDLE is unavailable)");
+    poll_row.set_subtitle(
+        "Default seconds between automatic folder checks; accounts can override it in Edit Account",
+    );
     poll_row.set_value(config.borrow().sync.poll_interval_secs as f64);
     poll_row.connect_notify_local(Some("value"), {
         let config = Rc::clone(&config);
@@ -327,35 +329,7 @@ pub fn show_preferences(
     });
     polling_group.add(&poll_row);
 
-    let parallel_row = adw::SpinRow::with_range(1.0, 16.0, 1.0);
-    parallel_row.set_title("Parallel accounts");
-    parallel_row.set_subtitle("Maximum number of accounts to sync simultaneously");
-    parallel_row.set_value(config.borrow().sync.max_parallel_accounts as f64);
-    parallel_row.connect_notify_local(Some("value"), {
-        let config = Rc::clone(&config);
-        move |row, _| config.borrow_mut().sync.max_parallel_accounts = row.value() as u8
-    });
-    polling_group.add(&parallel_row);
-
-    let restore_polling = gtk::Button::builder()
-        .label("Restore defaults")
-        .valign(gtk::Align::Center)
-        .build();
-    restore_polling.add_css_class("flat");
-    restore_polling.connect_clicked({
-        let config = Rc::clone(&config);
-        let poll_row = poll_row.clone();
-        let parallel_row = parallel_row.clone();
-        move |_| {
-            let defaults = Config::default();
-            config.borrow_mut().sync.poll_interval_secs = defaults.sync.poll_interval_secs;
-            config.borrow_mut().sync.max_parallel_accounts = defaults.sync.max_parallel_accounts;
-            poll_row.set_value(defaults.sync.poll_interval_secs as f64);
-            parallel_row.set_value(defaults.sync.max_parallel_accounts as f64);
-        }
-    });
-    polling_group.set_header_suffix(Some(&restore_polling));
-
+    // B1: a single row does not need a restore-defaults button.
     sync_page.add(&polling_group);
 
     // Message Bodies group
@@ -385,21 +359,6 @@ pub fn show_preferences(
         }
     });
     body_group.add(&body_row);
-    let restore_body = gtk::Button::builder()
-        .label("Restore defaults")
-        .valign(gtk::Align::Center)
-        .build();
-    restore_body.add_css_class("flat");
-    restore_body.connect_clicked({
-        let config = Rc::clone(&config);
-        let body_row = body_row.clone();
-        move |_| {
-            let defaults = Config::default();
-            config.borrow_mut().sync.body_sync = defaults.sync.body_sync;
-            body_row.set_selected(0);
-        }
-    });
-    body_group.set_header_suffix(Some(&restore_body));
 
     sync_page.add(&body_group);
 
@@ -408,28 +367,15 @@ pub fn show_preferences(
 
     let retention_row = adw::SpinRow::with_range(0.0, 3650.0, 1.0);
     retention_row.set_title("Keep messages for");
-    retention_row.set_subtitle("Days to retain message headers (0 = forever)");
+    retention_row.set_subtitle(
+        "Drop cached messages older than this many days (0 = forever). Server mail is not touched",
+    );
     retention_row.set_value(config.borrow().sync.retention_days as f64);
     retention_row.connect_notify_local(Some("value"), {
         let config = Rc::clone(&config);
         move |row, _| config.borrow_mut().sync.retention_days = row.value() as u32
     });
     retention_group.add(&retention_row);
-    let restore_retention = gtk::Button::builder()
-        .label("Restore defaults")
-        .valign(gtk::Align::Center)
-        .build();
-    restore_retention.add_css_class("flat");
-    restore_retention.connect_clicked({
-        let config = Rc::clone(&config);
-        let retention_row = retention_row.clone();
-        move |_| {
-            let defaults = Config::default();
-            config.borrow_mut().sync.retention_days = defaults.sync.retention_days;
-            retention_row.set_value(defaults.sync.retention_days as f64);
-        }
-    });
-    retention_group.set_header_suffix(Some(&restore_retention));
 
     sync_page.add(&retention_group);
 
@@ -620,6 +566,11 @@ pub fn show_preferences(
                     Ok(Ok(())) => {
                         // Apply theme immediately
                         apply_theme(candidate.ui.theme);
+                        // Workers (engine) read the same configuration the
+                        // UI sees.
+                        if let Err(error) = app.mailin.install_config(candidate.clone()) {
+                            tracing::warn!(%error, "could not install the saved configuration in the running client");
+                        }
                         *app.config.borrow_mut() = candidate;
                         on_saved();
                     }

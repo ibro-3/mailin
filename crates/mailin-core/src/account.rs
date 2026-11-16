@@ -194,8 +194,9 @@ pub struct AccountSyncSettings {
     /// Full IMAP paths to sync. Empty means every folder the server offers,
     /// except those marked `\Noselect`.
     pub folder_allowlist: Vec<String>,
-    /// Idle watchers fall back to polling with this interval.
-    pub poll_interval_secs: u64,
+    /// Idle watchers fall back to polling with this interval. `None`
+    /// inherits the global `sync.poll_interval_secs` preference.
+    pub poll_interval_secs: Option<u64>,
     /// Keep the connection and refresh folders in the background.
     pub background_sync: bool,
 }
@@ -204,7 +205,7 @@ impl Default for AccountSyncSettings {
     fn default() -> Self {
         Self {
             folder_allowlist: Vec::new(),
-            poll_interval_secs: 60,
+            poll_interval_secs: None,
             background_sync: true,
         }
     }
@@ -331,7 +332,9 @@ impl Account {
                 return Err(Error::InvalidAccount(format!("{label} username is empty")));
             }
         }
-        if self.sync.poll_interval_secs < 15 {
+        if let Some(poll) = self.sync.poll_interval_secs
+            && poll < 15
+        {
             return Err(Error::InvalidAccount(
                 "poll interval must be at least 15 seconds".to_owned(),
             ));
@@ -449,7 +452,7 @@ mod tests {
         assert!(acc.validate().is_err());
 
         let mut acc = account();
-        acc.sync.poll_interval_secs = 5;
+        acc.sync.poll_interval_secs = Some(5);
         assert!(acc.validate().is_err());
     }
 

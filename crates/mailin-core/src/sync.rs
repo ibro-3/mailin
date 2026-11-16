@@ -99,6 +99,7 @@ pub(crate) async fn sync_folder(
             "UIDVALIDITY changed; dropping cached messages"
         );
         mailbox.store().clear_folder_messages(folder.id)?;
+        mailbox.store().reset_prune_watermark(folder.id)?;
         state = FolderSyncState::default();
         mode = SyncMode::Full;
         // Re-downloading a mailbox is not a delivery: suppress notifications
@@ -168,8 +169,16 @@ pub(crate) async fn sync_folder(
         }
     };
 
-    let mut new_uids: Vec<u32> = remote.difference(&local).copied().collect();
-    new_uids.sort_unstable();
+    // UIDs at or below the retention watermark were discarded on purpose;
+    // never re-import them, even in a full re-scan.
+    let watermark = mailbox
+        .store()
+        .prune_watermark(folder.id)
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not read the prune watermark; keeping everything");
+            0
+        });
+    let new_uids = filter_new_uids(&remote, &local, watermark);
     let new_count = new_uids.len();
     let mut created = 0usize;
     let mut created_ids: Vec<crate::model::MessageId> = Vec::new();
@@ -299,6 +308,23 @@ pub(crate) fn message_from_header(
     }
 }
 
+/// UIDs to import: remote UIDs that are not in `local` and above the
+/// retention watermark (UIDs at or below it were discarded on purpose).
+/// Returned in ascending order.
+pub(crate) fn filter_new_uids(
+    remote: &std::collections::HashSet<u32>,
+    local: &std::collections::HashSet<u32>,
+    watermark: u32,
+) -> Vec<u32> {
+    let mut new_uids: Vec<u32> = remote
+        .iter()
+        .filter(|uid| !local.contains(*uid) && **uid > watermark)
+        .copied()
+        .collect();
+    new_uids.sort_unstable();
+    new_uids
+}
+
 /// UIDs that exist remotely but not locally, in ascending order.
 #[cfg(test)]
 pub(crate) fn difference(
@@ -342,6 +368,17 @@ mod tests {
         let local = HashSet::from([1, 3]);
         let remote = HashSet::from([4, 2, 3]);
         assert_eq!(difference(&local, &remote), vec![2, 4]);
+    }
+
+    #[test]
+    fn filter_new_uids_honours_the_retention_watermark() {
+        let local = HashSet::from([1, 3]);
+        let remote = HashSet::from([1, 2, 3, 4, 5]);
+        assert_eq!(filter_new_uids(&remote, &local, 0), vec![2, 4, 5]);
+        // Retention discarded UIDs <= 4: only 5 is importable.
+        assert_eq!(filter_new_uids(&remote, &local, 4), vec![5]);
+        // Everything discarded.
+        assert_eq!(filter_new_uids(&remote, &local, 5), Vec::<u32>::new());
     }
 
     #[test]

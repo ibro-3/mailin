@@ -490,6 +490,76 @@ impl Store {
         Ok(removed as u32)
     }
 
+    /// Delete cached messages older than `cutoff` (unix seconds) for
+    /// `account`, along with their bodies, attachments and search index rows
+    /// (all removed via cascade or explicitly). The per-folder prune
+    /// watermark is bumped to the highest discarded UID so the sync never
+    /// re-imports the pruned messages. Returns the folders that lost rows.
+    /// Server mail is never touched.
+    pub fn prune_messages_older_than(
+        &self,
+        account: &AccountId,
+        cutoff: i64,
+    ) -> Result<Vec<FolderId>> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let folder_ids: Vec<i64> = tx
+            .prepare("SELECT id FROM folders WHERE account_id = ?1")?
+            .query_map(params![account.to_string()], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut affected = Vec::new();
+        for folder_id in folder_ids {
+            let watermark: Option<i64> = tx.query_row(
+                "SELECT MAX(uid) FROM messages WHERE folder_id = ?1 AND received_at < ?2",
+                params![folder_id, cutoff],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (
+                     SELECT id FROM messages WHERE folder_id = ?1 AND received_at < ?2)",
+                params![folder_id, cutoff],
+            )?;
+            let removed = tx.execute(
+                "DELETE FROM messages WHERE folder_id = ?1 AND received_at < ?2",
+                params![folder_id, cutoff],
+            )?;
+            if removed > 0 {
+                if let Some(max_uid) = watermark {
+                    tx.execute(
+                        "UPDATE folders SET prune_watermark = MAX(prune_watermark, ?1) WHERE id = ?2",
+                        params![max_uid, folder_id],
+                    )?;
+                }
+                affected.push(FolderId(folder_id));
+            }
+        }
+        tx.commit()?;
+        Ok(affected)
+    }
+
+    /// Highest UID already discarded by the retention pass in `folder`.
+    /// UIDs at or below the watermark are never re-imported.
+    pub fn prune_watermark(&self, folder: FolderId) -> Result<u32> {
+        let conn = self.lock()?;
+        let watermark: i64 = conn.query_row(
+            "SELECT prune_watermark FROM folders WHERE id = ?1",
+            params![folder.0],
+            |row| row.get(0),
+        )?;
+        Ok(u32::try_from(watermark.max(0)).unwrap_or(u32::MAX))
+    }
+
+    /// Reset the prune watermark to zero (the folder's UIDVALIDITY changed
+    /// and UIDs got renumbered, so the old watermark is meaningless).
+    pub fn reset_prune_watermark(&self, folder: FolderId) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE folders SET prune_watermark = 0 WHERE id = ?1",
+            params![folder.0],
+        )?;
+        Ok(())
+    }
+
     /// Mark a folder as needing a full resync by clearing its last_synced_at timestamp.
     pub fn refresh_folder(&self, folder: FolderId) -> Result<()> {
         let conn = self.lock()?;
