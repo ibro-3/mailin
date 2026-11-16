@@ -26,8 +26,8 @@
 
   <launchable type="desktop-id">dev.mailin.Mailin.desktop</launchable>
 
-  <url type="homepage">https://github.com/mailin-app/mailin</url>
-  <url type="bugtracker">https://github.com/mailin-app/mailin/issues</url>
+  <url type="homepage">https://github.com/ibro-3/mailin</url>
+  <url type="bugtracker">https://github.com/ibro-3/mailin/issues</url>
 
   <provides>
     <binary>mailin</binary>

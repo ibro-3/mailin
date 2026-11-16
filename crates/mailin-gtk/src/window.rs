@@ -2034,8 +2034,8 @@ impl MainWindow {
                     .license_type(gtk::License::MitX11)
                     .comments("Native desktop email client for IMAP and SMTP. Keeps a local SQLite cache for offline reading and stores passwords in the system keyring.")
                     .copyright("© 2026 Mailin contributors")
-                    .website("https://github.com/mailin-app/mailin")
-                    .issue_url("https://github.com/mailin-app/mailin/issues")
+                    .website("https://github.com/ibro-3/mailin")
+                    .issue_url("https://github.com/ibro-3/mailin/issues")
                     .build();
                 about.present(Some(&this.widgets.window));
             }

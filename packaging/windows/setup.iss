@@ -5,7 +5,7 @@
 #define AppName "Mailin"
 #define AppVersion "0.1.0"
 #define AppPublisher "Mailin Contributors"
-#define AppURL "https://github.com/mailin-app/mailin"
+#define AppURL "https://github.com/ibro-3/mailin"
 #define AppExeName "mailin-winui.exe"
 #define AppIcon "Assets\Square44x44Logo.ico"
 
