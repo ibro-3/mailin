@@ -90,6 +90,8 @@ impl Store {
             Ok(result) => return Err(Error::DatabaseCorrupt(result)),
             Err(error) => return Err(Error::DatabaseCorrupt(error.to_string())),
         }
+        // D1: snapshot the database before touching it with a migration.
+        migrations::backup_before_migrate(&conn, path);
         let mut conn = conn;
         Self::configure(&mut conn)?;
         #[cfg(unix)]
