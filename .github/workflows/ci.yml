@@ -42,6 +42,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
 
+      - name: Version agreement
+        run: cargo run -p xtask -- check-versions
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -61,6 +64,8 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v4
+      - name: Lint Flatpak manifest
+        run: flatpak-builder-lint manifest packaging/flatpak/dev.mailin.Mailin.json
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           bundle: mailin.flatpak

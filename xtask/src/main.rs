@@ -54,6 +54,9 @@ fn run() -> Result<()> {
         }
         "it-down-tls" => compose_file(&["down", "-v"], "docker-compose.it-tls.yml"),
         "it-certs" => it_certs(),
+        "release-version" => release_version(&mut args),
+        "check-versions" => check_versions(),
+        "release-notes" => release_notes(&mut args),
         "winui-deref" => winui_deref(),
         "winui-bindgen" => winui_bindgen(),
         "winui-runtime" => winui_runtime(),
@@ -78,6 +81,9 @@ fn usage() {
            it-up-tls       generate local test CA and start TLS-enabled GreenMail\n\
            it-down-tls     stop the TLS test server and drop its volumes\n\
            it-certs        generate the test CA and GreenMail PKCS12 keystore\n\
+           release-version  set the version in Cargo.toml and both packaging formats\n\
+           check-versions   verify Cargo.toml, metainfo and Windows packaging agree\n\
+           release-notes   render docs/release-notes-template.md for a release tag\n\
            winui-deref     generate interface Deref chains for the projection\n\
            winui-bindgen   regenerate the WinUI 3 projection from pinned metadata\n\
            winui-runtime   download the Windows App SDK bootstrapper for local builds\n\
@@ -106,6 +112,7 @@ fn run_cargo(args: &[&str]) -> Result<()> {
 }
 
 fn check() -> Result<()> {
+    check_versions()?;
     run_cargo(&["fmt", "--all", "--", "--check"])?;
     run_cargo(&[
         "clippy",
@@ -115,7 +122,263 @@ fn check() -> Result<()> {
         "-D",
         "warnings",
     ])?;
-    run_cargo(&["test", "--workspace"])?;
+    run_cargo(&["test", "--workspace", "--all-targets"])?;
+    Ok(())
+}
+
+/// Paths whose version fields must agree with the workspace `Cargo.toml`.
+const METAINFO_PATH: &str = "packaging/flatpak/dev.mailin.Mailin.metainfo.xml";
+const APPX_PATH: &str = "packaging/windows/AppxManifest.xml";
+const INNO_PATH: &str = "packaging/windows/setup.iss";
+
+/// Read the `version` from `[workspace.package]`.
+fn workspace_version(text: &str) -> Result<String> {
+    let section = text
+        .find("[workspace.package]")
+        .context("Cargo.toml has no [workspace.package] section")?;
+    let rest = &text[section..];
+    let marker = "version = \"";
+    let start = rest
+        .find(marker)
+        .map(|index| section + index + marker.len())
+        .context("[workspace.package] has no version")?;
+    let end = text[start..]
+        .find('"')
+        .context("workspace version is not terminated")?;
+    Ok(text[start..start + end].to_owned())
+}
+
+/// Find the first `attr="value"` whose name starts a XML attribute (i.e. is not
+/// the tail of a longer name such as `MinVersion`).
+fn xml_attr_value(text: &str, attr: &str) -> Result<String> {
+    let needle = format!("{attr}=\"");
+    let mut from = 0;
+    while let Some(relative) = text[from..].find(&needle) {
+        let index = from + relative;
+        let starts_attribute = text[..index]
+            .chars()
+            .last()
+            .is_none_or(|character| character.is_whitespace());
+        if starts_attribute {
+            let start = index + needle.len();
+            let end = text[start..]
+                .find('"')
+                .context("XML attribute is not terminated")?;
+            return Ok(text[start..start + end].to_owned());
+        }
+        from = index + needle.len();
+    }
+    bail!("could not find the {attr} attribute")
+}
+
+fn metainfo_version(text: &str) -> Result<String> {
+    let marker = "release version=\"";
+    let start = text.find(marker).context("metainfo has no <release>")? + marker.len();
+    let end = text[start..]
+        .find('"')
+        .context("metainfo release version is not terminated")?;
+    Ok(text[start..start + end].to_owned())
+}
+
+fn inno_version(text: &str) -> Result<String> {
+    let marker = "#define AppVersion \"";
+    let start = text
+        .find(marker)
+        .context("setup.iss has no AppVersion define")?
+        + marker.len();
+    let end = text[start..]
+        .find('"')
+        .context("setup.iss AppVersion is not terminated")?;
+    Ok(text[start..start + end].to_owned())
+}
+
+/// Replace exactly one occurrence of `from`, failing when it is absent.
+fn replace_once(text: &str, from: &str, to: &str) -> Result<String> {
+    let index = text
+        .find(from)
+        .with_context(|| format!("expected to find {from:?}"))?;
+    let mut out = String::with_capacity(text.len() + to.len());
+    out.push_str(&text[..index]);
+    out.push_str(to);
+    out.push_str(&text[index + from.len()..]);
+    Ok(out)
+}
+
+/// Replace the version inside `[workspace.package]` only, leaving dependency
+/// version requirements untouched.
+fn replace_workspace_version(text: &str, current: &str, new: &str) -> Result<String> {
+    let section = text
+        .find("[workspace.package]")
+        .context("Cargo.toml has no [workspace.package] section")?;
+    let marker = format!("version = \"{current}\"");
+    let relative = text[section..]
+        .find(&marker)
+        .with_context(|| format!("could not find {marker:?} in [workspace.package]"))?;
+    let index = section + relative;
+    let mut out = String::with_capacity(text.len() + new.len());
+    out.push_str(&text[..index]);
+    out.push_str(&format!("version = \"{new}\""));
+    out.push_str(&text[index + marker.len()..]);
+    Ok(out)
+}
+
+fn validate_version(version: &str) -> Result<()> {
+    let parts: Vec<&str> = version.split('.').collect();
+    let valid = parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+    if !valid {
+        bail!("version must look like MAJOR.MINOR.PATCH (got {version:?})");
+    }
+    Ok(())
+}
+
+fn validate_date(date: &str) -> Result<()> {
+    let bytes = date.as_bytes();
+    let valid_shape = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+    if !valid_shape {
+        bail!("date must be YYYY-MM-DD (got {date:?})");
+    }
+    let month: u32 = date[5..7].parse().context("invalid month")?;
+    let day: u32 = date[8..10].parse().context("invalid day")?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        bail!("date must be a valid month/day (got {date:?})");
+    }
+    Ok(())
+}
+
+/// Set the version everywhere it is stored, then verify the files agree.
+fn release_version(args: &mut impl Iterator<Item = String>) -> Result<()> {
+    let version = args
+        .next()
+        .context("usage: cargo xtask release-version <version> [YYYY-MM-DD]")?;
+    validate_version(&version)?;
+    let date = args.next();
+    if let Some(date) = &date {
+        validate_date(date)?;
+    }
+
+    let root = repo_root()?;
+
+    let cargo_path = root.join("Cargo.toml");
+    let cargo_text = fs::read_to_string(&cargo_path).context("could not read Cargo.toml")?;
+    let current = workspace_version(&cargo_text)?;
+    if current != version {
+        let updated = replace_workspace_version(&cargo_text, &current, &version)?;
+        fs::write(&cargo_path, updated).context("could not write Cargo.toml")?;
+        println!("Cargo.toml: {current} -> {version}");
+    }
+
+    let appx_path = root.join(APPX_PATH);
+    let appx_text = fs::read_to_string(&appx_path).context("could not read AppxManifest.xml")?;
+    let appx_current = xml_attr_value(&appx_text, "Version")?;
+    let updated = replace_once(
+        &appx_text,
+        &format!("Version=\"{appx_current}\""),
+        &format!("Version=\"{version}.0\""),
+    )?;
+    fs::write(&appx_path, updated).context("could not write AppxManifest.xml")?;
+    println!("AppxManifest.xml: {appx_current} -> {version}.0");
+
+    let inno_path = root.join(INNO_PATH);
+    let inno_text = fs::read_to_string(&inno_path).context("could not read setup.iss")?;
+    let inno_current = inno_version(&inno_text)?;
+    let updated = replace_once(
+        &inno_text,
+        &format!("#define AppVersion \"{inno_current}\""),
+        &format!("#define AppVersion \"{version}\""),
+    )?;
+    fs::write(&inno_path, updated).context("could not write setup.iss")?;
+    println!("setup.iss: AppVersion {inno_current} -> {version}");
+
+    let metainfo_path = root.join(METAINFO_PATH);
+    let metainfo_text =
+        fs::read_to_string(&metainfo_path).context("could not read the metainfo file")?;
+    let metainfo_current = metainfo_version(&metainfo_text)?;
+    let mut updated = replace_once(
+        &metainfo_text,
+        &format!("release version=\"{metainfo_current}\""),
+        &format!("release version=\"{version}\""),
+    )?;
+    if let Some(date) = date {
+        updated = replace_release_date(&updated, &version, &date)?;
+        println!("metainfo: release date set to {date}");
+    }
+    fs::write(&metainfo_path, updated).context("could not write the metainfo file")?;
+    println!("metainfo: release version {metainfo_current} -> {version}");
+
+    check_versions()
+}
+
+/// Replace the `date` on the `<release>` entry for `version`.
+fn replace_release_date(text: &str, version: &str, date: &str) -> Result<String> {
+    let marker = format!("release version=\"{version}\"");
+    let start = text
+        .find(&marker)
+        .with_context(|| format!("could not find {marker:?}"))?
+        + marker.len();
+    let date_marker = "date=\"";
+    let date_start = text[start..]
+        .find(date_marker)
+        .map(|index| start + index + date_marker.len())
+        .context("the release entry has no date")?;
+    let date_end = text[date_start..]
+        .find('"')
+        .map(|index| date_start + index)
+        .context("the release date is not terminated")?;
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..date_start]);
+    out.push_str(date);
+    out.push_str(&text[date_end..]);
+    Ok(out)
+}
+
+/// Verify that the workspace and both packaging formats carry one version.
+fn check_versions() -> Result<()> {
+    let root = repo_root()?;
+    let version = workspace_version(
+        &fs::read_to_string(root.join("Cargo.toml")).context("could not read Cargo.toml")?,
+    )?;
+    let metainfo = metainfo_version(
+        &fs::read_to_string(root.join(METAINFO_PATH))
+            .context("could not read the metainfo file")?,
+    )?;
+    let appx = xml_attr_value(
+        &fs::read_to_string(root.join(APPX_PATH)).context("could not read AppxManifest.xml")?,
+        "Version",
+    )?;
+    let inno = inno_version(
+        &fs::read_to_string(root.join(INNO_PATH)).context("could not read setup.iss")?,
+    )?;
+
+    let mut problems = Vec::new();
+    if metainfo != version {
+        problems.push(format!(
+            "metainfo release version is {metainfo}, expected {version}"
+        ));
+    }
+    let expected_appx = format!("{version}.0");
+    if appx != expected_appx {
+        problems.push(format!(
+            "AppxManifest Version is {appx}, expected {expected_appx}"
+        ));
+    }
+    if inno != version {
+        problems.push(format!(
+            "setup.iss AppVersion is {inno}, expected {version}"
+        ));
+    }
+    if !problems.is_empty() {
+        bail!("version mismatch:\n- {}", problems.join("\n- "));
+    }
+    println!("versions agree: {version}");
     Ok(())
 }
 
@@ -996,4 +1259,183 @@ fn projected_interfaces(bindings: &str) -> HashSet<String> {
         }
     }
     names
+}
+
+/// Collect the `- ` bullets of one `###` section in a version's CHANGELOG entry.
+fn changelog_bullets(changelog: &str, version: &str, heading: &str) -> Vec<String> {
+    let release_marker = format!("## [{version}]");
+    let Some(start) = changelog.find(&release_marker) else {
+        return Vec::new();
+    };
+    let rest = &changelog[start..];
+    let end = rest
+        .find("\n## ")
+        .map(|index| start + index)
+        .unwrap_or(changelog.len());
+    let section = &changelog[start..end];
+    let heading_marker = format!("### {heading}");
+    let Some(heading_start) = section.find(&heading_marker) else {
+        return Vec::new();
+    };
+    let after = &section[heading_start + heading_marker.len()..];
+    let section_end = after.find("\n### ").unwrap_or(after.len());
+    let mut bullets: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in after[..section_end].lines() {
+        if line.starts_with("- ") {
+            if let Some(previous) = current.take() {
+                bullets.push(previous);
+            }
+            current = Some(line.to_owned());
+        } else if let Some(item) = current.as_mut() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("  ") {
+                item.push('\n');
+                item.push_str(line);
+            } else {
+                bullets.push(item.clone());
+                current = None;
+            }
+        }
+    }
+    if let Some(item) = current {
+        bullets.push(item);
+    }
+    bullets
+}
+
+/// Render the release-notes template for a tag. The result is printed to
+/// stdout so the release workflow can use it as `body_path` after redirecting.
+fn release_notes(args: &mut impl Iterator<Item = String>) -> Result<()> {
+    let version = args
+        .next()
+        .context("usage: cargo xtask release-notes <version> [YYYY-MM-DD]")?;
+    let date = args.next().unwrap_or_else(|| "TBD".to_owned());
+    let root = repo_root()?;
+    let template = fs::read_to_string(root.join("docs/release-notes-template.md"))
+        .context("could not read docs/release-notes-template.md")?;
+    let changelog =
+        fs::read_to_string(root.join("CHANGELOG.md")).context("could not read CHANGELOG.md")?;
+    print!(
+        "{}",
+        render_release_notes(&template, &changelog, &version, &date)
+    );
+    Ok(())
+}
+
+/// Drop the editor instructions and placeholder bullets from the template, then
+/// fill in the version, date and artifact name. Keeping this pure makes it
+/// testable without a release tag.
+fn render_release_notes(template: &str, changelog: &str, version: &str, date: &str) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut in_comment = false;
+    for line in template.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<!--") {
+            in_comment = true;
+        }
+        if in_comment {
+            if trimmed.ends_with("-->") {
+                in_comment = false;
+            }
+            continue;
+        }
+        if trimmed.starts_with("- <")
+            || trimmed.starts_with("One-paragraph summary")
+            || trimmed.is_empty() && out.ends_with("\n\n")
+        {
+            continue;
+        }
+        let rendered = line
+            .replace("<version>", version)
+            .replace("<date>", date)
+            .replace("<artifact>", "mailin-*.flatpak");
+        out.push_str(&rendered);
+        out.push('\n');
+        // Fill the three summary sections from the CHANGELOG entry so the
+        // published notes cannot drift away from the maintained history.
+        for (heading, source) in [
+            ("## Highlights", "Added"),
+            ("## Fixes", "Fixed"),
+            ("## Known limitations", "Known limitations"),
+        ] {
+            if line == heading {
+                for bullet in changelog_bullets(changelog, version, source) {
+                    out.push_str(&bullet);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out.trim_end().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn versions_are_validated() {
+        assert!(validate_version("0.1.0").is_ok());
+        assert!(validate_version("1.2.3").is_ok());
+        for bad in ["0.1", "1.2.3.4", "v1.2.3", "1..3", ""] {
+            assert!(validate_version(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn dates_are_validated() {
+        assert!(validate_date("2026-12-18").is_ok());
+        for bad in ["2026-1-1", "2026/12/18", "20261218", "2026-13-01"] {
+            assert!(validate_date(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn xml_attr_ignores_longer_names() {
+        let xml = r#"<Identity MinVersion="10.0.17763.0" Version="1.2.3.0" />"#;
+        assert_eq!(xml_attr_value(xml, "Version").unwrap(), "1.2.3.0");
+    }
+
+    #[test]
+    fn packaging_versions_are_read() {
+        let metainfo =
+            r#"<releases><release version="4.5.6" date="2026-01-02"></release></releases>"#;
+        assert_eq!(metainfo_version(metainfo).unwrap(), "4.5.6");
+        assert_eq!(
+            inno_version("#define AppVersion \"4.5.6\"\n").unwrap(),
+            "4.5.6"
+        );
+        let cargo = "[workspace.package]\nversion = \"4.5.6\"\n[workspace.dependencies]\nsome = { version = \"4.5.6\" }";
+        assert_eq!(workspace_version(cargo).unwrap(), "4.5.6");
+    }
+
+    #[test]
+    fn workspace_bump_leaves_dependencies_alone() {
+        let cargo = "[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace.dependencies]\nfoo = { version = \"0.1.0\" }\n";
+        let updated = replace_workspace_version(cargo, "0.1.0", "0.2.0").unwrap();
+        assert!(updated.contains("[workspace.package]\nversion = \"0.2.0\""));
+        assert!(updated.contains("foo = { version = \"0.1.0\" }"));
+    }
+
+    #[test]
+    fn release_date_is_replaced_for_the_right_version() {
+        let text = r#"<release version="0.2.0" date="2026-01-01"><description/></release>"#;
+        let updated = replace_release_date(text, "0.2.0", "2026-12-18").unwrap();
+        assert!(updated.contains("date=\"2026-12-18\""));
+    }
+
+    #[test]
+    fn release_notes_drop_instructions_and_fill_placeholders() {
+        let template = "<!--\nCopy this file\n-->\n# Mailin <version> (<date>)\n\nOne-paragraph summary.\n\n- <feature>\n- Real highlight\n\n```sh\ngh attestation verify <artifact>\n```\n";
+        let notes = render_release_notes(template, "", "0.1.0", "2026-12-18");
+        assert!(notes.starts_with("# Mailin 0.1.0 (2026-12-18)"));
+        assert!(!notes.contains("Copy this file"));
+        assert!(!notes.contains("One-paragraph summary"));
+        assert!(!notes.contains("<feature>"));
+        assert!(notes.contains("Real highlight"));
+        assert!(notes.contains("gh attestation verify mailin-*.flatpak"));
+    }
 }

@@ -48,9 +48,17 @@
   <content_rating type="oars-1.1" />
 
   <releases>
-    <release version="0.1.0" date="2026-10-25">
+    <release version="0.1.0" date="2026-12-18">
       <description>
-        <p>Milestone 7: HTML mail with a hardened WebKit renderer (remote content blocked by default), attachments, composition, notifications, IMAP/SMTP sync with CONDSTORE CHANGEDSINCE flag-delta sync, full-text search, PGP support, Windows packaging (self-contained zip, MSIX, Inno Setup installer), accessibility (keyboard navigation, shortcuts overlay, screen-reader labels).</p>
+        <p>First public release of Mailin, a native IMAP/SMTP desktop client for Linux and Windows.</p>
+        <ul>
+          <li>Offline-first mail with IMAP/SMTP sync, folder discovery, IDLE and CONDSTORE flag deltas.</li>
+          <li>GTK 4 client with HTML mail in a sandboxed viewer, remote-content blocking, attachments, compose, search and notifications.</li>
+          <li>WinUI 3 client with reader, attachments, compose, search and toast notifications.</li>
+          <li>PGP encryption and signing, an outbox with retry, draft auto-save and full-text search.</li>
+          <li>Flatpak packaging for Linux; zip, MSIX and Inno Setup installer for Windows, with checksums and build attestations.</li>
+        </ul>
+        <p>Known limitation: the WinUI client has no Unified Inbox in this release, and Windows artifacts are unsigned.</p>
       </description>
     </release>
   </releases>

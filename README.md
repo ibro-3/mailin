@@ -8,18 +8,48 @@ A native desktop email client with one shared Rust core and two native front-end
 Mailin speaks IMAP and SMTP, keeps a local SQLite cache for offline reading, and
 never stores passwords outside the OS keyring.
 
-> **Status:** early, but usable on Linux. Milestones 0–7 are done: workspace,
-> CI, configuration, credential storage, SQLite schema, full text search,
-> outbox, the IMAP/SMTP engine (folder discovery, incremental sync, IDLE,
-> sending), the GTK shell (three-pane window, account wizard, reader), GTK
-> polish (HTML mail, remote-content blocking, attachments, compose, desktop
-> notifications and Flatpak packaging), the WinUI 3 binding spike, the WinUI
-> product shell (three panes, account wizard, reader, HTML policy, attachments,
-> compose, search and the core event pump), Windows packaging (self-contained
-> zip, MSIX, Inno Setup installer), supply-chain hardening (cargo-deny), HTML
-> policy edge-case tests, secrets as SecretString end-to-end, accessibility
-> (GTK: a11y labels, keyboard nav, shortcuts overlay; WinUI: keyboard
-> accelerators), CONDSTORE CHANGEDSINCE flag-delta sync with fallback.
+> **Status:** 0.1.0 release candidate. Linux is the most exercised front-end;
+> the Windows client builds in CI but still needs a manual pass on real
+> hardware (see the known limitations below).
+
+## What works
+
+- **Mail**: IMAP/SMTP accounts with auto-configuration, folder discovery,
+  incremental sync, IDLE for new mail, CONDSTORE flag deltas, outbox retry,
+  drafts and full-text search across the current folder or all mail.
+- **Linux**: three-pane GTK 4 / libadwaita window, account wizard, HTML reader
+  in a sandboxed WebKit view with remote content blocked by default,
+  attachments, compose/reply/forward, templates, contact autocomplete, PGP,
+  unified inbox for multiple accounts, desktop notifications, Flatpak package.
+- **Windows**: WinUI 3 window, account wizard, WebView2 reader, attachments,
+  compose, search, toast notifications and three installable artifact types
+  (zip, unsigned MSIX, Inno Setup installer).
+- **Both**: OS keyring credentials, offline SQLite cache, accessibility labels
+  and keyboard shortcuts, rolling logs and a recovery path for unopenable
+  local data.
+
+## Known limitations
+
+- Windows has no Unified Inbox in this release, and bulk selection uses
+  checkboxes instead of GTK's multi-select list.
+- The Windows MSIX and installer are unsigned: SmartScreen warns on first run.
+  Verify the published `SHA256SUMS` and build attestations.
+- Rules, CalDAV/calendar, snooze, virtual folders, a plugin marketplace,
+  background-on-close and macOS are not in 0.1.0.
+- STARTTLS is covered by unit tests and manual testing, not the GreenMail
+  integration suite. Very large folders (well beyond 5k messages) may feel
+  slow because the list is not incrementally virtualized.
+
+## Install
+
+- **Linux**: build or install the Flatpak bundle from a release (see
+  [Building](#building) below).
+- **Windows**: download the zip, unsigned MSIX or Inno Setup installer from a
+  release; see [Windows Installation](#windows-installation-release-artifacts).
+  The Windows App SDK 1.8 runtime is required.
+
+Release notes and checksums live on the
+[releases page](https://github.com/ibro-3/mailin/releases).
 
 ## Layout
 
@@ -172,6 +202,24 @@ Set `MAILIN_HOME` to relocate all three directories (used by tests and portable
 installs). Accounts and their server settings live in the database; the config
 file holds only application preferences and never contains secrets. The database
 and config file are created with `0600` permissions on Unix.
+
+## Logging and diagnostics
+
+Both front-ends write a rolling log to `mailin.log` in the data directory above
+(with `mailin.log.1` as the previous 5 MB file) and mirror it to stderr. Set
+`RUST_LOG` to change verbosity, for example:
+
+```sh
+RUST_LOG=mailin_core=debug,mailin=info flatpak run dev.mailin.Mailin
+```
+
+If a start fails, the recovery window offers **Retry**, **Open data folder**,
+**Reset local cache** (renames the unreadable files rather than deleting them)
+and **Quit**. A panic notice is shown on the next start. **Preferences →
+Copy diagnostics** copies a redacted report (version, OS, schema version,
+settings, account count and the last 100 log lines) to the clipboard; **Back up
+local data…** writes a zip with the database and configuration, without
+secrets. See [SECURITY.md](SECURITY.md) for what is and is not logged.
 
 ## Roadmap
 

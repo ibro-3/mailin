@@ -129,11 +129,61 @@ This checklist must be completed and signed off for each release candidate befor
 
 ---
 
+## Install Matrix (H3)
+
+Run each scenario on a clean machine or a fresh container/VM and record the
+result. Replace the placeholder dates with the actual run dates.
+
+| Scenario | Platform | Result | Date / Notes |
+|---|---|---|---|
+| Flatpak fresh install from release bundle | Linux | ☐ Pass ☐ Fail | |
+| Flatpak upgrade over previous RC | Linux | ☐ Pass ☐ Fail | |
+| Flatpak sandbox keyring unlock after reboot | Linux | ☐ Pass ☐ Fail | |
+| Self-contained ZIP: extract + run | Windows 11 | ☐ Pass ☐ Fail | |
+| MSIX: install / launch / remove | Windows 11 | ☐ Pass ☐ Fail | |
+| MSIX: upgrade over previous version | Windows 11 | ☐ Pass ☐ Fail | |
+| Inno Setup: install / launch | Windows 11 | ☐ Pass ☐ Fail | |
+| Inno Setup: upgrade / uninstall (no leftovers) | Windows 11 | ☐ Pass ☐ Fail | |
+| `mailto:` from browser → composer | Linux / Windows | ☐ Pass ☐ Fail | |
+| Desktop notification shown + activation | Linux / Windows | ☐ Pass ☐ Fail | |
+| Keyring unlock after reboot, no password prompt loop | Linux / Windows | ☐ Pass ☐ Fail | |
+| 200% zoom, 640×480 window (header not clipped) | Linux / Windows | ☐ Pass ☐ Fail | |
+
+---
+
+## Failure Drills (H4)
+
+These drills must leave the local data readable or explicitly reset with
+renamed files — never silently deleted.
+
+- [ ] **Corrupt database**: close Mailin, replace `mailin.db` with a truncated
+      copy, start again → recovery window offers Retry / Open data folder /
+      Reset local cache / Quit; Reset renames the unreadable files.
+- [ ] **Read-only data directory**: start with the data directory made
+      read-only → the app reports a clear error and does not lose data.
+- [ ] **Wrong password**: change an account password server-side → sync fails
+      with an actionable message, other accounts keep syncing.
+- [ ] **Expired OAuth token**: rotate/revoke a test OAuth token → refresh is
+      attempted and failure is reported without a crash loop.
+- [ ] **Offline start**: start with networking disabled → cached mail opens,
+      sync status says Offline, reconnect resumes sync.
+- [ ] **No IDLE**: use a server without IDLE → polling still delivers new mail.
+- [ ] **No SPECIAL-USE**: use a server that does not advertise SPECIAL-USE →
+      folder roles fall back to name heuristics and the wizard still finishes.
+- [ ] **10k-message folder**: open and scroll a 10k-message folder → the list
+      stays responsive and selection/scroll position survives refresh.
+- [ ] **Failed send**: disconnect SMTP mid-send → the outbox shows Retry and a
+      retry after reconnecting delivers exactly one copy.
+
+---
+
 ## CI/CD Pipeline Verification
 
 - [ ] `cargo fmt --all -- --check` passes
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
 - [ ] `cargo test --workspace --all-targets` passes
+- [ ] `cargo run -p xtask -- check-versions` passes (version agreement)
+- [ ] `flatpak-builder-lint manifest packaging/flatpak/dev.mailin.Mailin.json` passes
 - [ ] `cargo test -p mailin-core --test imap_it -- --ignored` passes (plaintext)
 - [ ] `cargo test -p mailin-core --test imap_it_tls -- --ignored` passes (IMAPS 993 / SMTPS 465)
 - [ ] `cargo test -p mailin-core --test imap_it_starttls -- --ignored` passes (STARTTLS 143/587)
@@ -178,6 +228,8 @@ This checklist must be completed and signed off for each release candidate befor
   - [ ] `Cargo.toml` (workspace)
   - [ ] `packaging/flatpak/dev.mailin.Mailin.metainfo.xml`
   - [ ] `packaging/windows/AppxManifest.xml`
+  - [ ] `packaging/windows/setup.iss`
+- [ ] `cargo xtask release-version <version> <date>` used for the bump
 - [ ] README.md updated if needed
 - [ ] Migration guide (if breaking changes)
 
@@ -191,6 +243,26 @@ This checklist must be completed and signed off for each release candidate befor
 - [ ] Flatpak submitted to Flathub (if not automated)
 - [ ] Announcement prepared (blog, social, mailing list)
 - [ ] Next version development branch created
+
+---
+
+## Automated Evidence (Sprint 3, Linux host)
+
+Recorded during the RC1 preparation pass. Commands marked "not run" require the
+Windows CI runner or a manual desktop session and must be ticked there instead.
+
+- [x] `cargo fmt --all`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo test --workspace --all-targets`
+- [x] `cargo run -p xtask -- check-versions` → `versions agree: 0.1.0`
+- [x] `cargo test -p xtask --bin xtask` (7 unit tests passed)
+- [x] `appstreamcli validate --no-net packaging/flatpak/dev.mailin.Mailin.metainfo.xml`
+- [ ] WinUI build / manual QA — not runnable on Linux; see F2
+- [ ] Screenshot review in Light / Dark / high contrast — manual
+- [ ] Install matrix and failure drills — manual
+
+Do not mark a box above as passed unless the command was actually run for the
+tag being signed off.
 
 ---
 

@@ -214,6 +214,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Download Flatpak Artifact
         uses: actions/download-artifact@v4
         with:
@@ -235,14 +238,21 @@ jobs:
       - name: List Artifacts
         run: ls -la artifacts/flatpak/ artifacts/windows/ artifacts/attestation/
 
+      - name: Render release notes
+        run: |
+          cargo run -p xtask -- release-notes "${GITHUB_REF_NAME}" \
+            "$(date +%F)" > release-notes.md
+          head -20 release-notes.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Mailin ${{ github.ref_name }}
+          body_path: release-notes.md
           draft: false
           prerelease: false
-          generate_release_notes: true
+          generate_release_notes: false
           files: |
             artifacts/flatpak/mailin-*.flatpak
             artifacts/windows/mailin-winui-*-x86_64.zip
