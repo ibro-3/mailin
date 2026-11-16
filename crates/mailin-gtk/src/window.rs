@@ -80,6 +80,8 @@ struct Widgets {
     title: adw::WindowTitle,
     stack: gtk::Stack,
     toast: adw::ToastOverlay,
+    /// E15: hidden status role that mirrors toasts for screen readers.
+    live_region: gtk::Label,
     banner: adw::Banner,
     account_dropdown: gtk::DropDown,
     add_button: gtk::Button,
@@ -476,6 +478,11 @@ impl MainWindow {
             .build();
         hamburger_button.add_css_class("flat");
         hamburger_button.set_visible(false); // Hidden by default, shown on mobile
+        {
+            // E15: icon-only buttons need an accessible name.
+            use gtk::accessible::Property;
+            hamburger_button.update_property(&[Property::Label("Menu")]);
+        }
         header.pack_start(&hamburger_button);
 
         // Back button for mobile navigation (message reader -> message list)
@@ -485,6 +492,10 @@ impl MainWindow {
             .build();
         back_button.add_css_class("flat");
         back_button.set_visible(false); // Hidden by default, shown on mobile when in reader view
+        {
+            use gtk::accessible::Property;
+            back_button.update_property(&[Property::Label("Back")]);
+        }
         header.pack_start(&back_button);
 
         let compose_button = icon_button("mail-message-new-symbolic", "New message (Ctrl+N)");
@@ -507,10 +518,13 @@ impl MainWindow {
             sync_status.update_property(&[Property::Label("Sync status: Idle")]);
         }
 
-        // Scope toggle (Current folder / All mail)
+        // Search scope. E12: the control itself lives in the search popover
+        // (and the overflow menu at narrow widths); this toggle is the single
+        // source of truth and stays out of the header so search keeps room.
         let scope_button = gtk::ToggleButton::builder()
             .label("Current folder")
             .tooltip_text("Search scope: Current folder / All mail")
+            .visible(false)
             .build();
         scope_button.add_css_class("flat");
 
@@ -541,7 +555,6 @@ impl MainWindow {
 
         header.pack_end(&sync_button);
         header.pack_end(&sync_status);
-        header.pack_end(&scope_button);
         header.pack_end(&history_button);
         header.pack_end(&search);
         header.pack_end(&overflow_button);
@@ -1023,6 +1036,16 @@ impl MainWindow {
         let toast = adw::ToastOverlay::new();
         toast.set_child(Some(&content));
 
+        // E15: AdwToast is not announced by screen readers; a status role
+        // mirrors the text so short confirmations are still heard. The label
+        // must stay visible to remain in the accessibility tree, so it is
+        // transparent and one pixel tall rather than hidden.
+        let live_region = gtk::Label::new(None);
+        live_region.set_accessible_role(gtk::AccessibleRole::Status);
+        live_region.set_opacity(0.0);
+        live_region.set_size_request(1, 1);
+        content.append(&live_region);
+
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&toast));
@@ -1067,6 +1090,7 @@ impl MainWindow {
                 title,
                 stack,
                 toast,
+                live_region,
                 banner,
                 account_dropdown,
                 add_button,
@@ -1147,6 +1171,10 @@ impl MainWindow {
         if let Some(warning) = this.app.config_warning.clone() {
             this.show_error(&warning);
         }
+        // D3: a panic in the previous run leaves a one-shot notice.
+        if let Some(notice) = crate::app::take_startup_notice() {
+            this.show_error(&format!("Mailin recovered from a crash last run. {notice}"));
+        }
 
         // A mailto: draft or a "compose" request that arrived before the
         // window was created is handled once the accounts are loaded and an
@@ -1208,33 +1236,50 @@ impl MainWindow {
 
     /// Set the message list's empty-state copy and contextual action (C2).
     fn set_message_empty_state(&self, state: EmptyState, detail: Option<&str>) {
-        let (title, description, action) = match state {
-            EmptyState::Normal => ("No messages", "This folder is empty.", Some("Sync now")),
-            EmptyState::Preparing => (
-                "Preparing your mailbox…",
-                "Folders appear after the first synchronization.",
+        let (title, description, action): (String, String, Option<&str>) = match state {
+            EmptyState::Normal => (
+                "No messages".to_owned(),
+                "This folder is empty.".to_owned(),
                 Some("Sync now"),
             ),
-            EmptyState::NoResults => (
-                "No results",
-                detail.unwrap_or("Try a different search term."),
-                Some("Clear search"),
+            EmptyState::Preparing => (
+                "Preparing your mailbox…".to_owned(),
+                "Folders appear after the first synchronization.".to_owned(),
+                Some("Sync now"),
             ),
+            EmptyState::NoResults => {
+                // E11: name the query so a typo is obvious at a glance.
+                let query = self.selection.borrow().query.clone();
+                let title = if query.trim().is_empty() {
+                    "No results".to_owned()
+                } else {
+                    format!("No results for “{}”", query.trim())
+                };
+                (
+                    title,
+                    detail
+                        .unwrap_or("Try a different search term, or clear the search.")
+                        .to_owned(),
+                    Some("Clear search"),
+                )
+            }
             EmptyState::Offline => (
-                "You're offline",
-                "Reconnect and sync to see your messages.",
+                "You're offline".to_owned(),
+                "Reconnect and sync to see your messages.".to_owned(),
                 Some("Retry"),
             ),
             EmptyState::Error => (
-                "Couldn't load messages",
-                detail.unwrap_or("Something went wrong while loading this folder."),
+                "Couldn't load messages".to_owned(),
+                detail
+                    .unwrap_or("Something went wrong while loading this folder.")
+                    .to_owned(),
                 Some("Retry"),
             ),
         };
-        self.widgets.message_empty.set_title(title);
+        self.widgets.message_empty.set_title(&title);
         self.widgets
             .message_empty
-            .set_description(Some(description));
+            .set_description(Some(&description));
         if let Some(label) = action {
             self.widgets.message_empty_action.set_label(label);
             self.widgets.message_empty_action.set_visible(true);
@@ -1333,9 +1378,14 @@ impl MainWindow {
                     .hamburger_button
                     .set_visible(is_mobile || is_tablet);
 
-                this.widgets.scope_button.set_visible(is_desktop);
+                this.widgets.scope_button.set_visible(false);
                 this.widgets.history_button.set_visible(is_desktop);
                 this.widgets.overflow_button.set_visible(true);
+                // E16: at 640×480 (and 200% zoom) the search entry keeps a
+                // usable width without pushing the header past the edge.
+                this.widgets
+                    .search
+                    .set_width_chars(if is_desktop { 18 } else { 12 });
 
                 if is_mobile {
                     this.widgets.split.set_collapsed(true);
@@ -1861,6 +1911,20 @@ impl MainWindow {
             move |_| this.run_search(true)
         });
 
+        // E11: Escape (or the entry's clear affordance) stops the search and
+        // returns to the folder list.
+        this.widgets.search.connect_stop_search({
+            let this = Rc::clone(this);
+            move |_| {
+                this.search_generation
+                    .set(this.search_generation.get().wrapping_add(1));
+                this.programmatic.set(true);
+                this.widgets.search.set_text("");
+                this.programmatic.set(false);
+                this.clear_search();
+            }
+        });
+
         // M4-D: find in message (HTML reader)
         {
             let entry = this.widgets.reader_find_entry.clone();
@@ -1869,28 +1933,28 @@ impl MainWindow {
             entry.connect_search_changed(move |entry| {
                 let text = entry.text().to_string();
                 let view_opt = find_target.borrow().clone();
-                if let Some(view) = view_opt {
-                    if let Some(fc) = view.find_controller() {
-                        if text.is_empty() {
-                            fc.search_finish();
-                            status.set_text("");
-                        } else {
-                            let opts = webkit6::FindOptions::CASE_INSENSITIVE
-                                | webkit6::FindOptions::WRAP_AROUND;
-                            fc.search(&text, opts.bits(), u32::MAX);
-                            fc.count_matches(&text, opts.bits(), u32::MAX);
-                            status.set_text("");
-                        }
+                if let Some(view) = view_opt
+                    && let Some(fc) = view.find_controller()
+                {
+                    if text.is_empty() {
+                        fc.search_finish();
+                        status.set_text("");
+                    } else {
+                        let opts = webkit6::FindOptions::CASE_INSENSITIVE
+                            | webkit6::FindOptions::WRAP_AROUND;
+                        fc.search(&text, opts.bits(), u32::MAX);
+                        fc.count_matches(&text, opts.bits(), u32::MAX);
+                        status.set_text("");
                     }
                 }
             });
             let entry = this.widgets.reader_find_entry.clone();
             let find_target = Rc::clone(&this.find_target_view);
             entry.connect_activate(move |_| {
-                if let Some(view) = find_target.borrow().as_ref() {
-                    if let Some(fc) = view.find_controller() {
-                        fc.search_next();
-                    }
+                if let Some(view) = find_target.borrow().as_ref()
+                    && let Some(fc) = view.find_controller()
+                {
+                    fc.search_next();
                 }
             });
             let entry = this.widgets.reader_find_entry.clone();
@@ -1902,26 +1966,26 @@ impl MainWindow {
                     .widgets
                     .reader_find_revealer
                     .set_reveal_child(false);
-                if let Some(view) = this_stop.find_target_view.borrow().as_ref() {
-                    if let Some(fc) = view.find_controller() {
-                        fc.search_finish();
-                    }
+                if let Some(view) = this_stop.find_target_view.borrow().as_ref()
+                    && let Some(fc) = view.find_controller()
+                {
+                    fc.search_finish();
                 }
             });
             let find_target = Rc::clone(&this.find_target_view);
             this.widgets.reader_find_next.connect_clicked(move |_| {
-                if let Some(view) = find_target.borrow().as_ref() {
-                    if let Some(fc) = view.find_controller() {
-                        fc.search_next();
-                    }
+                if let Some(view) = find_target.borrow().as_ref()
+                    && let Some(fc) = view.find_controller()
+                {
+                    fc.search_next();
                 }
             });
             let find_target = Rc::clone(&this.find_target_view);
             this.widgets.reader_find_prev.connect_clicked(move |_| {
-                if let Some(view) = find_target.borrow().as_ref() {
-                    if let Some(fc) = view.find_controller() {
-                        fc.search_previous();
-                    }
+                if let Some(view) = find_target.borrow().as_ref()
+                    && let Some(fc) = view.find_controller()
+                {
+                    fc.search_previous();
                 }
             });
             let this_close = Rc::clone(this);
@@ -1930,10 +1994,10 @@ impl MainWindow {
                     .widgets
                     .reader_find_revealer
                     .set_reveal_child(false);
-                if let Some(view) = this_close.find_target_view.borrow().as_ref() {
-                    if let Some(fc) = view.find_controller() {
-                        fc.search_finish();
-                    }
+                if let Some(view) = this_close.find_target_view.borrow().as_ref()
+                    && let Some(fc) = view.find_controller()
+                {
+                    fc.search_finish();
                 }
                 this_close.widgets.reader_find_entry.set_text("");
                 this_close.widgets.reader_find_status.set_text("");
@@ -1969,10 +2033,10 @@ impl MainWindow {
         this.widgets.scope_button.connect_toggled({
             let this = Rc::clone(this);
             move |button| {
-                if let Some(action) = this.widgets.window.lookup_action("search-all-mail") {
-                    if let Some(action) = action.downcast_ref::<gio::SimpleAction>() {
-                        action.set_state(&button.is_active().to_variant());
-                    }
+                if let Some(action) = this.widgets.window.lookup_action("search-all-mail")
+                    && let Some(action) = action.downcast_ref::<gio::SimpleAction>()
+                {
+                    action.set_state(&button.is_active().to_variant());
                 }
             }
         });
@@ -1994,6 +2058,28 @@ impl MainWindow {
                 while let Some(child) = history_list.first_child() {
                     history_list.remove(&child);
                 }
+                // E12: the search scope lives here rather than in the header,
+                // so the search entry keeps its room in narrow windows. The
+                // hidden toolbar toggle remains the single source of truth.
+                let scope_row = adw::SwitchRow::builder()
+                    .title("Search all mail")
+                    .subtitle("Search every folder instead of the current one")
+                    .active(this.widgets.scope_button.is_active())
+                    .build();
+                {
+                    let this = Rc::clone(&this);
+                    scope_row.connect_active_notify(move |row| {
+                        if this.widgets.scope_button.is_active() != row.is_active() {
+                            this.widgets.scope_button.set_active(row.is_active());
+                            // Re-run an active search under the new scope.
+                            if this.selection.borrow().search {
+                                this.run_search(false);
+                            }
+                        }
+                    });
+                }
+                history_list.append(&scope_row);
+                history_list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
                 let Some(account) = this.selection.borrow().account else {
                     let row = adw::ActionRow::builder()
                         .title("Search history is stored per account")
@@ -2024,6 +2110,60 @@ impl MainWindow {
                             return;
                         }
                         let now = format::now_unix();
+                        // E11: the history can be curated — remove a single
+                        // query or clear the account's whole list. The scope
+                        // switch (row + separator) stays pinned at the top.
+                        let show_placeholder: Rc<dyn Fn()> = {
+                            let list = history_list.clone();
+                            Rc::new(move || {
+                                while list.observe_children().n_items() > 2 {
+                                    let Some(last) = list.last_child() else {
+                                        break;
+                                    };
+                                    list.remove(&last);
+                                }
+                                list.append(
+                                    &adw::ActionRow::builder()
+                                        .title("No recent searches")
+                                        .subtitle("Searches you run will appear here.")
+                                        .build(),
+                                );
+                            })
+                        };
+                        {
+                            let this = Rc::clone(&this);
+                            let list = history_list.clone();
+                            let show_placeholder = Rc::clone(&show_placeholder);
+                            let clear_row = adw::ActionRow::builder()
+                                .title("Clear all history")
+                                .activatable(true)
+                                .build();
+                            clear_row.add_prefix(&gtk::Image::from_icon_name(
+                                "edit-clear-all-symbolic",
+                            ));
+                            clear_row.connect_activated(move |_| {
+                                let mailin = std::sync::Arc::clone(&this.app.mailin);
+                                let show_placeholder = Rc::clone(&show_placeholder);
+                                background::spawn_result(
+                                    move || {
+                                        mailin
+                                            .clear_search_history(&account)
+                                            .map_err(|error| error.to_string())
+                                    },
+                                    move |result| {
+                                        if let Ok(Err(error)) = result {
+                                            tracing::warn!(
+                                                "could not clear the search history: {error}"
+                                            );
+                                            return;
+                                        }
+                                        show_placeholder();
+                                    },
+                                );
+                            });
+                            list.append(&clear_row);
+                        }
+                        history_list.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
                         for entry in history {
                             let row = adw::ActionRow::builder()
                                 .title(&entry.query)
@@ -2032,6 +2172,16 @@ impl MainWindow {
                                     format::list_time(now, entry.timestamp)
                                 ))
                                 .build();
+                            let delete = gtk::Button::builder()
+                                .icon_name("user-trash-symbolic")
+                                .tooltip_text("Remove this search from history")
+                                .build();
+                            delete.add_css_class("flat");
+                            {
+                                use gtk::accessible::Property;
+                                delete.update_property(&[Property::Label("Remove from history")]);
+                            }
+                            row.add_suffix(&delete);
                             row.connect_activated({
                                 let this = Rc::clone(&this);
                                 let query = entry.query.clone();
@@ -2046,6 +2196,42 @@ impl MainWindow {
                                     this.run_search(true);
                                 }
                             });
+                            {
+                                let this = Rc::clone(&this);
+                                let list = history_list.clone();
+                                let show_placeholder = Rc::clone(&show_placeholder);
+                                let row_for_remove = row.clone();
+                                let query = entry.query.clone();
+                                delete.connect_clicked(move |_| {
+                                    let mailin = std::sync::Arc::clone(&this.app.mailin);
+                                    let query = query.clone();
+                                    let list = list.clone();
+                                    let row_for_remove = row_for_remove.clone();
+                                    let show_placeholder = Rc::clone(&show_placeholder);
+                                    background::spawn_result(
+                                        move || {
+                                            mailin
+                                                .remove_search_history(&account, &query)
+                                                .map_err(|error| error.to_string())
+                                        },
+                                        move |result| {
+                                            if let Ok(Err(error)) = result {
+                                                tracing::warn!(
+                                                    "could not remove the search history entry: {error}"
+                                                );
+                                                return;
+                                            }
+                                            list.remove(&row_for_remove);
+                                            // Scope row + separator, clear-all
+                                            // row + separator: nothing else
+                                            // means the history is empty.
+                                            if list.observe_children().n_items() <= 4 {
+                                                show_placeholder();
+                                            }
+                                        },
+                                    );
+                                });
+                            }
                             history_list.append(&row);
                         }
                         history_popover.popup();
@@ -2797,10 +2983,10 @@ impl MainWindow {
         for folder in &folders {
             self.widgets.folder_list.append(&folder_row(folder));
         }
-        if let Some(index) = index {
-            if let Some(row) = self.widgets.folder_list.row_at_index(index as i32) {
-                self.widgets.folder_list.select_row(Some(&row));
-            }
+        if let Some(index) = index
+            && let Some(row) = self.widgets.folder_list.row_at_index(index as i32)
+        {
+            self.widgets.folder_list.select_row(Some(&row));
         }
         self.widgets
             .folder_stack
@@ -3051,15 +3237,14 @@ impl MainWindow {
                             flat_messages.push(root.clone());
                             let root_key =
                                 root.thread_root_key.as_ref().or(root.message_id.as_ref());
-                            if let Some(key) = root_key {
-                                if expanded_threads.contains(key) {
-                                    if let Ok(replies) = mailin.store().list_thread_replies(key) {
-                                        for mut reply in replies {
-                                            // All replies at depth 1 for flat view
-                                            reply.thread_depth = 1;
-                                            flat_messages.push(reply);
-                                        }
-                                    }
+                            if let Some(key) = root_key
+                                && expanded_threads.contains(key)
+                                && let Ok(replies) = mailin.store().list_thread_replies(key)
+                            {
+                                for mut reply in replies {
+                                    // All replies at depth 1 for flat view
+                                    reply.thread_depth = 1;
+                                    flat_messages.push(reply);
                                 }
                             }
                         }
@@ -3229,8 +3414,13 @@ impl MainWindow {
         let density = self.app.config.borrow().ui.message_list_density;
         let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
         let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
+        // E13: a search result's snippet bolds the query terms.
+        let highlight_query = {
+            let selection = self.selection.borrow();
+            selection.search.then(|| selection.query.clone())
+        };
         for message in &messages {
-            let row = message_row(message, now, density);
+            let row = message_row(message, now, density, highlight_query.as_deref());
             if quick_actions_enabled {
                 attach_quick_actions(
                     &row,
@@ -3301,9 +3491,13 @@ impl MainWindow {
         let density = self.app.config.borrow().ui.message_list_density;
         let quick_actions_enabled = self.app.config.borrow().ui.quick_actions;
         let quick_action_items = self.app.config.borrow().ui.quick_action_items.clone();
+        let highlight_query = {
+            let selection = self.selection.borrow();
+            selection.search.then(|| selection.query.clone())
+        };
 
         for message in &flat_messages {
-            let row = message_row(message, now, density);
+            let row = message_row(message, now, density, highlight_query.as_deref());
             if quick_actions_enabled {
                 attach_quick_actions(
                     &row,
@@ -3877,10 +4071,10 @@ impl MainWindow {
         self.widgets.reader_find_entry.set_text("");
         self.widgets.reader_find_status.set_text("");
         *self.find_target_view.borrow_mut() = None;
-        if let Some(view) = self.html_view.borrow().as_ref() {
-            if let Some(fc) = view.find_controller() {
-                fc.search_finish();
-            }
+        if let Some(view) = self.html_view.borrow().as_ref()
+            && let Some(fc) = view.find_controller()
+        {
+            fc.search_finish();
         }
     }
 
@@ -4400,10 +4594,10 @@ impl MainWindow {
         row.set_margin_bottom(2);
 
         // Preview for images and PDFs
-        if is_image || is_pdf {
-            if let Ok(preview) = self.attachment_preview(message_id, attachment.clone()) {
-                row.append(&preview);
-            }
+        if (is_image || is_pdf)
+            && let Ok(preview) = self.attachment_preview(message_id, attachment.clone())
+        {
+            row.append(&preview);
         }
 
         let icon = gtk::Image::from_icon_name("mail-attachment-symbolic");
@@ -4775,6 +4969,12 @@ impl MainWindow {
     }
 
     fn toast(&self, text: &str) {
+        {
+            use gtk::accessible::Property;
+            self.widgets
+                .live_region
+                .update_property(&[Property::Label(text)]);
+        }
         self.widgets.toast.add_toast(adw::Toast::new(text));
     }
 
@@ -6971,7 +7171,55 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     row
 }
 
-fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -> gtk::ListBoxRow {
+/// Escape a snippet for Pango markup and bold the free-text search terms it
+/// contains (E13). Structured filters (`from:`, `is:`) are not shown in
+/// snippets, so only `fts_terms` are marked.
+fn highlight_terms(text: &str, query: &str) -> String {
+    let mut terms: Vec<String> = mailin_core::search::parse_search_query(query)
+        .fts_terms
+        .iter()
+        .map(|term| term.to_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect();
+    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
+    terms.dedup();
+
+    let lower = text.to_lowercase();
+    // Lowercasing can change byte lengths in a few scripts; only mark when
+    // the indices are interchangeable.
+    if terms.is_empty() || lower.len() != text.len() {
+        return glib::markup_escape_text(text).to_string();
+    }
+
+    let mut out = String::with_capacity(text.len() + terms.len() * 7);
+    let mut cursor = 0;
+    while cursor < text.len() {
+        let mut found: Option<(usize, usize)> = None;
+        for term in &terms {
+            if let Some(offset) = lower[cursor..].find(term.as_str()) {
+                let start = cursor + offset;
+                if found.is_none_or(|(best, _)| start < best) {
+                    found = Some((start, start + term.len()));
+                }
+            }
+        }
+        let Some((start, end)) = found else { break };
+        out.push_str(&glib::markup_escape_text(&text[cursor..start]));
+        out.push_str("<b>");
+        out.push_str(&glib::markup_escape_text(&text[start..end]));
+        out.push_str("</b>");
+        cursor = end;
+    }
+    out.push_str(&glib::markup_escape_text(&text[cursor..]));
+    out
+}
+
+fn message_row(
+    message: &MessageHeader,
+    now: i64,
+    density: MessageListDensity,
+    highlight_query: Option<&str>,
+) -> gtk::ListBoxRow {
     use MessageListDensity::{Compact, Cozy};
 
     let seen = message.is_seen();
@@ -7106,11 +7354,17 @@ fn message_row(message: &MessageHeader, now: i64, density: MessageListDensity) -
     if show_snippet && let Some(snippet) = message.snippet.as_deref() {
         let text = format::one_line(snippet, 160);
         if !text.is_empty() {
-            let label = gtk::Label::new(Some(&text));
+            let label = gtk::Label::new(None);
             label.set_xalign(0.0);
             label.set_ellipsize(pango::EllipsizeMode::End);
             label.add_css_class("caption");
             label.add_css_class("dim-label");
+            match highlight_query {
+                Some(query) if !query.trim().is_empty() => {
+                    label.set_markup(&highlight_terms(&text, query));
+                }
+                _ => label.set_text(&text),
+            }
             column.append(&label);
         }
     }
@@ -7255,11 +7509,11 @@ fn attach_quick_actions(
     click.connect_pressed({
         let revealed = std::rc::Rc::clone(&revealed);
         move |_, _, _, _| {
-            if let Some(bar) = actions_bar_weak.upgrade() {
-                if revealed.get() {
-                    bar.set_visible(false);
-                    revealed.set(false);
-                }
+            if let Some(bar) = actions_bar_weak.upgrade()
+                && revealed.get()
+            {
+                bar.set_visible(false);
+                revealed.set(false);
             }
         }
     });
@@ -7537,4 +7791,32 @@ fn loading_body(text: &str) -> gtk::Widget {
     label.add_css_class("dim-label");
     row.append(&label);
     row.upcast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::highlight_terms;
+
+    #[test]
+    fn highlight_marks_free_text_terms_only() {
+        let markup = highlight_terms("Quarterly Invoice is ready", "invoice");
+        assert_eq!(markup, "Quarterly <b>Invoice</b> is ready");
+        // Structured filters are not part of the snippet.
+        let markup = highlight_terms("Quarterly Invoice", "from:alice invoice");
+        assert_eq!(markup, "Quarterly <b>Invoice</b>");
+    }
+
+    #[test]
+    fn highlight_escapes_markup_and_marks_every_occurrence() {
+        let markup = highlight_terms("a < b & budget", "budget");
+        assert_eq!(markup, "a &lt; b &amp; <b>budget</b>");
+        let markup = highlight_terms("invoice, invoice", "invoice");
+        assert_eq!(markup, "<b>invoice</b>, <b>invoice</b>");
+    }
+
+    #[test]
+    fn highlight_leaves_plain_text_without_terms() {
+        assert_eq!(highlight_terms("hello", ""), "hello");
+        assert_eq!(highlight_terms("hello", "from:alice"), "hello");
+    }
 }

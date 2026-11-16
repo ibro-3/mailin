@@ -307,6 +307,21 @@ impl SearchHistory {
             list.truncate(20);
         }
     }
+
+    /// Remove one query from an account's history (E11).
+    pub fn remove(&mut self, account_id: &AccountId, query: &str) {
+        if let Some(list) = self.history.get_mut(account_id) {
+            list.retain(|entry| entry.query != query);
+            if list.is_empty() {
+                self.history.remove(account_id);
+            }
+        }
+    }
+
+    /// Drop the whole history for an account (E11).
+    pub fn clear(&mut self, account_id: &AccountId) {
+        self.history.remove(account_id);
+    }
 }
 
 impl Config {
@@ -477,6 +492,26 @@ mod tests {
     #[test]
     fn quick_action_restore_states_is_empty_for_no_rows() {
         assert!(quick_action_restore_states(&[]).is_empty());
+    }
+
+    #[test]
+    fn search_history_removes_and_clears_per_account() {
+        let account = AccountId::new();
+        let other = AccountId::new();
+        let mut history = SearchHistory::default();
+        history.add(account, "invoice".to_owned(), None);
+        history.add(account, "receipt".to_owned(), None);
+        history.add(other, "invoice".to_owned(), None);
+
+        history.remove(&account, "invoice");
+        let left: Vec<String> = history.get(&account).into_iter().map(|e| e.query).collect();
+        assert_eq!(left, ["receipt"]);
+        // Another account keeps its own copy (E11).
+        assert_eq!(history.get(&other).len(), 1);
+
+        history.clear(&account);
+        assert!(history.get(&account).is_empty());
+        assert_eq!(history.get(&other).len(), 1);
     }
 
     #[test]

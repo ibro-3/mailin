@@ -427,6 +427,26 @@ impl Mailin {
         Ok(())
     }
 
+    /// Remove one query from an account's search history (E11).
+    pub fn remove_search_history(&self, account: &AccountId, query: &str) -> Result<()> {
+        let mut cache = self.config_cache.write().map_err(|_| Error::LockPoisoned)?;
+        if let Some(config) = cache.as_mut() {
+            config.search.remove(account, query);
+            config.save(&self.config_paths)?;
+        }
+        Ok(())
+    }
+
+    /// Drop an account's whole search history (E11).
+    pub fn clear_search_history(&self, account: &AccountId) -> Result<()> {
+        let mut cache = self.config_cache.write().map_err(|_| Error::LockPoisoned)?;
+        if let Some(config) = cache.as_mut() {
+            config.search.clear(account);
+            config.save(&self.config_paths)?;
+        }
+        Ok(())
+    }
+
     pub fn unread_total(&self, account: &AccountId) -> Result<u32> {
         self.store.unread_total(account)
     }
@@ -819,10 +839,10 @@ impl Mailin {
     ) -> Result<(String, SignatureStatus)> {
         let mut secret_certs = Vec::new();
         for key in self.store.pgp_keys_for_account(account)? {
-            if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)? {
-                if let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret()) {
-                    secret_certs.push(cert);
-                }
+            if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)?
+                && let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret())
+            {
+                secret_certs.push(cert);
             }
         }
         if secret_certs.is_empty() {
@@ -858,12 +878,11 @@ impl Mailin {
     /// The first key of `account` that has secret key material in the keyring.
     fn pgp_signer(&self, account: &AccountId) -> Result<Option<(sequoia_openpgp::Cert, String)>> {
         for key in self.store.pgp_keys_for_account(account)? {
-            if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)? {
-                if let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret()) {
-                    if cert.is_tsk() {
-                        return Ok(Some((cert, secret.expose_secret().to_owned())));
-                    }
-                }
+            if let Some(secret) = self.credentials.get_pgp_secret(account, &key.fingerprint)?
+                && let Ok(cert) = crate::pgp::import_secret_key(secret.expose_secret())
+                && cert.is_tsk()
+            {
+                return Ok(Some((cert, secret.expose_secret().to_owned())));
             }
         }
         Ok(None)
