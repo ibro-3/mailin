@@ -795,7 +795,9 @@ impl MainWindow {
                 last_synced_at: None,
                 subscribed: true,
                 message_count: outbox_len,
-                unread_count: outbox_len,
+                // Queued mail is not "unread"; the badge renders
+                // message_count instead.
+                unread_count: 0,
             });
         }
 
@@ -5217,21 +5219,34 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let name = ui::text(&folder_title(folder))?;
     ui::stretch_horizontal(&name)?;
     ui::append(&row, &name)?;
-    if folder.unread_count > 0 {
-        let badge = ui::text(&folder.unread_count.to_string())?;
-        AutomationProperties::SetName(
-            &badge,
-            &mailin_core::plural(folder.unread_count, "unread message", "unread messages"),
-        )?;
+    let is_outbox = folder.id.is_outbox();
+    // The Outbox badge counts queued messages, not unread ones.
+    let badge_count = if is_outbox {
+        (folder.message_count > 0).then_some(folder.message_count)
+    } else if folder.unread_count > 0 {
+        Some(folder.unread_count)
+    } else {
+        None
+    };
+    let badge_words = |count: u32| {
+        if is_outbox {
+            mailin_core::plural(count, "queued message", "queued messages")
+        } else {
+            mailin_core::plural(count, "unread message", "unread messages")
+        }
+    };
+    if let Some(count) = badge_count {
+        let badge = ui::text(&count.to_string())?;
+        AutomationProperties::SetName(&badge, &badge_words(count))?;
         ui::append(&row, &badge)?;
     }
+    let button_label = match badge_count {
+        Some(count) => format!("{}, {}", folder_title(folder), badge_words(count)),
+        None => folder_title(folder),
+    };
     let button = ui::content_button(
         &row,
-        Some(&format!(
-            "{}, {}",
-            folder_title(folder),
-            mailin_core::plural(folder.unread_count, "unread message", "unread messages")
-        )),
+        Some(&button_label),
         None,
     )?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;

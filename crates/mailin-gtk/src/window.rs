@@ -2362,7 +2362,9 @@ impl MainWindow {
                             last_synced_at: None,
                             subscribed: true,
                             message_count: outbox_len,
-                            unread_count: outbox_len,
+                            // Queued mail is not "unread"; the badge renders
+                            // message_count instead.
+                            unread_count: 0,
                         });
                         FolderFetch::Folders(folders)
                     }
@@ -6307,17 +6309,28 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     icon.set_pixel_size(16);
     content.append(&icon);
 
+    let is_outbox = folder.id.is_outbox();
+    // The Outbox badge counts queued messages, not unread ones.
+    let unread_count = if is_outbox { 0 } else { folder.unread_count };
+    let badge_count = if is_outbox {
+        (folder.message_count > 0).then_some(folder.message_count)
+    } else if folder.unread_count > 0 {
+        Some(folder.unread_count)
+    } else {
+        None
+    };
+
     let label = gtk::Label::new(Some(&folder_title(folder)));
     label.set_xalign(0.0);
     label.set_hexpand(true);
     label.set_ellipsize(pango::EllipsizeMode::End);
-    if folder.unread_count > 0 {
+    if unread_count > 0 {
         label.add_css_class("heading");
     }
     content.append(&label);
 
-    if folder.unread_count > 0 {
-        let badge = gtk::Label::new(Some(&folder.unread_count.to_string()));
+    if let Some(count) = badge_count {
+        let badge = gtk::Label::new(Some(&count.to_string()));
         badge.add_css_class("caption");
         badge.add_css_class("dim-label");
         content.append(&badge);
@@ -6327,15 +6340,26 @@ fn folder_row(folder: &Folder) -> gtk::ListBoxRow {
     if folder_title(folder) != folder.name {
         row.set_tooltip_text(Some(&folder.name));
     }
-    // Expose the unread count in words; the bare number badge alone reads as
-    // just a digit with no context.
-    if folder.unread_count > 0 {
-        let name = format!(
-            "{}, {}",
-            folder_title(folder),
-            mailin_core::plural(folder.unread_count, "unread message", "unread messages")
-        );
-        row.update_property(&[Property::Label(&name)]);
+    // Expose the count in words; the bare number badge alone reads as just a
+    // digit with no context.
+    match (is_outbox, badge_count) {
+        (true, Some(count)) => {
+            let name = format!(
+                "{}, {}",
+                folder_title(folder),
+                mailin_core::plural(count, "queued message", "queued messages")
+            );
+            row.update_property(&[Property::Label(&name)]);
+        }
+        (false, Some(count)) => {
+            let name = format!(
+                "{}, {}",
+                folder_title(folder),
+                mailin_core::plural(count, "unread message", "unread messages")
+            );
+            row.update_property(&[Property::Label(&name)]);
+        }
+        _ => {}
     }
 
     // M3a-4: gio::Menu + PopoverMenu. System/virtual folders must not offer
