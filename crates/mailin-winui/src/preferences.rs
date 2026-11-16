@@ -217,10 +217,7 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
         Theme::Dark => 2,
     };
     let theme = ui::combo(&["System", "Light", "Dark"], theme_index, Some("Theme"))?;
-    ui::append(
-        &panel,
-        &ui::field("Theme (applies on save; full effect after restart)", &theme)?,
-    )?;
+    ui::append(&panel, &ui::field("Theme", &theme)?)?;
 
     let density_index = match config.ui.message_list_density {
         MessageListDensity::Comfortable => 0,

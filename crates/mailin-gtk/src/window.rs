@@ -21,6 +21,7 @@ use gtk::{gio, glib, pango};
 use mailin_core::{
     Account, AccountId, AttachmentMeta, ClientEvent, Folder, FolderId, FolderRole, MessageHeader,
     MessageId, MessageListDensity, OutboxEntry, OutboxState, OutgoingEnvelope, OutgoingMessage,
+    SyncStatus,
 };
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -85,6 +86,9 @@ struct Widgets {
     account_menu_button: gtk::MenuButton,
     compose_button: gtk::Button,
     empty_add: gtk::Button,
+    /// First-run progress view: stage label and "Skip and open mail" link.
+    progress_label: gtk::Label,
+    progress_skip: gtk::Button,
     folder_list: gtk::ListBox,
     folder_stack: gtk::Stack,
     list_title: gtk::Label,
@@ -101,7 +105,12 @@ struct Widgets {
     bulk_move: gtk::Button,
     bulk_clear: gtk::Button,
     message_list: gtk::ListBox,
+    /// Scroller for the message list, whose vertical offset is preserved
+    /// across background refreshes (E1).
+    message_scroller: gtk::ScrolledWindow,
     message_empty: adw::StatusPage,
+    /// Contextual action on the empty page (Clear search / Retry).
+    message_empty_action: gtk::Button,
     list_stack: gtk::Stack,
     load_more: gtk::Button,
     search: gtk::SearchEntry,
@@ -118,6 +127,7 @@ struct Widgets {
     remote_panel: gtk::Revealer,
     remote_once: gtk::Button,
     remote_trust: gtk::Button,
+    remote_manage: gtk::Button,
     remote_dismiss: gtk::Button,
     reader_attachments: gtk::Box,
     reader_find_revealer: gtk::Revealer,
@@ -142,6 +152,8 @@ struct Widgets {
     list_pane: gtk::Box,
     /// Paned widget for message list / reader split.
     split: adw::OverlaySplitView,
+    /// List/reader split, persisted on close (C5).
+    paned: gtk::Paned,
 }
 
 /// An attachment whose bytes are needed before the save dialog can open.
@@ -260,6 +272,17 @@ pub fn handle_compose_requested() {
     }
 }
 
+/// Which differentiated empty state the message list is showing (C2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum EmptyState {
+    #[default]
+    Normal,
+    Preparing,
+    NoResults,
+    Offline,
+    Error,
+}
+
 /// One error to surface on the banner. `account_id` is `None` for
 /// background-worker failures that carry no account context.
 struct BannerError {
@@ -287,11 +310,23 @@ pub struct MainWindow {
     html_view: RefCell<Option<webkit6::WebView>>,
     /// HTML view currently targeted by find-in-message (main or decrypted).
     find_target_view: Rc<RefCell<Option<webkit6::WebView>>>,
-    /// Whether the reader prefers HTML; starts from the user preference.
-    html_mode: Cell<bool>,
+    /// Per-message HTML/plain choice (E4). Falls back to the user preference
+    /// for messages the user has not toggled yet.
+    html_modes: RefCell<std::collections::HashMap<MessageId, bool>>,
+    /// True while the first-account onboarding progress view is on screen.
+    first_run: Cell<bool>,
+    /// 0 = connecting, 1 = discovering folders, 2 = fetching headers.
+    onboarding_stage: Cell<u8>,
+    /// The empty state currently shown in the message list.
+    empty_state: Cell<EmptyState>,
+    /// Next message-list render should start at the top (folder/search change)
+    /// instead of restoring the previous scroll offset.
+    reset_scroll: Cell<bool>,
     /// Message for which the user explicitly allowed remote content.
     remote_allowed: Cell<Option<MessageId>>,
     pending_attachment: Rc<RefCell<Vec<PendingAttachment>>>,
+    /// Last folder used by "Save all", remembered across messages (E7).
+    attachment_dir: Rc<RefCell<Option<PathBuf>>>,
     /// Bumped on every `refresh_folders`; background fetches whose
     /// generation no longer matches are dropped instead of rendered.
     folders_generation: Cell<u64>,
@@ -357,8 +392,9 @@ enum ReaderContent {
     Empty,
     /// The body still has to be downloaded.
     NotFetched,
-    /// The body could not be read.
-    Failed,
+    /// The body could not be read. The string is the technical detail shown
+    /// behind the disclosure in the failure state (E6).
+    Failed(String),
 }
 
 /// Search scope for a single-account search result, transferred from the
@@ -401,11 +437,19 @@ enum MessageFetch {
 
 impl MainWindow {
     pub fn new(application: &adw::Application, app: Rc<AppState>) -> Rc<Self> {
+        let (window_width, window_height, paned_position) = {
+            let ui = &app.config.borrow().ui;
+            (
+                ui.window_width.max(640),
+                ui.window_height.max(480),
+                ui.paned_position.max(200),
+            )
+        };
         let window = adw::ApplicationWindow::builder()
             .application(application)
             .title("Mailin")
-            .default_width(1180)
-            .default_height(760)
+            .default_width(window_width)
+            .default_height(window_height)
             .build();
         window.set_size_request(640, 480);
 
@@ -618,6 +662,9 @@ impl MainWindow {
         // Bulk action bar: revealed while rows are selected in the list.
         let bulk_count = gtk::Label::new(Some("0 selected"));
         bulk_count.add_css_class("dim-label");
+        let bulk_hint = gtk::Label::new(Some("Ctrl+A Select all · Esc Clear"));
+        bulk_hint.add_css_class("dim-label");
+        bulk_hint.add_css_class("caption");
         let bulk_read = icon_button("mail-mark-read-symbolic", "Mark selected as read");
         let bulk_unread = icon_button("mail-mark-unread-symbolic", "Mark selected as unread");
         let bulk_flag = icon_button("starred-symbolic", "Star selected");
@@ -632,6 +679,7 @@ impl MainWindow {
         bulk_row.set_margin_start(14);
         bulk_row.set_margin_end(8);
         bulk_row.append(&bulk_count);
+        bulk_row.append(&bulk_hint);
         let bulk_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         bulk_spacer.set_hexpand(true);
         bulk_row.append(&bulk_spacer);
@@ -659,10 +707,18 @@ impl MainWindow {
             .vexpand(true)
             .child(&message_list)
             .build();
+        // A single StatusPage whose title, description and action are switched
+        // by `set_message_empty_state` (C2). This keeps one stack page while
+        // giving each situation its own copy and one relevant action.
+        let message_empty_action = gtk::Button::with_label("Retry");
+        message_empty_action.add_css_class("suggested-action");
+        message_empty_action.add_css_class("pill");
+        message_empty_action.set_visible(false);
         let message_empty = adw::StatusPage::builder()
             .icon_name("mail-unread-symbolic")
             .title("No messages")
-            .description("This folder is empty, or has not been synchronized yet.")
+            .description("This folder is empty.")
+            .child(&message_empty_action)
             .build();
         let list_stack = gtk::Stack::new();
         list_stack.set_vexpand(true);
@@ -734,6 +790,10 @@ impl MainWindow {
         remote_once.add_css_class("flat");
         let remote_trust = gtk::Button::with_label("Always allow sender");
         remote_trust.add_css_class("flat");
+        let remote_manage = gtk::Button::with_label("Manage trusted senders");
+        remote_manage.add_css_class("flat");
+        remote_manage.add_css_class("link");
+        remote_manage.set_tooltip_text(Some("Open the account settings to review allowed domains"));
         let remote_dismiss = gtk::Button::from_icon_name("window-close-symbolic");
         remote_dismiss.add_css_class("flat");
         remote_dismiss.set_size_request(32, 32);
@@ -746,6 +806,7 @@ impl MainWindow {
         remote_row.append(&remote_text);
         remote_row.append(&remote_once);
         remote_row.append(&remote_trust);
+        remote_row.append(&remote_manage);
         remote_row.append(&remote_dismiss);
         let remote_panel = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideDown)
@@ -868,7 +929,7 @@ impl MainWindow {
             .resize_end_child(true)
             .shrink_end_child(false)
             .build();
-        paned.set_position(380);
+        paned.set_position(paned_position);
 
         let split = adw::OverlaySplitView::builder()
             .sidebar(&sidebar)
@@ -884,20 +945,72 @@ impl MainWindow {
             .build();
 
         // ------------------------------------------------------- empty state
+        // Onboarding card: one primary action, a short explanation of what
+        // syncs, and links to shortcuts and the docs (C1).
         let empty_add = gtk::Button::with_label("Add Account…");
         empty_add.add_css_class("suggested-action");
         empty_add.add_css_class("pill");
         empty_add.set_halign(gtk::Align::Center);
+        let what_syncs = gtk::Label::builder()
+            .label(
+                "What syncs\n\
+                 • Your Inbox and folders\n\
+                 • An offline cache, so you can read without a connection\n\
+                 • Passwords in your system keyring",
+            )
+            .wrap(true)
+            .xalign(0.0)
+            .build();
+        what_syncs.add_css_class("caption");
+        let shortcuts_link = gtk::Button::with_label("Keyboard shortcuts (F1)");
+        shortcuts_link.add_css_class("flat");
+        shortcuts_link.add_css_class("link");
+        shortcuts_link.set_action_name(Some("win.show-help-overlay"));
+        let docs_link =
+            gtk::LinkButton::with_label("Read the docs", "https://github.com/ibro-3/mailin#readme");
+        docs_link.add_css_class("flat");
+        let welcome_links = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        welcome_links.set_halign(gtk::Align::Center);
+        welcome_links.append(&shortcuts_link);
+        welcome_links.append(&docs_link);
+        let welcome_details = gtk::Box::new(gtk::Orientation::Vertical, 14);
+        welcome_details.set_halign(gtk::Align::Center);
+        welcome_details.append(&what_syncs);
+        welcome_details.append(&empty_add);
+        welcome_details.append(&welcome_links);
         let empty_page = adw::StatusPage::builder()
             .icon_name("mail-unread-symbolic")
             .title("Welcome to Mailin")
             .description("Add a mail account to read and send mail.")
-            .child(&empty_add)
+            .child(&welcome_details)
+            .build();
+
+        // First-account progress view. The stage label advances as the engine
+        // reports connection and sync progress; "Skip and open mail" always
+        // dismisses it (C1).
+        let progress_label = gtk::Label::new(Some("Connecting to IMAP…"));
+        progress_label.add_css_class("dim-label");
+        let progress_spinner = gtk::Spinner::new();
+        progress_spinner.set_spinning(true);
+        progress_spinner.set_size_request(48, 48);
+        let progress_skip = gtk::Button::with_label("Skip and open mail");
+        progress_skip.add_css_class("flat");
+        progress_skip.add_css_class("link");
+        let progress_details = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        progress_details.set_halign(gtk::Align::Center);
+        progress_details.append(&progress_spinner);
+        progress_details.append(&progress_label);
+        progress_details.append(&progress_skip);
+        let progress_page = adw::StatusPage::builder()
+            .title("Setting up your account")
+            .description("This usually takes a few seconds.")
+            .child(&progress_details)
             .build();
 
         let stack = gtk::Stack::new();
         stack.set_vexpand(true);
         stack.add_named(&empty_page, Some("empty"));
+        stack.add_named(&progress_page, Some("progress"));
         stack.add_named(&split, Some("mail"));
         stack.set_visible_child_name("empty");
 
@@ -915,7 +1028,6 @@ impl MainWindow {
         toolbar.set_content(Some(&toast));
         window.set_content(Some(&toolbar));
 
-        let html_mode = app.config.borrow().ui.html_enabled;
         let this = Rc::new(Self {
             app,
             selection: RefCell::new(Selection::default()),
@@ -928,9 +1040,14 @@ impl MainWindow {
             window_id: Cell::new(NEXT_WINDOW_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)),
             html_view: RefCell::new(None),
             find_target_view: Rc::new(RefCell::new(None)),
-            html_mode: Cell::new(html_mode),
+            html_modes: RefCell::new(std::collections::HashMap::new()),
+            first_run: Cell::new(false),
+            onboarding_stage: Cell::new(0),
+            empty_state: Cell::new(EmptyState::Normal),
+            reset_scroll: Cell::new(true),
             remote_allowed: Cell::new(None),
             pending_attachment: Rc::new(RefCell::new(Vec::new())),
+            attachment_dir: Rc::new(RefCell::new(None)),
             folders_generation: Cell::new(0),
             folders_inflight: Cell::new(false),
             folders_pending: Cell::new(false),
@@ -956,6 +1073,8 @@ impl MainWindow {
                 account_menu_button,
                 compose_button,
                 empty_add,
+                progress_label,
+                progress_skip,
                 folder_list,
                 folder_stack,
                 list_title,
@@ -972,7 +1091,9 @@ impl MainWindow {
                 bulk_move,
                 bulk_clear,
                 message_list,
+                message_scroller,
                 message_empty,
+                message_empty_action,
                 list_stack,
                 load_more,
                 search,
@@ -989,6 +1110,7 @@ impl MainWindow {
                 remote_panel,
                 remote_once,
                 remote_trust,
+                remote_manage,
                 remote_dismiss,
                 reader_attachments,
                 reader_find_revealer,
@@ -1009,6 +1131,7 @@ impl MainWindow {
                 back_button,
                 list_pane,
                 split,
+                paned,
             },
         });
 
@@ -1030,16 +1153,138 @@ impl MainWindow {
         self.widgets.window.present();
     }
 
+    /// The reader's HTML/plain choice for one message (E4).
+    fn html_mode_for(&self, message_id: MessageId) -> bool {
+        self.html_modes
+            .borrow()
+            .get(&message_id)
+            .copied()
+            .unwrap_or_else(|| self.app.config.borrow().ui.html_enabled)
+    }
+
+    /// Show the first-account onboarding progress view (C1).
+    fn begin_first_run(&self) {
+        if self.first_run.get() {
+            return;
+        }
+        self.first_run.set(true);
+        self.onboarding_stage.set(0);
+        self.widgets.progress_label.set_label("Connecting to IMAP…");
+        self.widgets.stack.set_visible_child_name("progress");
+        // An account with no mail, or a server that never reports progress,
+        // must not trap the user behind onboarding.
+        glib::timeout_add_local_once(Duration::from_secs(20), || {
+            if let Some(window) = live_window()
+                && window.first_run.get()
+            {
+                window.finish_first_run();
+            }
+        });
+    }
+
+    /// Advance the onboarding stage, but never backwards.
+    fn advance_first_run(&self, stage: u8, label: &'static str) {
+        if !self.first_run.get() || stage <= self.onboarding_stage.get() {
+            return;
+        }
+        self.onboarding_stage.set(stage);
+        self.widgets.progress_label.set_label(label);
+    }
+
+    /// Leave onboarding and reveal the mail window.
+    fn finish_first_run(&self) {
+        if !self.first_run.get() {
+            return;
+        }
+        self.first_run.set(false);
+        self.widgets.stack.set_visible_child_name("mail");
+    }
+
+    /// Set the message list's empty-state copy and contextual action (C2).
+    fn set_message_empty_state(&self, state: EmptyState, detail: Option<&str>) {
+        let (title, description, action) = match state {
+            EmptyState::Normal => ("No messages", "This folder is empty.", Some("Sync now")),
+            EmptyState::Preparing => (
+                "Preparing your mailbox…",
+                "Folders appear after the first synchronization.",
+                Some("Sync now"),
+            ),
+            EmptyState::NoResults => (
+                "No results",
+                detail.unwrap_or("Try a different search term."),
+                Some("Clear search"),
+            ),
+            EmptyState::Offline => (
+                "You're offline",
+                "Reconnect and sync to see your messages.",
+                Some("Retry"),
+            ),
+            EmptyState::Error => (
+                "Couldn't load messages",
+                detail.unwrap_or("Something went wrong while loading this folder."),
+                Some("Retry"),
+            ),
+        };
+        self.widgets.message_empty.set_title(title);
+        self.widgets
+            .message_empty
+            .set_description(Some(description));
+        if let Some(label) = action {
+            self.widgets.message_empty_action.set_label(label);
+            self.widgets.message_empty_action.set_visible(true);
+        } else {
+            self.widgets.message_empty_action.set_visible(false);
+        }
+        self.empty_state.set(state);
+    }
+
+    /// Persist the in-memory preferences. UI state (last folder, window
+    /// geometry) is kept in the same config file so it survives restarts.
+    fn save_config(&self) {
+        let config = self.app.config.borrow();
+        match mailin_core::Paths::discover().and_then(|paths| config.save(&paths)) {
+            Ok(()) => {}
+            Err(error) => tracing::warn!("could not save preferences: {error}"),
+        }
+    }
+
     /// Wire signals and the event pump. The handlers hold an `Rc<Self>`, which
     /// keeps the window alive for the (single, process length) window
     /// lifetime; the event pump stops as soon as the window is closed.
     fn connect(this: &Rc<Self>) {
         this.widgets.window.connect_close_request({
             let closed = Rc::clone(&this.closed);
+            let this = Rc::clone(this);
             move |_| {
                 closed.set(true);
+                // Persist window geometry and the list/reader split (C5).
+                {
+                    let mut config = this.app.config.borrow_mut();
+                    config.ui.window_width = this.widgets.window.width();
+                    config.ui.window_height = this.widgets.window.height();
+                    config.ui.paned_position = this.widgets.paned.position();
+                }
+                this.save_config();
                 glib::Propagation::Proceed
             }
+        });
+
+        // Empty-state action: Clear search or Retry, depending on the state.
+        this.widgets.message_empty_action.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| match this.empty_state.get() {
+                EmptyState::NoResults => this.clear_search(),
+                EmptyState::Normal
+                | EmptyState::Preparing
+                | EmptyState::Offline
+                | EmptyState::Error => this.sync_now(),
+            }
+        });
+
+        // Dismiss the first-run progress view at any time.
+        this.widgets.progress_skip.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| this.finish_first_run()
         });
 
         // Shortcuts window (F1 / Ctrl+?)
@@ -1339,16 +1584,16 @@ impl MainWindow {
                     return;
                 }
                 let index = dropdown.selected();
-                if index == 0 {
+                let show_unified = this.unified_inbox_visible();
+                if show_unified && index == 0 {
                     // "All Accounts" selected - enter unified inbox mode
                     this.enter_unified_inbox();
                 } else {
-                    // Regular account selected (index - 1 because of "All Accounts" at index 0)
-                    let account = this
-                        .accounts
-                        .borrow()
-                        .get((index - 1) as usize)
-                        .map(|account| account.id);
+                    // With the unified entry present, accounts start at 1.
+                    let account_index = index
+                        .checked_sub(u32::from(show_unified))
+                        .unwrap_or(u32::MAX) as usize;
+                    let account = this.accounts.borrow().get(account_index).map(|a| a.id);
                     if let Some(account) = account {
                         this.select_account(account);
                     }
@@ -1520,11 +1765,18 @@ impl MainWindow {
                 if this.programmatic.get() {
                     return;
                 }
-                this.html_mode.set(button.is_active());
                 if let Some(message_id) = this.selection.borrow().message {
+                    this.html_modes
+                        .borrow_mut()
+                        .insert(message_id, button.is_active());
                     this.render_body(message_id);
                 }
             }
+        });
+
+        this.widgets.remote_manage.connect_clicked({
+            let this = Rc::clone(this);
+            move |_| Self::edit_account(&this)
         });
 
         this.widgets.remote_once.connect_clicked({
@@ -2098,8 +2350,20 @@ impl MainWindow {
         );
     }
 
+    /// Whether the "All Accounts (Unified Inbox)" entry is shown. With a
+    /// single account it would be a redundant mode, so it is hidden (C7).
+    fn unified_inbox_visible(&self) -> bool {
+        self.accounts.borrow().len() >= 2
+    }
+
+    /// Dropdown index of an account, accounting for the optional unified entry.
+    fn account_dropdown_index(&self, account_index: usize) -> u32 {
+        (account_index + usize::from(self.unified_inbox_visible())) as u32
+    }
+
     /// Fill the account dropdown from a freshly loaded account list.
     fn apply_accounts(&self, accounts: Vec<mailin_core::Account>) {
+        let had_accounts = !self.accounts.borrow().is_empty();
         let current = self.selection.borrow().account;
         let keep = current.filter(|id| accounts.iter().any(|account| account.id == *id));
 
@@ -2108,19 +2372,21 @@ impl MainWindow {
             .iter()
             .map(|account| format!("{} <{}>", account.display_name, account.email))
             .collect();
-        // Add "All Accounts" option for unified inbox at the top
-        names.insert(0, "All Accounts (Unified Inbox)".to_string());
+        // Add "All Accounts" only when there is more than one account: with
+        // a single account the unified inbox is a redundant mode (C7).
+        let show_unified = accounts.len() >= 2;
+        if show_unified {
+            names.insert(0, "All Accounts (Unified Inbox)".to_string());
+        }
         let model = gtk::StringList::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
         self.widgets.account_dropdown.set_model(Some(&model));
         if let Some(index) =
             keep.and_then(|id| accounts.iter().position(|account| account.id == id))
         {
-            // +1 because we inserted "All Accounts" at index 0
             self.widgets
                 .account_dropdown
-                .set_selected((index + 1) as u32);
+                .set_selected((index + usize::from(show_unified)) as u32);
         } else if accounts.is_empty() {
-            // No accounts, select "All Accounts" (which will show empty)
             self.widgets.account_dropdown.set_selected(0);
         }
         self.programmatic.set(false);
@@ -2155,6 +2421,11 @@ impl MainWindow {
         }
 
         self.widgets.stack.set_visible_child_name("mail");
+        // The moment the first account appears, show the onboarding progress
+        // view instead of dropping the user straight into an empty mailbox (C1).
+        if !had_accounts {
+            self.begin_first_run();
+        }
         match keep {
             Some(_) => {
                 self.update_subtitle();
@@ -2180,13 +2451,16 @@ impl MainWindow {
         {
             let mut selection = self.selection.borrow_mut();
             if selection.account != Some(id) {
-                selection.folder = None;
+                // Restore where the user left off in this account (C4). A
+                // stale id falls back to Inbox in `resolve_folder_index`.
+                selection.folder = self.app.config.borrow().ui.last_folders.get(&id).copied();
                 selection.message = None;
                 selection.search = false;
                 selection.query.clear();
             }
             selection.account = Some(id);
             selection.unified_inbox = false;
+            self.reset_scroll.set(true);
             if selection.limit == 0 {
                 selection.limit = self.page_size();
             }
@@ -2200,7 +2474,7 @@ impl MainWindow {
         {
             self.widgets
                 .account_dropdown
-                .set_selected((index + 1) as u32); // +1 for "All Accounts"
+                .set_selected(self.account_dropdown_index(index));
         }
         self.programmatic.set(false);
         self.update_subtitle();
@@ -2217,12 +2491,15 @@ impl MainWindow {
             selection.query.clear();
             selection.unified_inbox = true;
             selection.account = None;
+            self.reset_scroll.set(true);
             if selection.limit == 0 {
                 selection.limit = self.page_size();
             }
         }
         self.programmatic.set(true);
-        self.widgets.account_dropdown.set_selected(0); // "All Accounts"
+        if self.unified_inbox_visible() {
+            self.widgets.account_dropdown.set_selected(0); // "All Accounts"
+        }
         self.programmatic.set(false);
         self.update_subtitle();
         self.refresh_folders();
@@ -2240,6 +2517,37 @@ impl MainWindow {
                 simple.set_enabled(enabled);
             }
         }
+    }
+
+    /// Disable bulk/header actions that cannot apply to the current folder
+    /// (e.g. Archive while already in Archive or Trash) — E2.
+    fn update_context_actions(&self) {
+        let (current_role, in_outbox) = {
+            let selection = self.selection.borrow();
+            let role = selection.folder.and_then(|id| {
+                self.folders
+                    .borrow()
+                    .iter()
+                    .find(|folder| folder.id == id)
+                    .map(|folder| folder.role)
+            });
+            (role, selection.show_outbox)
+        };
+        let in_archive = current_role == Some(FolderRole::Archive);
+        let in_junk = current_role == Some(FolderRole::Junk);
+        let in_trash = current_role == Some(FolderRole::Trash);
+
+        let set = |name: &str, enabled: bool| {
+            if let Some(action) = self.widgets.window.lookup_action(name)
+                && let Ok(simple) = action.downcast::<gio::SimpleAction>()
+            {
+                simple.set_enabled(enabled);
+            }
+        };
+        set("archive", !in_outbox && !in_archive && !in_trash);
+        set("junk", !in_outbox && !in_junk && !in_trash);
+        set("delete", !in_outbox && !in_trash);
+        set("empty-trash", in_trash);
     }
 
     fn update_subtitle(&self) {
@@ -2372,26 +2680,33 @@ impl MainWindow {
                 };
                 match mailin.list_folders(&account_id) {
                     Ok(mut folders) => {
-                        // Add the virtual Outbox folder at the end. It is
-                        // always shown so the user can inspect it even when
-                        // it is empty.
+                        // Add the virtual Outbox after the role folders but
+                        // before user-created folders (C6). It is always shown
+                        // so the user can inspect it even when it is empty.
                         let outbox_len = mailin.outbox_len().unwrap_or(0);
-                        folders.push(Folder {
-                            id: FolderId::OUTBOX, // UI virtual: Outbox
-                            account_id,
-                            name: "Outbox".to_owned(),
-                            delimiter: "/".to_owned(),
-                            role: FolderRole::Other,
-                            uid_validity: None,
-                            uid_next: None,
-                            highest_modseq: None,
-                            last_synced_at: None,
-                            subscribed: true,
-                            message_count: outbox_len,
-                            // Queued mail is not "unread"; the badge renders
-                            // message_count instead.
-                            unread_count: 0,
-                        });
+                        let outbox_index = folders
+                            .iter()
+                            .position(|folder| folder.role == FolderRole::Other)
+                            .unwrap_or(folders.len());
+                        folders.insert(
+                            outbox_index,
+                            Folder {
+                                id: FolderId::OUTBOX, // UI virtual: Outbox
+                                account_id,
+                                name: "Outbox".to_owned(),
+                                delimiter: "/".to_owned(),
+                                role: FolderRole::Other,
+                                uid_validity: None,
+                                uid_next: None,
+                                highest_modseq: None,
+                                last_synced_at: None,
+                                subscribed: true,
+                                message_count: outbox_len,
+                                // Queued mail is not "unread"; the badge renders
+                                // message_count instead.
+                                unread_count: 0,
+                            },
+                        );
                         FolderFetch::Folders(folders)
                     }
                     Err(error) => FolderFetch::Failed(error.to_string()),
@@ -2489,6 +2804,11 @@ impl MainWindow {
 
         match index {
             Some(index) => {
+                // Folders have arrived: the slow part is over, so advance
+                // onboarding to the header-fetch stage (C1).
+                if has_real_folder {
+                    self.advance_first_run(2, "Fetching headers…");
+                }
                 let folder = self.folders.borrow()[index].clone();
                 if self.selection.borrow().folder != Some(folder.id) {
                     let _ = self.select_folder(&folder);
@@ -2500,12 +2820,7 @@ impl MainWindow {
                 // Inbox as soon as it arrives.
                 self.widgets.list_title.set_text("Preparing your mailbox…");
                 self.clear_messages();
-                self.widgets
-                    .message_empty
-                    .set_title("Preparing your mailbox…");
-                self.widgets
-                    .message_empty
-                    .set_description(Some("Folders appear after the first synchronization."));
+                self.set_message_empty_state(EmptyState::Preparing, None);
             }
         }
     }
@@ -2535,6 +2850,18 @@ impl MainWindow {
             selection.query.clear();
             selection.show_outbox = is_outbox;
             selection.limit = self.page_size();
+        }
+        self.reset_scroll.set(true);
+        // Remember the folder for this account (C4) so returning users land
+        // where they left off, even across restarts.
+        if let Some(account_id) = self.selection.borrow().account {
+            self.app
+                .config
+                .borrow_mut()
+                .ui
+                .last_folders
+                .insert(account_id, folder.id);
+            self.save_config();
         }
         // The message menu shows the outbox actions only in the outbox view.
         self.rebuild_message_menu();
@@ -2576,6 +2903,7 @@ impl MainWindow {
                 );
             }
         }
+        self.update_context_actions();
         Ok(())
     }
 
@@ -2591,8 +2919,6 @@ impl MainWindow {
     /// from it: the reader (HTML preference) and the message list (density,
     /// page size).
     fn apply_config(&self) {
-        let html_enabled = self.app.config.borrow().ui.html_enabled;
-        self.html_mode.set(html_enabled);
         self.refresh_messages();
         let message_id = self.selection.borrow().message;
         if let Some(message_id) = message_id {
@@ -2844,7 +3170,10 @@ impl MainWindow {
             self.widgets
                 .message_empty
                 .set_description(Some("Queued mail will appear here."));
+            self.widgets.message_empty_action.set_visible(false);
+            self.empty_state.set(EmptyState::Normal);
         }
+        self.finish_first_run();
         self.widgets
             .list_stack
             .set_visible_child_name(if empty { "empty" } else { "list" });
@@ -2859,6 +3188,23 @@ impl MainWindow {
         self.update_bulk_bar();
     }
 
+    /// Pick the most relevant empty state for the current selection using the
+    /// last known sync status (C2).
+    fn empty_state_for_selection(&self) -> EmptyState {
+        let selection = self.selection.borrow();
+        if selection.show_outbox {
+            return EmptyState::Normal;
+        }
+        match selection
+            .account
+            .and_then(|id| self.sync_status.borrow().get(&id).copied())
+        {
+            Some(SyncStatus::Offline) => EmptyState::Offline,
+            Some(SyncStatus::Error) => EmptyState::Error,
+            _ => EmptyState::Normal,
+        }
+    }
+
     fn show_messages(&self, messages: Vec<MessageHeader>, title: String, more: bool) {
         let selected = self.selection.borrow().message;
         // Keep the whole selection alive across refreshes so a background
@@ -2866,6 +3212,11 @@ impl MainWindow {
         let previous = self.selected_message_ids();
         let now = format::now_unix();
         let empty = messages.is_empty();
+        let scroll = if self.reset_scroll.take() {
+            0.0
+        } else {
+            self.widgets.message_scroller.vadjustment().value()
+        };
 
         self.programmatic.set(true);
         clear_list(&self.widgets.message_list);
@@ -2904,21 +3255,22 @@ impl MainWindow {
             }
         }
         self.programmatic.set(false);
+        let scroller = self.widgets.message_scroller.clone();
+        glib::idle_add_local_once(move || scroller.vadjustment().set_value(scroll));
 
         *self.messages.borrow_mut() = messages;
         self.widgets.list_title.set_text(&title);
-        let searching = self.selection.borrow().search;
-        if empty && searching {
-            self.widgets.message_empty.set_title("No results");
-            self.widgets
-                .message_empty
-                .set_description(Some("Try a different search term."));
-        } else if empty {
-            self.widgets.message_empty.set_title("No messages");
-            self.widgets.message_empty.set_description(Some(
-                "This folder is empty, or has not been synchronized yet.",
-            ));
+        if empty {
+            let state = if self.selection.borrow().search {
+                EmptyState::NoResults
+            } else {
+                self.empty_state_for_selection()
+            };
+            self.set_message_empty_state(state, None);
         }
+        // Headers have been fetched (even if the result was empty), so the
+        // first-run progress view has served its purpose.
+        self.finish_first_run();
         self.widgets
             .list_stack
             .set_visible_child_name(if empty { "empty" } else { "list" });
@@ -2932,6 +3284,11 @@ impl MainWindow {
         let previous = self.selected_message_ids();
         let now = format::now_unix();
         let empty = flat_messages.is_empty();
+        let scroll = if self.reset_scroll.take() {
+            0.0
+        } else {
+            self.widgets.message_scroller.vadjustment().value()
+        };
 
         self.programmatic.set(true);
         clear_list(&self.widgets.message_list);
@@ -2971,15 +3328,20 @@ impl MainWindow {
             }
         }
         self.programmatic.set(false);
+        let scroller = self.widgets.message_scroller.clone();
+        glib::idle_add_local_once(move || scroller.vadjustment().set_value(scroll));
 
         *self.messages.borrow_mut() = flat_messages;
         self.widgets.list_title.set_text(&title);
         if empty {
-            self.widgets.message_empty.set_title("No messages");
-            self.widgets.message_empty.set_description(Some(
-                "This folder is empty, or has not been synchronized yet.",
-            ));
+            let state = if self.selection.borrow().search {
+                EmptyState::NoResults
+            } else {
+                self.empty_state_for_selection()
+            };
+            self.set_message_empty_state(state, None);
         }
+        self.finish_first_run();
         self.widgets
             .list_stack
             .set_visible_child_name(if empty { "empty" } else { "list" });
@@ -2997,10 +3359,7 @@ impl MainWindow {
         self.widgets.list_stack.set_visible_child_name("empty");
         self.widgets.load_more.set_visible(false);
         // Reset the shared empty page text in case the outbox reused it.
-        self.widgets.message_empty.set_title("No messages");
-        self.widgets.message_empty.set_description(Some(
-            "This folder is empty, or has not been synchronized yet.",
-        ));
+        self.set_message_empty_state(EmptyState::Normal, None);
         self.show_reader_empty();
         self.update_bulk_bar();
     }
@@ -3104,6 +3463,7 @@ impl MainWindow {
             was_searching
         };
         if was_searching {
+            self.reset_scroll.set(true);
             self.refresh_messages();
         }
     }
@@ -3370,7 +3730,7 @@ impl MainWindow {
         let sender_domain = self
             .header_from_list(message_id)
             .and_then(|header| header.from_domain().map(str::to_owned));
-        let html_enabled = self.html_mode.get();
+        let html_enabled = self.html_mode_for(message_id);
         let remote_content_enabled = self.app.config.borrow().ui.remote_content_enabled;
         let remote_allowed = self.remote_allowed.get() == Some(message_id);
         let mailin = std::sync::Arc::clone(&self.app.mailin);
@@ -3463,8 +3823,19 @@ impl MainWindow {
             ReaderContent::HtmlOnly => {
                 self.set_html_button(true, false);
                 self.reset_find();
-                self.widgets.reader_body.append(&notice_body(
-                    "This message only provides an HTML body. Use the HTML button to show it.",
+                self.widgets.reader_body.append(&notice_with_action_body(
+                    "This message has no text body.",
+                    "Show HTML",
+                    {
+                        move || {
+                            // Handled through the live window to avoid holding
+                            // an `Rc` cycle in the widget tree.
+                            if let Some(window) = live_window() {
+                                window.html_modes.borrow_mut().insert(message_id, true);
+                                window.render_body(message_id);
+                            }
+                        }
+                    },
                 ));
             }
             ReaderContent::Empty => {
@@ -3472,18 +3843,16 @@ impl MainWindow {
                 self.reset_find();
                 self.widgets
                     .reader_body
-                    .append(&notice_body("This message has no readable body."));
+                    .append(&notice_body("This message has no text body."));
             }
             ReaderContent::NotFetched => {
-                self.widgets
-                    .reader_body
-                    .append(&loading_body("Loading message…"));
+                self.widgets.reader_body.append(&skeleton_body());
                 self.app.engine.fetch_body(message_id);
             }
-            ReaderContent::Failed => {
+            ReaderContent::Failed(details) => {
                 self.widgets
                     .reader_body
-                    .append(&notice_body("Could not read this message."));
+                    .append(&failure_body(&details, message_id));
             }
         }
     }
@@ -3525,8 +3894,9 @@ impl MainWindow {
         if let Ok(Some(pgp)) = mailin.pgp_mime(message_id) {
             return ReaderContent::Pgp(pgp);
         }
-        let Ok(body) = mailin.message_body(message_id) else {
-            return ReaderContent::Failed;
+        let body = match mailin.message_body(message_id) {
+            Ok(body) => body,
+            Err(error) => return ReaderContent::Failed(error.to_string()),
         };
         let Some((text, html)) = body else {
             let fetched = mailin
@@ -3862,31 +4232,56 @@ impl MainWindow {
             .mailin
             .list_attachments(message_id)
             .unwrap_or_default();
+        let inline_count = attachments
+            .iter()
+            .filter(|attachment| attachment.is_inline)
+            .count();
         let visible: Vec<_> = attachments
             .into_iter()
             .filter(|attachment| !attachment.is_inline)
             .collect();
-        if visible.is_empty() {
+        if visible.is_empty() && inline_count == 0 {
             self.widgets.reader_attachments.set_visible(false);
             return;
         }
+        if inline_count > 0 {
+            let label = gtk::Label::new(Some(mailin_core::plural_noun(
+                inline_count as u32,
+                "inline image",
+                "inline images",
+            )));
+            label.set_xalign(0.0);
+            label.add_css_class("dim-label");
+            label.add_css_class("caption");
+            self.widgets.reader_attachments.append(&label);
+        }
+        if visible.is_empty() {
+            self.widgets.reader_attachments.set_visible(true);
+            return;
+        }
 
-        // "Download all" button when multiple attachments
+        // "Save all" button when multiple attachments
         if visible.len() > 1 {
             let download_all_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
             download_all_row.add_css_class("card");
             download_all_row.set_margin_top(2);
             download_all_row.set_margin_bottom(2);
-            let download_all = gtk::Button::with_label("Download all");
+            let download_all = gtk::Button::with_label("Save all");
             download_all.add_css_class("flat");
             download_all.set_margin_start(10);
             let app = Rc::clone(&self.app);
             let window = self.widgets.window.clone().upcast::<gtk::Window>();
             let toast = self.widgets.toast.clone();
             let pending = Rc::clone(&self.pending_attachment);
+            let attachment_dir = Rc::clone(&self.attachment_dir);
             let visible_clone = visible.clone();
             download_all.connect_clicked(move |_| {
-                let dialog = gtk::FileDialog::builder().title("Save attachments").build();
+                let mut builder = gtk::FileDialog::builder().title("Save all attachments");
+                if let Some(dir) = attachment_dir.borrow().as_ref() {
+                    builder = builder.initial_folder(&gio::File::for_path(dir));
+                }
+                let dialog = builder.build();
+                let attachment_dir = Rc::clone(&attachment_dir);
                 let app = Rc::clone(&app);
                 let window = window.clone();
                 let toast = toast.clone();
@@ -3901,6 +4296,7 @@ impl MainWindow {
                         toast.add_toast(adw::Toast::new("Couldn't access the selected folder."));
                         return;
                     };
+                    *attachment_dir.borrow_mut() = Some(dir.clone());
                     let total = visible_clone.len();
                     let mailin = std::sync::Arc::clone(&app.mailin);
                     // Writing the files happens on a background thread: the
@@ -4626,6 +5022,27 @@ impl MainWindow {
     ) {
         use mailin_core::config::QuickAction;
 
+        // Respect per-action enablement: an action that cannot apply to the
+        // source folder gives feedback instead of silently doing nothing (E3).
+        let source_role = self
+            .app
+            .mailin
+            .folder(source_folder)
+            .ok()
+            .flatten()
+            .map(|folder| folder.role);
+        match (action, source_role) {
+            (QuickAction::Archive, Some(FolderRole::Archive | FolderRole::Trash)) => {
+                self.toast("This message is already archived");
+                return;
+            }
+            (QuickAction::Junk, Some(FolderRole::Junk)) => {
+                self.toast("This message is already in Junk");
+                return;
+            }
+            _ => {}
+        }
+
         let ids = vec![message_id];
         match action {
             QuickAction::Archive => {
@@ -5246,6 +5663,10 @@ impl MainWindow {
                     let mut map = self.sync_status.borrow_mut();
                     map.insert(account_id, status);
                     sync_status_changed = true;
+                    drop(map);
+                    if matches!(status, SyncStatus::Syncing | SyncStatus::Connected) {
+                        self.advance_first_run(1, "Discovering folders…");
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(_)) => {
@@ -5286,6 +5707,13 @@ impl MainWindow {
         }
         if sync_status_changed {
             self.update_sync_status_chip();
+            // Keep the empty page honest when the connection drops (C2).
+            if self.widgets.list_stack.visible_child_name().as_deref() == Some("empty") {
+                let state = self.empty_state_for_selection();
+                if matches!(state, EmptyState::Offline | EmptyState::Error) {
+                    self.set_message_empty_state(state, None);
+                }
+            }
         }
         if outbox_changed {
             // If we're viewing the outbox, refresh it. Otherwise refresh folders
@@ -6788,7 +7216,7 @@ fn attach_quick_actions(
     // Swipe gesture: horizontal velocity above a threshold reveals actions.
     let swipe = gtk::GestureSwipe::new();
     let actions_bar_weak = actions_bar.downgrade();
-    let revealed = std::cell::Cell::new(false);
+    let revealed = std::rc::Rc::new(std::cell::Cell::new(false));
     swipe.connect_swipe({
         let actions_bar_weak = actions_bar_weak.clone();
         let revealed = revealed.clone();
@@ -6818,16 +7246,57 @@ fn attach_quick_actions(
     // A click anywhere on the row hides the overlay again.
     let click = gtk::GestureClick::new();
     let actions_bar_weak = actions_bar.downgrade();
-    let revealed = revealed.clone();
-    click.connect_pressed(move |_, _, _, _| {
-        if let Some(bar) = actions_bar_weak.upgrade() {
-            if revealed.get() {
+    click.connect_pressed({
+        let revealed = std::rc::Rc::clone(&revealed);
+        move |_, _, _, _| {
+            if let Some(bar) = actions_bar_weak.upgrade() {
+                if revealed.get() {
+                    bar.set_visible(false);
+                    revealed.set(false);
+                }
+            }
+        }
+    });
+    row.add_controller(click);
+
+    // Hover reveal with a short delay so a pointer merely crossing the row
+    // never exposes a destructive button under the cursor (E3).
+    let hover_timer = std::rc::Rc::new(std::cell::RefCell::new(None::<glib::SourceId>));
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter({
+        let hover_timer = std::rc::Rc::clone(&hover_timer);
+        let bar_weak = actions_bar.downgrade();
+        let revealed = std::rc::Rc::clone(&revealed);
+        move |_, _, _| {
+            if let Some(id) = hover_timer.borrow_mut().take() {
+                id.remove();
+            }
+            let bar_weak = bar_weak.clone();
+            let revealed = revealed.clone();
+            let id = glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                if let Some(bar) = bar_weak.upgrade() {
+                    bar.set_visible(true);
+                    revealed.set(true);
+                }
+            });
+            *hover_timer.borrow_mut() = Some(id);
+        }
+    });
+    motion.connect_leave({
+        let hover_timer = std::rc::Rc::clone(&hover_timer);
+        let bar_weak = actions_bar.downgrade();
+        let revealed = std::rc::Rc::clone(&revealed);
+        move |_| {
+            if let Some(id) = hover_timer.borrow_mut().take() {
+                id.remove();
+            }
+            if let Some(bar) = bar_weak.upgrade() {
                 bar.set_visible(false);
                 revealed.set(false);
             }
         }
     });
-    row.add_controller(click);
+    row.add_controller(motion);
 }
 
 fn outbox_entry_row(entry: &OutboxEntry, _now: i64) -> gtk::ListBoxRow {
@@ -6996,6 +7465,59 @@ fn notice_body(text: &str) -> gtk::Widget {
     label.set_xalign(0.0);
     label.add_css_class("dim-label");
     label.upcast()
+}
+
+/// A notice with one inline action (E6: "Show HTML" for text-less mail).
+fn notice_with_action_body(
+    text: &str,
+    action_label: &str,
+    on_action: impl Fn() + 'static,
+) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    row.set_margin_top(18);
+    row.append(&notice_body(text));
+    let button = gtk::Button::with_label(action_label);
+    button.set_halign(gtk::Align::Start);
+    button.add_css_class("flat");
+    button.connect_clicked(move |_| on_action());
+    row.append(&button);
+    row.upcast()
+}
+
+/// Skeleton lines shown while a body is fetched (E6).
+fn skeleton_body() -> gtk::Widget {
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    box_.set_margin_top(18);
+    box_.set_margin_bottom(18);
+    for width in [540, 620, 470, 580, 320] {
+        // A determinate, textless progress bar renders as a soft filled line.
+        let bar = gtk::ProgressBar::new();
+        bar.set_fraction(1.0);
+        bar.set_halign(gtk::Align::Start);
+        bar.set_size_request(width, 10);
+        box_.append(&bar);
+    }
+    box_.upcast()
+}
+
+/// Failure state with Retry and the technical detail behind a disclosure (E6).
+fn failure_body(details: &str, message_id: MessageId) -> gtk::Widget {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    row.set_margin_top(18);
+    row.append(&notice_body("Could not read this message."));
+    let retry = gtk::Button::with_label("Retry");
+    retry.set_halign(gtk::Align::Start);
+    retry.add_css_class("flat");
+    retry.connect_clicked(move |_| {
+        if let Some(window) = live_window() {
+            window.render_body(message_id);
+        }
+    });
+    row.append(&retry);
+    let expander = gtk::Expander::new(Some("Technical details"));
+    expander.set_child(Some(&notice_body(details)));
+    row.append(&expander);
+    row.upcast()
 }
 
 fn loading_body(text: &str) -> gtk::Widget {

@@ -25,6 +25,10 @@ pub fn show_preferences(
 ) {
     let config = Rc::new(RefCell::new(app.config.borrow().clone()));
     let on_saved: Rc<dyn Fn()> = Rc::new(on_saved);
+    let parent_window = parent
+        .upcast_ref::<gtk::Widget>()
+        .downcast_ref::<gtk::Window>()
+        .cloned();
     let paths = match Paths::discover() {
         Ok(paths) => paths,
         Err(error) => {
@@ -537,6 +541,97 @@ pub fn show_preferences(
 
     plugins_page.add(&plugins_group);
     dialog.add(&plugins_page);
+
+    // Advanced page: diagnostics and a local-data backup (D4/D5).
+    let advanced_page = adw::PreferencesPage::new();
+    advanced_page.set_title("Advanced");
+    advanced_page.set_icon_name(Some("applications-system-symbolic"));
+    let support_group = adw::PreferencesGroup::builder()
+        .title("Support")
+        .description("Share diagnostics or keep a copy of your local mail cache.")
+        .build();
+
+    let diagnostics_row = adw::ActionRow::builder()
+        .title("Copy diagnostics")
+        .subtitle("Version, settings and the last 100 log lines — no passwords or message bodies.")
+        .activatable(true)
+        .build();
+    diagnostics_row.add_suffix(&gtk::Image::from_icon_name("edit-copy-symbolic"));
+    {
+        let app = Rc::clone(app);
+        let paths = paths.clone();
+        let row = diagnostics_row.clone();
+        diagnostics_row.connect_activated(move |_| {
+            let report =
+                mailin_core::support::build_diagnostics(&app.mailin, &app.config.borrow(), &paths);
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&report);
+            }
+            row.set_subtitle("Copied to clipboard");
+        });
+    }
+    support_group.add(&diagnostics_row);
+
+    let backup_row = adw::ActionRow::builder()
+        .title("Back up local data…")
+        .subtitle("Save a zip of the local mail cache and preferences (no passwords).")
+        .activatable(true)
+        .build();
+    backup_row.add_suffix(&gtk::Image::from_icon_name("document-save-symbolic"));
+    {
+        let paths = paths.clone();
+        let parent = parent_window;
+        backup_row.connect_activated(move |_| {
+            let file_dialog = gtk::FileDialog::builder()
+                .title("Back up local data")
+                .initial_name(
+                    mailin_core::support::backup_filename()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+                .build();
+            let paths = paths.clone();
+            let parent = parent.clone();
+            file_dialog.save(
+                parent.as_ref(),
+                None::<&gtk::gio::Cancellable>,
+                move |result| {
+                    let Ok(file) = result else {
+                        return;
+                    };
+                    let Some(destination) = file.path() else {
+                        return;
+                    };
+                    let paths = paths.clone();
+                    crate::background::spawn_result(
+                        move || {
+                            mailin_core::support::backup_local_data(&paths, &destination)
+                                .map_err(|error| error.to_string())
+                        },
+                        |result| {
+                            let message = match result {
+                                Ok(Ok(())) => "Backup saved.".to_owned(),
+                                Ok(Err(error)) => {
+                                    format!("Could not save the backup: {error}")
+                                }
+                                Err(failed) => {
+                                    format!("Could not save the backup: {}", failed.message)
+                                }
+                            };
+                            let alert = gtk::AlertDialog::builder().message(message).build();
+                            alert.set_buttons(&["OK"]);
+                            gtk::glib::spawn_future_local(async move {
+                                let _ = alert.choose_future(None::<&gtk::Window>).await;
+                            });
+                        },
+                    );
+                },
+            );
+        });
+    }
+    support_group.add(&backup_row);
+    advanced_page.add(&support_group);
+    dialog.add(&advanced_page);
 
     // Validate, persist and hand the new configuration back to the window.
     // Writing the configuration file touches the disk, so it happens on a

@@ -54,6 +54,12 @@ impl Paths {
         self.data_dir.join("mailin.db")
     }
 
+    /// Current rolling log file (D3). The previous generation is
+    /// `mailin.log.1`; both live in the data directory.
+    pub fn log_file(&self) -> PathBuf {
+        self.data_dir.join("mailin.log")
+    }
+
     /// Reconstruct Paths from the database file path.
     /// Assumes standard layout: data_dir/mailin.db, sibling config_dir/config.toml
     pub fn from_database_file(db_path: impl AsRef<Path>) -> Result<Self> {
@@ -138,6 +144,14 @@ pub struct UiPreferences {
     pub quick_actions: bool,
     /// Which actions are available in the quick-actions overlay.
     pub quick_action_items: Vec<QuickAction>,
+    /// Last selected folder per account, so returning users land where they
+    /// left off. Virtual folders are allowed (the user may have opened the
+    /// Outbox deliberately); a stale id falls back to Inbox.
+    pub last_folders: HashMap<AccountId, FolderId>,
+    /// Main window geometry and list/reader split position, persisted on close.
+    pub window_width: i32,
+    pub window_height: i32,
+    pub paned_position: i32,
 }
 
 impl Default for UiPreferences {
@@ -158,6 +172,10 @@ impl Default for UiPreferences {
                 QuickAction::Flag,
                 QuickAction::MarkRead,
             ],
+            last_folders: HashMap::new(),
+            window_width: 1180,
+            window_height: 760,
+            paned_position: 380,
         }
     }
 }
@@ -499,5 +517,46 @@ mod tests {
         let mut config = Config::default();
         config.sync.poll_interval_secs = 1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn ui_state_survives_a_config_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::with_root(dir.path());
+        paths.ensure().expect("ensure");
+        let mut config = Config::default();
+        config
+            .ui
+            .last_folders
+            .insert(AccountId::new(), FolderId(42));
+        config.ui.window_width = 1440;
+        config.ui.window_height = 900;
+        config.ui.paned_position = 520;
+        config.save(&paths).expect("save");
+
+        let loaded = Config::load(&paths).expect("load");
+        assert_eq!(loaded, config);
+        assert_eq!(loaded.ui.window_width, 1440);
+        assert_eq!(loaded.ui.paned_position, 520);
+        assert!(
+            loaded
+                .ui
+                .last_folders
+                .values()
+                .any(|id| *id == FolderId(42))
+        );
+    }
+
+    #[test]
+    fn configs_without_ui_state_still_load_with_defaults() {
+        // Older config.toml files predate the C4/C5 fields. The struct-level
+        // `#[serde(default)]` must fill them in rather than rejecting them.
+        let toml = "[ui]\npage_size = 50\n";
+        let config: Config = toml::from_str(toml).expect("parse");
+        assert_eq!(config.ui.page_size, 50);
+        assert!(config.ui.last_folders.is_empty());
+        assert_eq!(config.ui.window_width, 1180);
+        assert_eq!(config.ui.window_height, 760);
+        assert_eq!(config.ui.paned_position, 380);
     }
 }
