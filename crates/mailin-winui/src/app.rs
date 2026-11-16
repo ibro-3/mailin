@@ -55,7 +55,7 @@ impl AppState {
 }
 
 impl AppState {
-    fn open() -> Result<Self> {
+    pub(crate) fn open() -> Result<Self> {
         let paths = Paths::discover()?;
         paths.ensure()?;
         // A broken preferences file never blocks startup: defaults are
@@ -88,12 +88,36 @@ impl AppState {
 /// `IApplicationOverrides::OnLaunched` is dispatched back into this Rust type.
 #[implement(IApplicationOverrides)]
 struct MailinApplication {
-    state: Arc<AppState>,
+    /// `None` while startup data is unopenable; the recovery window fills it
+    /// in after a successful Retry or cache reset.
+    state: Arc<RwLock<Option<Arc<AppState>>>>,
+    /// Friendly startup error shown by the recovery window.
+    startup_error: Arc<Mutex<Option<String>>>,
 }
 
 impl IApplicationOverrides_Impl for MailinApplication_Impl {
     fn OnLaunched(&self, _args: Ref<LaunchActivatedEventArgs>) -> windows_core::Result<()> {
-        window::create(&self.state).map_err(to_windows_error)?;
+        let opened = self
+            .state
+            .read()
+            .map_err(|_| to_windows_error(anyhow!("the application state lock is poisoned")))?
+            .clone();
+        if let Some(state) = opened {
+            window::create(&state).map_err(to_windows_error)?;
+        } else {
+            let error = self
+                .startup_error
+                .lock()
+                .map_err(|_| to_windows_error(anyhow!("the startup error lock is poisoned")))?
+                .clone()
+                .unwrap_or_else(|| "Mailin could not open its local data.".to_owned());
+            crate::recovery::present(
+                &error,
+                Arc::clone(&self.state),
+                Arc::clone(&self.startup_error),
+            )
+            .map_err(to_windows_error)?;
+        }
         Ok(())
     }
 }
@@ -103,44 +127,72 @@ impl IApplicationOverrides_Impl for MailinApplication_Impl {
 /// object alive across the whole message loop.
 static APPLICATION: Mutex<Option<Application>> = Mutex::new(None);
 
+/// Notice left by a panic in the previous run, surfaced once in the main
+/// window. Set from `main` before the XAML loop starts (F1c).
+static STARTUP_NOTICE: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn set_startup_notice(text: String) {
+    if let Ok(mut slot) = STARTUP_NOTICE.lock() {
+        *slot = Some(text);
+    }
+}
+
+pub(crate) fn take_startup_notice() -> Option<String> {
+    STARTUP_NOTICE.lock().ok()?.take()
+}
+
 /// Open the core, bootstrap WinUI and run until the last window is closed.
 pub fn run() -> Result<()> {
     let _bootstrap = Bootstrap::initialize()?;
     let _apartment = Apartment::initialize()?;
 
-    let state = match AppState::open() {
-        Ok(state) => Arc::new(state),
+    // A failure to open local data is no longer fatal here: XAML still starts
+    // so the recovery window (Retry / Open data folder / Reset / Quit) can be
+    // shown, mirroring the GTK client's A6 flow.
+    let (initial_state, initial_error) = match AppState::open() {
+        Ok(state) => (Some(Arc::new(state)), None),
         Err(error) => {
             tracing::error!(%error, "Mailin could not open its local data");
-            eprintln!("Mailin could not open its local data: {error:#}");
-            eprintln!();
-            eprintln!("Your mail on the server is not affected.");
+            let message = format!("{error:#}\n\nYour mail on the server is not affected.");
             if let Ok(paths) = Paths::discover() {
-                eprintln!(
-                    "If the database file is damaged, move it (and its -wal/-shm sidecars) aside and restart Mailin:"
+                tracing::error!(
+                    path = %paths.database_file().display(),
+                    "move the database and its -wal/-shm sidecars aside, or use Reset local cache"
                 );
-                eprintln!("  {}", paths.database_file().display());
-                eprintln!("Mailin will create a fresh database and download your mail again.");
             }
-            return Err(error);
+            (None, Some(message))
         }
     };
-    let accounts = state
-        .mailin
-        .list_accounts()
-        .map(|accounts| accounts.len())
-        .unwrap_or_default();
-    tracing::info!(
-        accounts,
-        page_size = state.config().ui.page_size,
-        "starting the WinUI client"
-    );
+    let state = Arc::new(RwLock::new(initial_state));
+    let startup_error = Arc::new(Mutex::new(initial_error));
+
+    if let Some(current) = state
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+    {
+        let accounts = current
+            .mailin
+            .list_accounts()
+            .map(|accounts| accounts.len())
+            .unwrap_or_default();
+        tracing::info!(
+            accounts,
+            page_size = current.config().ui.page_size,
+            "starting the WinUI client"
+        );
+    }
 
     let callback = ApplicationInitializationCallback::new({
         let state = Arc::clone(&state);
+        let startup_error = Arc::clone(&startup_error);
         move |_| {
             let state = Arc::clone(&state);
-            match Application::compose(MailinApplication { state }) {
+            let startup_error = Arc::clone(&startup_error);
+            match Application::compose(MailinApplication {
+                state,
+                startup_error,
+            }) {
                 Ok(application) => {
                     if let Err(error) =
                         application.cast::<IApplication3>().and_then(|application| {

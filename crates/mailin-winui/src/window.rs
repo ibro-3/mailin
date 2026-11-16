@@ -722,10 +722,15 @@ impl MainWindow {
     }
 
     fn select_account(self: &Rc<Self>, id: AccountId) {
-        {
+        // C4: each account remembers its own last folder. A stale id is
+        // resolved by `refresh_folders` (it falls back to Inbox).
+        let last_folder = self.app.config().ui.last_folders.get(&id).copied();
+        let previous = {
             let mut state = self.state();
+            let previous = (state.selection.account != Some(id))
+                .then(|| (state.selection.account, state.selection.folder));
             if state.selection.account != Some(id) {
-                state.selection.folder = None;
+                state.selection.folder = last_folder;
                 state.selection.message = None;
                 state.selection.search = false;
                 state.selection.query.clear();
@@ -734,6 +739,12 @@ impl MainWindow {
             if state.selection.limit == 0 {
                 state.selection.limit = self.page_size();
             }
+            previous
+        };
+        if let Some((Some(account), Some(folder))) = previous {
+            self.persist_ui(|config| {
+                config.ui.last_folders.insert(account, folder);
+            });
         }
         self.programmatic.store(true, Ordering::Relaxed);
         // Look the index up in a scoped block: the guard must not be held
@@ -871,6 +882,14 @@ impl MainWindow {
             state.show_outbox = is_outbox;
             state.selection.limit = self.page_size();
         }
+        // C4: remember the folder for this account across restarts, outside
+        // the selection lock so config I/O never blocks UI state access.
+        if let Some(account) = self.state().selection.account {
+            let folder_id = folder.id;
+            self.persist_ui(|config| {
+                config.ui.last_folders.insert(account, folder_id);
+            });
+        }
         let _ = self.widgets.search.SetText("");
         let _ = self.widgets.list_title.SetText(&folder_title(&folder));
         self.show_reader_empty();
@@ -902,6 +921,26 @@ impl MainWindow {
 
     fn page_size(&self) -> u32 {
         self.app.config().ui.page_size.clamp(1, MAX_PAGE)
+    }
+
+    /// Write one UI-state change to the config file immediately (C4/C5).
+    /// Preferences are shared with the core, so workers observe the new values
+    /// on their next read too.
+    fn persist_ui(&self, edit: impl FnOnce(&mut mailin_core::Config)) {
+        let outcome = (|| -> anyhow::Result<()> {
+            let paths = mailin_core::Paths::discover()?;
+            let mut config = self
+                .app
+                .config
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            edit(&mut config);
+            config.save(&paths)?;
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            tracing::warn!(%error, "could not persist UI state");
+        }
     }
 
     fn refresh_messages(self: &Rc<Self>) {
@@ -2471,6 +2510,8 @@ impl MainWindow {
 
     fn toggle_seen(&self) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         if message.is_seen() {
@@ -2486,6 +2527,8 @@ impl MainWindow {
 
     fn toggle_flagged(&self) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         if message.is_flagged() {
@@ -2501,6 +2544,8 @@ impl MainWindow {
 
     fn archive_selected(&self) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         let ids = vec![message.id];
@@ -2511,6 +2556,8 @@ impl MainWindow {
 
     fn delete_selected(&self) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         let ids = vec![message.id];
@@ -2526,6 +2573,8 @@ impl MainWindow {
 
     fn mark_selected_junk(&self, junk: bool) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         let ids = vec![message.id];
@@ -3107,12 +3156,16 @@ impl MainWindow {
 
     fn compose_reply(self: &Rc<Self>, all: bool) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         let Some(account_id) = self.state().selection.account else {
+            self.show_banner("Select an account first.");
             return;
         };
         let Some(account) = self.app.mailin.account(&account_id).ok().flatten() else {
+            self.show_error("The selected account is no longer available.");
             return;
         };
         let body = self
@@ -3134,12 +3187,16 @@ impl MainWindow {
 
     fn compose_forward(self: &Rc<Self>) {
         let Some(message) = self.selected_message() else {
+            // A7: tell the user why nothing happened instead of a silent no-op.
+            self.show_banner("Select a message first.");
             return;
         };
         let Some(account_id) = self.state().selection.account else {
+            self.show_banner("Select an account first.");
             return;
         };
         let Some(account) = self.app.mailin.account(&account_id).ok().flatten() else {
+            self.show_error("The selected account is no longer available.");
             return;
         };
         let body = self
@@ -4296,6 +4353,21 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
 
     // ------------------------------------------------------------- window
     let window = Window::new().context("could not create the WinUI window")?;
+    {
+        // C5: restore the size saved on the previous close.
+        let saved = state.config();
+        if saved.ui.window_width >= 640
+            && saved.ui.window_height >= 480
+            && let Ok(app_window) = window
+                .cast::<mailin_winui_sys::IWindow2>()
+                .and_then(|window| window.AppWindow())
+        {
+            let _ = app_window.Resize(mailin_winui_sys::SizeInt32 {
+                width: saved.ui.window_width,
+                height: saved.ui.window_height,
+            });
+        }
+    }
     window.SetTitle("Mailin")?;
     window.SetContent(&root)?;
 
@@ -4844,6 +4916,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     if let Some(warning) = state.config_warning.clone() {
         this.show_error(&warning);
     }
+    // F1c: a panic in the previous run leaves a one-shot notice.
+    if let Some(notice) = crate::app::take_startup_notice() {
+        this.show_banner(&format!("Mailin recovered from a crash last run. {notice}"));
+    }
 
     // A mailto: draft captured at startup opens the composer once the main
     // window exists. (Protocol activation between launches is not wired yet:
@@ -4895,7 +4971,26 @@ fn add_accelerator(
 fn connect(this: &Rc<MainWindow>) -> Result<()> {
     let closed_revoker = this.widgets.window.Closed({
         let closed = Rc::clone(this);
-        move |_, _| closed.closed.store(true, Ordering::Relaxed)
+        move |_, _| {
+            closed.closed.store(true, Ordering::Relaxed);
+            // C5: save window geometry on close. The WinUI layout has no
+            // draggable split, so the paned position stays at its default.
+            if let Ok(app_window) = closed
+                .widgets
+                .window
+                .cast::<mailin_winui_sys::IWindow2>()
+                .and_then(|window| window.AppWindow())
+                && let Ok(size) = app_window.Size()
+                && size.width > 0
+                && size.height > 0
+            {
+                closed.persist_ui(|config| {
+                    config.ui.window_width = size.width;
+                    config.ui.window_height = size.height;
+                    config.ui.paned_position = 200;
+                });
+            }
+        }
     })?;
     this.events.keep(closed_revoker);
 

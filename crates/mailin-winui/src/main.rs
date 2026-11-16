@@ -27,6 +27,8 @@ mod platform;
 #[cfg(windows)]
 mod preferences;
 #[cfg(windows)]
+mod recovery;
+#[cfg(windows)]
 mod ui;
 #[cfg(windows)]
 mod window;
@@ -42,6 +44,9 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Mailin: could not initialize the log file: {error}");
             }
             mailin_core::logging::install_panic_hook(paths);
+            if let Some(notice) = mailin_core::logging::take_panic_notice(paths) {
+                app::set_startup_notice(notice);
+            }
         } else {
             tracing_subscriber::fmt()
                 .with_env_filter(

@@ -72,6 +72,8 @@ pub fn show_preferences(
     let encryption_panel = create_encryption_section(state, events)?;
     ui::append(&main_panel, &encryption_panel)?;
     let plugins_panel = create_plugins_section(state, events)?;
+    let support_panel = create_support_section(state, &paths, events)?;
+    ui::append(&main_panel, &support_panel)?;
     // Advanced section: restore every preference to its default (B2).
     let advanced_panel = ui::stack_md(mailin_winui_sys::Orientation::Vertical)?;
     ui::append(&advanced_panel, &ui::heading3("Advanced")?)?;
@@ -304,6 +306,13 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
     };
     let theme = ui::combo(&["System", "Light", "Dark"], theme_index, Some("Theme"))?;
     ui::append(&panel, &ui::field("Theme", &theme)?)?;
+    ui::append(
+        &panel,
+        &ui::body_text(
+            "Theme changes apply to new controls immediately; restart Mailin to \
+             theme the whole window. Windows high contrast always overrides the theme.",
+        )?,
+    )?;
 
     let density_index = match config.ui.message_list_density {
         MessageListDensity::Comfortable => 0,
@@ -613,4 +622,75 @@ fn create_plugins_section(state: &Arc<AppState>, events: &ui::Revokers) -> Resul
 
 fn is_on(switch: &ToggleSwitch) -> bool {
     switch.IsOn().unwrap_or_default()
+}
+
+/// D4/D5 support actions: a redacted diagnostics report and a consistent
+/// backup of the local data. Both are deliberately explicit button presses so
+/// sharing mail data never happens by accident.
+fn create_support_section(
+    state: &Arc<AppState>,
+    paths: &Paths,
+    events: &ui::Revokers,
+) -> Result<StackPanel> {
+    let panel = ui::stack_md(mailin_winui_sys::Orientation::Vertical)?;
+    ui::append(&panel, &ui::heading3("Support")?)?;
+    ui::append(
+        &panel,
+        &ui::body_text("Share diagnostics or keep a copy of your local mail cache.")?,
+    )?;
+
+    let status = ui::text("")?;
+    let _ = mailin_winui_sys::AutomationProperties::SetLiveSetting(
+        &status,
+        mailin_winui_sys::AutomationLiveSetting::Polite,
+    );
+    ui::append(&panel, &status)?;
+
+    let diagnostics = ui::button(
+        "Copy diagnostics",
+        Some("Copy diagnostics"),
+        Some("Copy version, settings and the last 100 log lines to the clipboard"),
+    )?;
+    events.keep(ui::on_click(&diagnostics, {
+        let state = Arc::clone(state);
+        let paths = paths.clone();
+        let status = status.clone();
+        move || {
+            let report =
+                mailin_core::support::build_diagnostics(&state.mailin, &state.config(), &paths);
+            let message = if crate::platform::copy_to_clipboard(&report) {
+                "Copied to clipboard"
+            } else {
+                "Could not access the clipboard"
+            };
+            let _ = status.SetText(message);
+        }
+    })?);
+    ui::append(&panel, &diagnostics)?;
+
+    let backup = ui::button(
+        "Back up local data…",
+        Some("Back up local data"),
+        Some("Save a zip of the local mail cache and preferences (no passwords)"),
+    )?;
+    events.keep(ui::on_click(&backup, {
+        let paths = paths.clone();
+        let status = status.clone();
+        move || {
+            let suggested = mailin_core::support::backup_filename();
+            let Some(destination) =
+                crate::platform::save_file("Back up local data", &suggested.to_string_lossy())
+            else {
+                return;
+            };
+            let message = match mailin_core::support::backup_local_data(&paths, &destination) {
+                Ok(()) => "Backup saved.".to_owned(),
+                Err(error) => format!("Could not save the backup: {error}"),
+            };
+            let _ = status.SetText(&message);
+        }
+    })?);
+    ui::append(&panel, &backup)?;
+
+    Ok(panel)
 }

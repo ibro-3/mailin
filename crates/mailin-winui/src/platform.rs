@@ -9,6 +9,11 @@
 use std::path::{Path, PathBuf};
 
 use mailin_core::ComposeAttachment;
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 use windows_sys::Win32::UI::Controls::Dialogs::{
     GetOpenFileNameW, GetSaveFileNameW, OFN_ALLOWMULTISELECT, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
     OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
@@ -69,6 +74,26 @@ pub fn open_url(url: &str) {
     // SE_ERR_* code.
     if result as usize <= 32 {
         tracing::warn!(url = %url, code = result as usize, "ShellExecuteW could not open the URL");
+    }
+}
+
+/// Open a folder in Explorer. Used by the startup recovery window, where a
+/// user may want to inspect or move the database files by hand.
+pub fn open_folder(path: &std::path::Path) {
+    let verb = wide("explore");
+    let target = wide(&path.to_string_lossy());
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as usize <= 32 {
+        tracing::warn!(path = %path.display(), code = result as usize, "ShellExecuteW could not open the folder");
     }
 }
 
@@ -136,6 +161,38 @@ pub fn pick_folder(title: &str) -> Option<PathBuf> {
         return None;
     }
     Some(PathBuf::from(path))
+}
+
+/// Copy text to the system clipboard. Returns false when another application
+/// holds the clipboard or the allocation fails.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    let mut units: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        if OpenClipboard(std::ptr::null_mut()) == 0 {
+            return false;
+        }
+        if EmptyClipboard() == 0 {
+            let _ = CloseClipboard();
+            return false;
+        }
+        let handle = GlobalAlloc(GMEM_MOVEABLE, units.len() * std::mem::size_of::<u16>());
+        if handle.is_null() {
+            let _ = CloseClipboard();
+            return false;
+        }
+        let pointer = GlobalLock(handle) as *mut u16;
+        if pointer.is_null() {
+            let _ = GlobalUnlock(handle);
+            let _ = CloseClipboard();
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(units.as_ptr(), pointer, units.len());
+        units.clear();
+        let _ = GlobalUnlock(handle);
+        let result = SetClipboardData(CF_UNICODETEXT as u32, handle);
+        let _ = CloseClipboard();
+        !result.is_null()
+    }
 }
 
 /// Show the common save dialog. Returns `None` when the user cancels.
