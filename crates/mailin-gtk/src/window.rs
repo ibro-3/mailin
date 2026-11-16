@@ -546,10 +546,19 @@ impl MainWindow {
             .title("No folders")
             .description("Folders appear after the first synchronization.")
             .build();
+        let folder_syncing = adw::StatusPage::builder()
+            .title("Syncing folders…")
+            .description("Folders appear after the first synchronization.")
+            .build();
+        let sync_spinner = gtk::Spinner::new();
+        sync_spinner.set_spinning(true);
+        sync_spinner.set_size_request(48, 48);
+        folder_syncing.set_child(Some(&sync_spinner));
         let folder_stack = gtk::Stack::new();
         folder_stack.set_vexpand(true);
         folder_stack.add_named(&folder_scroller, Some("list"));
         folder_stack.add_named(&folder_empty, Some("empty"));
+        folder_stack.add_named(&folder_syncing, Some("syncing"));
         folder_stack.set_visible_child_name("empty");
 
         let folders_label = gtk::Label::builder()
@@ -2442,14 +2451,8 @@ impl MainWindow {
     /// (always including the virtual Outbox).
     fn show_account_folders(&self, folders: Vec<Folder>) {
         let selected_id = self.selection.borrow().folder;
-        let index = selected_id
-            .and_then(|id| folders.iter().position(|folder| folder.id == id))
-            .or_else(|| {
-                folders
-                    .iter()
-                    .position(|folder| folder.role == FolderRole::Inbox)
-            })
-            .or_else(|| (!folders.is_empty()).then_some(0));
+        let index = mailin_core::resolve_folder_index(&folders, selected_id);
+        let has_real_folder = mailin_core::has_real_folder(&folders);
 
         self.programmatic.set(true);
         clear_list(&self.widgets.folder_list);
@@ -2463,7 +2466,7 @@ impl MainWindow {
         }
         self.widgets
             .folder_stack
-            .set_visible_child_name(if folders.is_empty() { "empty" } else { "list" });
+            .set_visible_child_name(if has_real_folder { "list" } else { "syncing" });
         self.programmatic.set(false);
         *self.folders.borrow_mut() = folders;
 
@@ -2475,8 +2478,17 @@ impl MainWindow {
                 }
             }
             None => {
-                self.widgets.list_title.set_text("No folders");
+                // Only the virtual Outbox exists so far (or nothing at
+                // all): keep the list in a "preparing" state and select the
+                // Inbox as soon as it arrives.
+                self.widgets.list_title.set_text("Preparing your mailbox…");
                 self.clear_messages();
+                self.widgets
+                    .message_empty
+                    .set_title("Preparing your mailbox…");
+                self.widgets
+                    .message_empty
+                    .set_description(Some("Folders appear after the first synchronization."));
             }
         }
     }

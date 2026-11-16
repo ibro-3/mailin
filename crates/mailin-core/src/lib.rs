@@ -22,6 +22,7 @@ pub mod config;
 pub mod credentials;
 pub mod engine;
 pub mod error;
+mod folder_selection;
 pub mod html;
 mod imap;
 pub mod list_diff;
@@ -54,6 +55,7 @@ pub use config::{
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
 pub use error::{Error, Result};
+pub use folder_selection::{has_real_folder, resolve_folder_index};
 pub use imap::validate_flag;
 pub use model::{
     AttachmentData, AttachmentMeta, Calendar, CalendarEvent, Contact, Folder, FolderId, FolderRole,

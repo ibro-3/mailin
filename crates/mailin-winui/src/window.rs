@@ -802,14 +802,7 @@ impl MainWindow {
         }
 
         let selected_id = self.state().selection.folder;
-        let index = selected_id
-            .and_then(|id| folders.iter().position(|folder| folder.id == id))
-            .or_else(|| {
-                folders
-                    .iter()
-                    .position(|folder| folder.role == FolderRole::Inbox)
-            })
-            .or_else(|| (!folders.is_empty()).then_some(0));
+        let index = mailin_core::resolve_folder_index(&folders, selected_id);
 
         let _ = ui::clear(&self.widgets.folder_list);
         self.folder_events.replace();
@@ -839,8 +832,16 @@ impl MainWindow {
                 }
             }
             None => {
-                let _ = self.widgets.list_title.SetText("No folders");
+                // Only the virtual Outbox exists so far (or nothing at
+                // all): keep a "preparing" state and select the Inbox as
+                // soon as it arrives.
+                let _ = self.widgets.list_title.SetText("Preparing your mailbox…");
                 self.clear_messages();
+                let _ = self
+                    .widgets
+                    .message_empty
+                    .SetText("Preparing your mailbox…");
+                let _ = ui::set_visible(&self.widgets.message_empty, true);
             }
         }
     }
@@ -5244,11 +5245,7 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
         Some(count) => format!("{}, {}", folder_title(folder), badge_words(count)),
         None => folder_title(folder),
     };
-    let button = ui::content_button(
-        &row,
-        Some(&button_label),
-        None,
-    )?;
+    let button = ui::content_button(&row, Some(&button_label), None)?;
     ui::padding(&button, 0.0, 0.0, 0.0, 0.0)?;
 
     // Right-click context menu for folder operations
