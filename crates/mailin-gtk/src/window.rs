@@ -2150,6 +2150,7 @@ impl MainWindow {
             self.widgets.title.set_subtitle("No account");
             self.clear_messages();
             self.widgets.list_title.set_text("No messages");
+            self.update_account_menu_enabled();
             return;
         }
 
@@ -2158,6 +2159,7 @@ impl MainWindow {
             Some(_) => {
                 self.update_subtitle();
                 self.refresh_folders();
+                self.update_account_menu_enabled();
             }
             None => {
                 let first = self.accounts.borrow()[0].id;
@@ -2203,6 +2205,7 @@ impl MainWindow {
         self.programmatic.set(false);
         self.update_subtitle();
         self.refresh_folders();
+        self.update_account_menu_enabled();
     }
 
     fn enter_unified_inbox(&self) {
@@ -2223,6 +2226,20 @@ impl MainWindow {
         self.programmatic.set(false);
         self.update_subtitle();
         self.refresh_folders();
+        self.update_account_menu_enabled();
+    }
+
+    /// Grey out the account-menu edit/remove actions when there is no
+    /// account to target (the unified inbox, or zero accounts).
+    fn update_account_menu_enabled(&self) {
+        let enabled = self.selection.borrow().account.is_some();
+        for name in ["account-edit", "account-remove"] {
+            if let Some(action) = self.widgets.window.lookup_action(name)
+                && let Ok(simple) = action.downcast::<gio::SimpleAction>()
+            {
+                simple.set_enabled(enabled);
+            }
+        }
     }
 
     fn update_subtitle(&self) {
@@ -3114,16 +3131,29 @@ impl MainWindow {
                 window.present();
                 return;
             }
-            // Reading the draft body hits the store: do it on a worker.
-            let Some(account_id) = self.selection.borrow().account else {
-                return;
-            };
+            // Reading the draft body hits the store: do it on a worker. In
+            // the unified inbox no account is selected; recover the draft's
+            // account from its folder in the worker.
+            let account_id = self.selection.borrow().account;
+            let folder_id = message.folder_id;
             let mailin = std::sync::Arc::clone(&self.app.mailin);
             let window_id = self.window_id.get();
             let message_id = message.id;
             let message = message.clone();
             background::spawn_result(
                 move || {
+                    let account_id = account_id.or_else(|| {
+                        mailin
+                            .folder(folder_id)
+                            .ok()
+                            .flatten()
+                            .map(|folder| folder.account_id)
+                    });
+                    let Some(account_id) = account_id else {
+                        return Err(
+                            "could not determine which account this draft belongs to".to_owned()
+                        );
+                    };
                     // The account is loaded here too: reading it asks the
                     // keyring for the credentials.
                     let account = mailin
@@ -4404,6 +4434,7 @@ impl MainWindow {
     fn archive_selected(&self) {
         let ids = self.selected_message_ids();
         if ids.is_empty() {
+            self.toast("Select a message first");
             return;
         }
         let pairs = self.undo_pairs(&ids);
@@ -4520,6 +4551,7 @@ impl MainWindow {
         }
         let ids = self.selected_message_ids();
         if ids.is_empty() {
+            self.toast("Select a message first");
             return;
         }
         let in_trash = self
@@ -4565,6 +4597,7 @@ impl MainWindow {
     fn mark_selected_junk(&self, junk: bool) {
         let ids = self.selected_message_ids();
         if ids.is_empty() {
+            self.toast("Select a message first");
             return;
         }
         let pairs = self.undo_pairs(&ids);
@@ -4654,8 +4687,18 @@ impl MainWindow {
         }
     }
 
+    /// The hint shown when a composer action runs without an account.
+    fn no_account_hint(&self) -> &'static str {
+        if self.accounts.borrow().is_empty() {
+            "Add an account before composing mail"
+        } else {
+            "Switch to an account to compose mail"
+        }
+    }
+
     fn empty_trash(&self) {
         let Some(account_id) = self.selection.borrow().account else {
+            self.toast("Switch to an account to empty its trash");
             return;
         };
         let app = self.app.clone();
@@ -4673,10 +4716,12 @@ impl MainWindow {
 
     fn outbox_retry_selected(&self) {
         let Some(account_id) = self.selection.borrow().account else {
+            self.toast("Switch to an account to manage the outbox");
             return;
         };
         let ids = self.selected_outbox_ids();
         if ids.is_empty() {
+            self.toast("Select an outbox entry first");
             return;
         }
         for id in ids {
@@ -4687,10 +4732,12 @@ impl MainWindow {
 
     fn outbox_discard_selected(&self) {
         let Some(account_id) = self.selection.borrow().account else {
+            self.toast("Switch to an account to manage the outbox");
             return;
         };
         let ids = self.selected_outbox_ids();
         if ids.is_empty() {
+            self.toast("Select an outbox entry first");
             return;
         }
         for id in ids {
@@ -4801,6 +4848,7 @@ impl MainWindow {
     fn mark_selected_seen(&self, seen: bool) {
         let ids = self.selected_message_ids();
         if ids.is_empty() {
+            self.toast("Select a message first");
             return;
         }
         if seen {
@@ -4817,6 +4865,7 @@ impl MainWindow {
     fn mark_selected_flagged(&self, flagged: bool) {
         let ids = self.selected_message_ids();
         if ids.is_empty() {
+            self.toast("Select a message first");
             return;
         }
         if flagged {
@@ -4832,11 +4881,10 @@ impl MainWindow {
 
     fn toggle_seen(&self) {
         // The reader button reflects the open message; apply its direction
-        // to every selected message.
-        let Some(message) = self.selected_message() else {
-            return;
-        };
-        self.mark_selected_seen(!message.is_seen());
+        // to every selected message. Without an open message there is no
+        // selection at all, and mark_selected_seen says so.
+        let direction = self.selected_message().map(|m| !m.is_seen()).unwrap_or(true);
+        self.mark_selected_seen(direction);
     }
 
     fn toggle_flagged(&self, flagged: bool) {
@@ -4847,6 +4895,7 @@ impl MainWindow {
     fn move_selected(this: &Rc<Self>) {
         let ids = this.selected_message_ids();
         if ids.is_empty() {
+            this.toast("Select a message first");
             return;
         }
         let current = this.selection.borrow().folder;
@@ -4872,11 +4921,11 @@ impl MainWindow {
 
     fn compose_reply(this: &Rc<Self>, all: bool) {
         let Some(message_id) = this.selection.borrow().message else {
+            this.toast("Select a message first");
             return;
         };
-        let Some(account_id) = this.selection.borrow().account else {
-            return;
-        };
+        let account_id = this.selection.borrow().account;
+        let folder_id = this.selected_message().map(|message| message.folder_id);
         // Reading the account asks the keyring for its credentials and the
         // body comes from the store: both happen on a worker.
         let mailin = std::sync::Arc::clone(&this.app.mailin);
@@ -4886,6 +4935,18 @@ impl MainWindow {
         let message_for_worker = this.selected_message();
         background::spawn_result(
             move || {
+                // In the unified inbox no account is selected; recover the
+                // message's account from its folder.
+                let account_id = account_id.or_else(|| {
+                    folder_id
+                        .and_then(|id| mailin.folder(id).ok().flatten())
+                        .map(|folder| folder.account_id)
+                });
+                let Some(account_id) = account_id else {
+                    return Err(
+                        "could not determine which account this message belongs to".to_owned()
+                    );
+                };
                 let message = match message_for_worker {
                     Some(message) => message,
                     None => mailin
@@ -4935,11 +4996,11 @@ impl MainWindow {
 
     fn compose_forward(this: &Rc<Self>) {
         let Some(message_id) = this.selection.borrow().message else {
+            this.toast("Select a message first");
             return;
         };
-        let Some(account_id) = this.selection.borrow().account else {
-            return;
-        };
+        let account_id = this.selection.borrow().account;
+        let folder_id = this.selected_message().map(|message| message.folder_id);
         // Reading the account asks the keyring for its credentials and the
         // body comes from the store: both happen on a worker.
         let mailin = std::sync::Arc::clone(&this.app.mailin);
@@ -4949,6 +5010,18 @@ impl MainWindow {
         let message_for_worker = this.selected_message();
         background::spawn_result(
             move || {
+                // In the unified inbox no account is selected; recover the
+                // message's account from its folder.
+                let account_id = account_id.or_else(|| {
+                    folder_id
+                        .and_then(|id| mailin.folder(id).ok().flatten())
+                        .map(|folder| folder.account_id)
+                });
+                let Some(account_id) = account_id else {
+                    return Err(
+                        "could not determine which account this message belongs to".to_owned()
+                    );
+                };
                 let message = match message_for_worker {
                     Some(message) => message,
                     None => mailin
@@ -4993,9 +5066,8 @@ impl MainWindow {
 
     pub fn open_compose_new(&self) {
         let Some(account_id) = self.selection.borrow().account else {
-            self.widgets
-                .toast
-                .add_toast(adw::Toast::new("Add an account before composing mail"));
+            let hint = self.no_account_hint();
+            self.widgets.toast.add_toast(adw::Toast::new(hint));
             return;
         };
         // Reading the account asks the keyring for its credentials: the
@@ -5075,9 +5147,8 @@ impl MainWindow {
     /// worker (also used for mailto: links).
     pub fn open_compose_loading(&self, draft: OutgoingMessage) {
         let Some(account_id) = self.selection.borrow().account else {
-            self.widgets
-                .toast
-                .add_toast(adw::Toast::new("Add an account before composing mail"));
+            let hint = self.no_account_hint();
+            self.widgets.toast.add_toast(adw::Toast::new(hint));
             return;
         };
         let mailin = std::sync::Arc::clone(&self.app.mailin);
@@ -5101,7 +5172,7 @@ impl MainWindow {
                         let _ = this.open_compose(account, draft);
                     }
                     Ok(Ok(None)) => {
-                        this.toast("Add an account before composing mail");
+                        this.toast("That account is no longer available");
                     }
                     Ok(Err(error)) => {
                         this.toast(&format!("Could not open the composer: {error}"));
@@ -5534,7 +5605,10 @@ impl MainWindow {
 
     fn edit_account(this: &Rc<Self>) {
         let account = this.selection.borrow().account;
-        let Some(account_id) = account else { return };
+        let Some(account_id) = account else {
+            this.toast("Switch to an account to edit its settings");
+            return;
+        };
         let Some(account) = this
             .accounts
             .borrow()
@@ -5561,7 +5635,10 @@ impl MainWindow {
 
     fn remove_account(this: &Rc<Self>) {
         let account = this.selection.borrow().account;
-        let Some(account_id) = account else { return };
+        let Some(account_id) = account else {
+            this.toast("Switch to an account to remove it");
+            return;
+        };
         let Some(account) = this
             .accounts
             .borrow()
@@ -5587,6 +5664,7 @@ impl MainWindow {
     // Folder management actions
     fn create_folder(this: Rc<Self>) {
         let Some(account_id) = this.selection.borrow().account else {
+            this.toast("Switch to an account to create a folder");
             return;
         };
         let dialog = adw::AlertDialog::builder()
