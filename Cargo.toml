@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ibro-3/mailin"
 authors = ["Mailin contributors"]
@@ -23,7 +23,7 @@ anyhow = "1"
 base64 = "0.22"
 directories = "6"
 keyring = "4.2"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
@@ -35,7 +35,7 @@ toml = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
