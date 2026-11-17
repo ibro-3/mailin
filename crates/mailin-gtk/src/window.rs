@@ -2827,9 +2827,16 @@ impl MainWindow {
             }
         };
         sync_status.add_css_class(css_class);
-        sync_status.set_tooltip_text(Some(&summary));
+        let detailed = match selected.and_then(|id| self.app.engine.last_sync_at(&id)) {
+            Some(at) => format!(
+                "{summary} · Last synced {}",
+                crate::format::list_time(crate::format::now_unix(), at)
+            ),
+            None => summary,
+        };
+        sync_status.set_tooltip_text(Some(&detailed));
         {
-            sync_status.update_property(&[Property::Label(&summary)]);
+            sync_status.update_property(&[Property::Label(&detailed)]);
         }
     }
 
@@ -3317,9 +3324,10 @@ impl MainWindow {
                             SearchScope::AllMail => "All mail",
                             SearchScope::CurrentFolder => "Current folder",
                         };
+                        let count = results.len();
                         this.show_messages(
                             results,
-                            format!("Results for “{query_for_apply}” ({scope_label})"),
+                            format!("Results for “{query_for_apply}” ({scope_label}, {count})"),
                             false,
                         );
                     }

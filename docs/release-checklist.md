@@ -106,6 +106,32 @@ This checklist must be completed and signed off for each release candidate befor
 - [ ] **Documentation matches the build**: default page size 100 (range 1–1000), unified-inbox availability, Windows signing status, OAuth2 client-ID requirement.
 - [ ] **Flatpak listing assets**: 3–5 screenshots with captions, branding colors and the release entry present; `appstreamcli validate --no-net` passes. Screenshots must be captured on a real desktop session.
 
+### WinUI visual system (WS2)
+
+- [ ] **Iconography**: toolbar, reader action bar, folder roles, thread chevrons, star and attachment markers use Segoe Fluent Icons glyphs with accessible names; no emoji or text glyphs remain in the chrome.
+- [ ] **Primary action**: Compose is the single accented action in the toolbar.
+- [ ] **Row anatomy**: message rows show unread dot, initials avatar (except compact density), sender/subject, time, snippet and flags; the same states are readable on GTK and WinUI.
+- [ ] **Live theme**: changing System/Light/Dark in Preferences recolors the whole window without a restart (custom-brush controls may need reopening). High contrast overrides the theme.
+- [ ] **Visual review**: toolbar and reader action bar do not wrap or clip at 640×480, 1024×768 and 1440×900, including 200% text scaling; light/dark/high-contrast screenshots approved.
+- [ ] **Unified inbox (WinUI)**: with two or more accounts the picker offers "All Accounts (Unified Inbox)"; the folder list shows a single unified folder with the combined unread count; opening a message from another account still trusts/loads remote content per that message's account; Sync synchronizes every account; search spans all accounts; account edit/remove is disabled while unified.
+- [ ] **Search (WinUI)**: search box has a This folder / All mail scope selector and a recent-queries drop-down above the results; selecting a recent query re-runs it; results are scoped to the selected folder by default and show a result count in the list title.
+
+### State and feedback (WS3)
+
+- [ ] **Five pane states**: folders, message list and reader each cover first-load, refreshing, empty, error and offline states; empty/error states name the cause and offer a working next action (Retry / Clear search / Add account).
+- [ ] **Offline and error precedence**: an empty folder while offline or after a sync error shows the offline/error state rather than "no messages"; Retry re-syncs and a successful sync clears it.
+- [ ] **Sync status honesty**: the header chip shows `Syncing N/M` with multiple accounts, names affected accounts and the last successful sync in its accessible summary, and colors match the GTK semantics (accent/warning/error).
+- [ ] **No silent dead ends**: every action needing a selected message or account gives feedback; no spinner runs indefinitely without an explanatory label.
+- [ ] **Result counts**: both list titles show the number of search results and the active scope.
+- [ ] **Stale-while-revalidate**: background sync keeps the cached list visible; a small "Updating…" cue shows elapsed seconds, and a sync over 30 s is labeled "taking longer than usual" in the status summary.
+- [ ] **Live regions**: empty/error states and the sync cue are polite live regions so screen readers announce them, and the GTK status tooltip includes the last successful sync time.
+
+### Information architecture (WS4)
+
+- [ ] **Preferences → Accounts is actionable**: both clients list every account with its sync status and working Edit, Remove and Add Account actions; removing asks for confirmation and cancel changes nothing. The old explanatory-only page is gone.
+- [ ] **Two discovery paths**: account management is reachable from the main window and from Preferences; after an add/edit/remove the list refreshes without restarting.
+- [ ] **Account removal safety**: WinUI account removal uses the same destructive confirmation as GTK, naming the account and stating that local data will be deleted.
+
 ---
 
 ## Platform-Specific Verification

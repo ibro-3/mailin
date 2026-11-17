@@ -23,8 +23,8 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
   a single Insert menu for templates, contacts, signatures and attachments,
   full-text search, and desktop notifications.
 - **Windows client (WinUI 3)**: three-pane shell, account wizard, reader with
-  WebView2, attachments, compose, search, the core event pump, and toast
-  notifications with activation.
+  WebView2, attachments, compose, search, a unified inbox for multiple accounts,
+  the core event pump, and toast notifications with activation.
 - **Mail features**: PGP encryption and signing with a key manager, queueing in
   an outbox with retry, draft auto-save, `mailto:` handling, and
   `src/mailto` composition prefills.
@@ -78,9 +78,9 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
 
 ### Known limitations
 
-- **WinUI parity**: the Windows client has no Unified Inbox and uses a single
-  open message (with checkbox-based bulk selection) rather than GTK's
-  multi-select list. Unified Inbox may arrive in a later release.
+- **WinUI parity**: the Windows client uses checkbox-based bulk selection
+  rather than GTK's multi-select list, and its two-pane reader keeps one
+  message open at a time.
 - **Windows signing**: the MSIX and installer are unsigned, so SmartScreen
   warns on first run.
 - **Narrow windows and accessibility**: the WinUI main window has no enforced

@@ -53,6 +53,14 @@ const BREAKPOINT_TABLET: f64 = 1024.0;
 const MIN_SIDEBAR_WIDTH: f64 = 200.0;
 const MIN_LIST_WIDTH: f64 = 300.0;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum EmptyAction {
+    #[default]
+    None,
+    Retry,
+    ClearSearch,
+}
+
 #[derive(Debug, Default)]
 struct Selection {
     account: Option<AccountId>,
@@ -60,7 +68,12 @@ struct Selection {
     message: Option<MessageId>,
     query: String,
     search: bool,
+    /// False scopes the search to the selected folder; true spans all mail
+    /// of the selected account.
+    search_all: bool,
     limit: u32,
+    /// Unified Inbox spans every account. It is shown only with 2+ accounts.
+    unified: bool,
 }
 
 /// An attachment whose bytes are needed before the save dialog can open.
@@ -97,10 +110,15 @@ struct State {
     pending_attachments: Vec<PendingAttachment>,
     /// Expanded thread roots (thread_root_key) for threaded view.
     expanded_threads: BTreeSet<String>,
+    /// Recent queries for the selected account, mirrored into the search
+    /// history combo above the result list.
+    search_queries: Vec<String>,
 }
 
 struct Widgets {
     window: Window,
+    /// Root element whose requested theme follows the saved preference.
+    theme_root: mailin_winui_sys::FrameworkElement,
     title: TextBlock,
     banner_row: StackPanel,
     banner: TextBlock,
@@ -113,18 +131,29 @@ struct Widgets {
     sync: Button,
     search: TextBox,
     search_button: Button,
+    /// Search scope and recent queries live above the result list, where the
+    /// user looks after running a search. Both are hidden outside search mode.
+    search_scope: ComboBox,
+    search_history: ComboBox,
     welcome: StackPanel,
     welcome_add: Button,
     mail: Grid,
     folder_list: StackPanel,
+    folder_status_panel: StackPanel,
     folder_empty: TextBlock,
+    folder_status_detail: TextBlock,
+    folder_status_action: Button,
     list_title: TextBlock,
+    /// Small "Updating…" cue so a cached list stays visible during refresh.
+    list_updating: TextBlock,
     bulk_bar: StackPanel,
     bulk_count: TextBlock,
     bulk_actions: ComboBox,
     message_scroll: ScrollViewer,
     message_list: StackPanel,
+    message_empty_panel: StackPanel,
     message_empty: TextBlock,
+    message_empty_action: Button,
     load_more: Button,
     reader_empty: StackPanel,
     reader_content: Grid,
@@ -209,6 +238,14 @@ pub struct MainWindow {
     dialog_events: ui::Revokers,
     /// Untruncated text of the last error, opened by the banner's Details button.
     error_details: std::cell::RefCell<String>,
+    /// Last user-facing sync error per account, included in the status tooltip.
+    account_errors: std::cell::RefCell<std::collections::HashMap<mailin_core::AccountId, String>>,
+    /// When each account's current sync started, for elapsed-time feedback.
+    sync_started: std::cell::RefCell<std::collections::HashMap<mailin_core::AccountId, i64>>,
+    /// Periodic ticker that refreshes the status chip during long syncs.
+    sync_clock_timer: std::cell::RefCell<Option<mailin_winui_sys::DispatcherQueueTimer>>,
+    /// Action offered by the current empty state of the message pane.
+    empty_action: std::cell::Cell<EmptyAction>,
     /// The row checkboxes, parallel to `State::messages`, used to tick or
     /// untick the whole list at once (Ctrl+A, Escape, bulk actions).
     checkboxes: std::cell::RefCell<Vec<CheckBox>>,
@@ -290,6 +327,108 @@ impl MainWindow {
         }
         self.keep_dialog(dialog.clone());
         let _ = dialog.ShowAsync();
+    }
+
+    /// Render a typed empty state in the message pane. Every state explains
+    /// what happened and, where possible, offers the next action.
+    fn set_message_empty(&self, title: &str, detail: &str, action: Option<(&str, EmptyAction)>) {
+        let text = if detail.is_empty() {
+            title.to_owned()
+        } else {
+            format!("{title}\n\n{detail}")
+        };
+        let _ = self.widgets.message_empty.SetText(&text);
+        match action {
+            Some((label, kind)) => {
+                let _ = ui::set_button_label(&self.widgets.message_empty_action, label);
+                let _ = ui::set_visible(&self.widgets.message_empty_action, true);
+                self.empty_action.set(kind);
+            }
+            None => {
+                let _ = ui::set_visible(&self.widgets.message_empty_action, false);
+                self.empty_action.set(EmptyAction::None);
+            }
+        }
+        let _ = ui::set_visible(&self.widgets.message_empty_panel, true);
+        let _ = ui::set_visible(&self.widgets.message_scroll, false);
+    }
+
+    /// Folder pane state: a title, a short explanation and an optional Sync
+    /// action. Replaces the old static "Folders appear…" sentence.
+    fn set_folder_status(&self, title: &str, detail: &str, action: bool) {
+        let _ = self.widgets.folder_empty.SetText(title);
+        let _ = self.widgets.folder_status_detail.SetText(detail);
+        let _ = ui::set_visible(&self.widgets.folder_status_action, action);
+        let _ = ui::set_visible(&self.widgets.folder_status_panel, true);
+    }
+
+    fn hide_folder_status(&self) {
+        let _ = ui::set_visible(&self.widgets.folder_status_panel, false);
+    }
+
+    /// Pick the right message-pane state for an empty result set. Offline and
+    /// sync errors take precedence over "no messages" so an empty cached
+    /// folder never hides the reason it is empty.
+    fn set_message_empty_for_list(&self, empty: bool) {
+        use mailin_core::model::SyncStatus;
+        if !empty {
+            self.hide_message_empty();
+            return;
+        }
+        let (searching, query, account, unified) = {
+            let state = self.state();
+            (
+                state.selection.search,
+                state.selection.query.clone(),
+                state.selection.account,
+                state.selection.unified,
+            )
+        };
+        let status = account.map(|id| self.app.engine.sync_status(&id));
+        let error = account.and_then(|id| self.account_errors.borrow().get(&id).cloned());
+        match status {
+            Some(SyncStatus::Offline) => self.set_message_empty(
+                "You're offline",
+                "Reconnect and sync to see your messages.",
+                Some(("Retry", EmptyAction::Retry)),
+            ),
+            Some(SyncStatus::Error) => self.set_message_empty(
+                "Couldn't load messages",
+                error.as_deref().unwrap_or("Sync failed for this account."),
+                Some(("Retry", EmptyAction::Retry)),
+            ),
+            _ if searching => {
+                let trimmed = query.trim();
+                let title = if trimmed.is_empty() {
+                    "No results".to_owned()
+                } else {
+                    format!("No results for “{trimmed}”")
+                };
+                self.set_message_empty(
+                    &title,
+                    "Try a different search term, or clear the search.",
+                    Some(("Clear search", EmptyAction::ClearSearch)),
+                );
+            }
+            _ => {
+                let detail = if unified {
+                    "No messages in any account yet."
+                } else {
+                    "This folder is empty, or has not been synchronized yet."
+                };
+                self.set_message_empty(
+                    "No messages",
+                    detail,
+                    Some(("Sync now", EmptyAction::Retry)),
+                );
+            }
+        }
+    }
+
+    /// Hide the empty-state overlay when a list has content.
+    fn hide_message_empty(&self) {
+        let _ = ui::set_visible(&self.widgets.message_empty_panel, false);
+        let _ = ui::set_visible(&self.widgets.message_scroll, true);
     }
 
     /// Show a user-facing error. `retryable` comes from the core event and
@@ -734,6 +873,50 @@ impl MainWindow {
 
     // ------------------------------------------------------------- accounts
 
+    /// Whether the account picker also offers a Unified Inbox entry. With a
+    /// single account the entry would be a redundant mode (C7).
+    fn unified_inbox_visible(&self) -> bool {
+        self.state().accounts.len() >= 2
+    }
+
+    /// Combo-box index of an account, accounting for the optional unified row.
+    fn account_combo_index(&self, account_index: usize) -> usize {
+        account_index + usize::from(self.unified_inbox_visible())
+    }
+
+    fn enter_unified_inbox(self: &Rc<Self>) {
+        if !self.unified_inbox_visible() {
+            return;
+        }
+        let previous = {
+            let mut state = self.state();
+            let previous = state.selection.account.zip(state.selection.folder);
+            state.selection.unified = true;
+            state.selection.folder = None;
+            state.selection.message = None;
+            state.selection.search = false;
+            state.selection.query.clear();
+            state.selection.search_all = false;
+            if state.selection.limit == 0 {
+                state.selection.limit = self.page_size();
+            }
+            previous
+        };
+        self.programmatic.store(true, Ordering::Relaxed);
+        ui::select_index(&self.widgets.account_combo, 0);
+        self.programmatic.store(false, Ordering::Relaxed);
+        if let Some((account, folder)) = previous {
+            // Remember where the user left off in the account they exited.
+            self.persist_ui(|config| {
+                config.ui.last_folders.insert(account, folder);
+            });
+        }
+        self.update_title();
+        self.update_account_menu_enabled();
+        self.update_sync_status_chip();
+        self.refresh_folders();
+    }
+
     fn refresh_accounts(self: &Rc<Self>) {
         let accounts = match self.app.mailin.list_accounts() {
             Ok(accounts) => accounts,
@@ -742,25 +925,39 @@ impl MainWindow {
                 return;
             }
         };
-        let current = self.state().selection.account;
+        let (current, was_unified) = {
+            let state = self.state();
+            (state.selection.account, state.selection.unified)
+        };
         let keep = current.filter(|id| accounts.iter().any(|account| account.id == *id));
+        let show_unified = accounts.len() >= 2;
+        let still_unified = was_unified && show_unified;
 
         self.programmatic.store(true, Ordering::Relaxed);
         let _ = ui::clear_items(&self.widgets.account_combo);
+        if show_unified {
+            let _ = ui::add_combo_item(&self.widgets.account_combo, "All Accounts (Unified Inbox)");
+        }
         for account in &accounts {
             let _ = ui::add_combo_item(
                 &self.widgets.account_combo,
                 &format!("{} <{}>", account.display_name, account.email),
             );
         }
-        if let Some(index) =
+        if still_unified {
+            ui::select_index(&self.widgets.account_combo, 0);
+        } else if let Some(index) =
             keep.and_then(|id| accounts.iter().position(|account| account.id == id))
         {
-            ui::select_index(&self.widgets.account_combo, index);
+            ui::select_index(
+                &self.widgets.account_combo,
+                index + usize::from(show_unified),
+            );
         }
         self.programmatic.store(false, Ordering::Relaxed);
 
         self.state().accounts = accounts;
+        self.update_sync_status_chip();
         let empty = self.state().accounts.is_empty();
         if empty {
             {
@@ -779,6 +976,12 @@ impl MainWindow {
 
         let _ = ui::set_visible(&self.widgets.welcome, false);
         let _ = ui::set_visible(&self.widgets.mail, true);
+        if still_unified {
+            self.update_title();
+            self.update_account_menu_enabled();
+            self.refresh_folders();
+            return;
+        }
         match keep {
             Some(_) => {
                 self.update_title();
@@ -806,8 +1009,10 @@ impl MainWindow {
                 state.selection.message = None;
                 state.selection.search = false;
                 state.selection.query.clear();
+                state.selection.search_all = false;
             }
             state.selection.account = Some(id);
+            state.selection.unified = false;
             if state.selection.limit == 0 {
                 state.selection.limit = self.page_size();
             }
@@ -818,6 +1023,7 @@ impl MainWindow {
                 config.ui.last_folders.insert(account, folder);
             });
         }
+        self.refresh_search_history(id);
         self.programmatic.store(true, Ordering::Relaxed);
         // Look the index up in a scoped block: the guard must not be held
         // while the combo box is updated, which can re-enter Rust code that
@@ -827,18 +1033,25 @@ impl MainWindow {
             state.accounts.iter().position(|account| account.id == id)
         };
         if let Some(index) = index {
-            ui::select_index(&self.widgets.account_combo, index);
+            ui::select_index(&self.widgets.account_combo, self.account_combo_index(index));
         }
         self.programmatic.store(false, Ordering::Relaxed);
         self.update_title();
+        self.update_account_menu_enabled();
+        self.update_sync_status_chip();
         self.refresh_folders();
     }
 
     fn update_title(&self) {
-        let account = self.state().selection.account;
+        let state = self.state();
+        if state.selection.unified {
+            let _ = self.widgets.title.SetText("Mailin — All Accounts");
+            return;
+        }
+        let account = state.selection.account;
         let subtitle = account
             .and_then(|id| {
-                self.state()
+                state
                     .accounts
                     .iter()
                     .find(|account| account.id == id)
@@ -848,9 +1061,188 @@ impl MainWindow {
         let _ = self.widgets.title.SetText(&format!("Mailin — {subtitle}"));
     }
 
+    /// One status chip for the whole window, with an accessible summary that
+    /// names the affected accounts, the last successful sync and any error.
+    fn update_sync_status_chip(&self) {
+        use mailin_core::model::SyncStatus;
+
+        let (accounts, selected, unified) = {
+            let state = self.state();
+            (
+                state.accounts.clone(),
+                state.selection.account,
+                state.selection.unified,
+            )
+        };
+        let errors = self.account_errors.borrow();
+        let started = self.sync_started.borrow();
+        let now = format::now_unix();
+        let mut problems = Vec::new();
+        let mut syncing = Vec::new();
+        let mut details = Vec::new();
+        let mut longest_sync = 0i64;
+        for account in &accounts {
+            let status = self.app.engine.sync_status(&account.id);
+            let elapsed = started
+                .get(&account.id)
+                .map(|start| now.saturating_sub(*start))
+                .unwrap_or_default();
+            longest_sync = longest_sync.max(elapsed);
+            let last = self
+                .app
+                .engine
+                .last_sync_at(&account.id)
+                .map(|at| format!(", last synced {}", format::list_time(now, at)))
+                .unwrap_or_default();
+            let error = errors.get(&account.id);
+            match status {
+                SyncStatus::Error => problems.push(format!("{}: error", account.email)),
+                SyncStatus::Offline => problems.push(format!("{}: offline", account.email)),
+                SyncStatus::Syncing => syncing.push(account.email.clone()),
+                _ => {}
+            }
+            let state_text = match status {
+                SyncStatus::Idle => "idle",
+                SyncStatus::Syncing => "syncing",
+                SyncStatus::Connected => "connected",
+                SyncStatus::Offline => "offline",
+                SyncStatus::Error => "error",
+            };
+            let error_text = error.map(|text| format!(" — {text}")).unwrap_or_default();
+            let elapsed_text = if status == SyncStatus::Syncing {
+                let slow = elapsed >= 30;
+                format!(
+                    ", syncing for {elapsed} s{}",
+                    if slow {
+                        " (taking longer than usual)"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                String::new()
+            };
+            details.push(format!(
+                "{} — {state_text}{last}{elapsed_text}{error_text}",
+                account.email
+            ));
+        }
+        drop(started);
+        drop(errors);
+
+        let has_error = problems.iter().any(|text| text.ends_with("error"));
+        let (text, detail_summary) = if !problems.is_empty() {
+            let short = if has_error { "Error" } else { "Offline" };
+            (
+                short.to_owned(),
+                format!(
+                    "Sync problem: {}. {}",
+                    problems.join(", "),
+                    details.join("; ")
+                ),
+            )
+        } else if !syncing.is_empty() {
+            let short = if accounts.len() > 1 {
+                format!("Syncing {}/{}", syncing.len(), accounts.len())
+            } else {
+                "Syncing…".to_owned()
+            };
+            (
+                short,
+                format!("Syncing {}. {}", syncing.join(", "), details.join("; ")),
+            )
+        } else {
+            let status = selected
+                .map(|id| self.app.engine.sync_status(&id))
+                .unwrap_or(SyncStatus::Idle);
+            let short = match status {
+                SyncStatus::Idle => "Idle",
+                SyncStatus::Syncing => "Syncing…",
+                SyncStatus::Connected => "Connected",
+                SyncStatus::Offline => "Offline",
+                SyncStatus::Error => "Error",
+            };
+            let scope = if unified {
+                "All accounts"
+            } else {
+                "Sync status"
+            };
+            (
+                short.to_owned(),
+                format!("{scope}: {short}. {}", details.join("; ")),
+            )
+        };
+
+        let brush = if has_error {
+            design_tokens::tokens().error_brush().ok()
+        } else if !problems.is_empty() {
+            design_tokens::tokens().warning_brush().ok()
+        } else if !syncing.is_empty() {
+            design_tokens::tokens().accent_brush().ok()
+        } else {
+            design_tokens::tokens().text_muted_brush().ok()
+        };
+        let _ = self.widgets.sync_status.SetText(&text);
+        if let Some(brush) = brush {
+            let _ = self.widgets.sync_status.SetForeground(&brush);
+        }
+        let _ = AutomationProperties::SetHelpText(&self.widgets.sync_status, &detail_summary);
+
+        // Keep the cached list visible during a refresh; show a small,
+        // time-stamped cue instead of replacing the content with a spinner.
+        let updating = !syncing.is_empty();
+        let cue = if longest_sync >= 10 {
+            format!("Updating… {} s", longest_sync)
+        } else {
+            "Updating…".to_owned()
+        };
+        let _ = self.widgets.list_updating.SetText(&cue);
+        let _ = ui::set_visible(&self.widgets.list_updating, updating);
+    }
+
+    /// Editing an account needs a single selected account: the unified inbox
+    /// and the welcome screen have none.
+    fn update_account_menu_enabled(&self) {
+        let enabled = self.state().selection.account.is_some();
+        let _ = ui::set_enabled(&self.widgets.edit_account, enabled);
+    }
+
     // -------------------------------------------------------------- folders
 
     fn refresh_folders(self: &Rc<Self>) {
+        if self.state().selection.unified {
+            let unread = self.app.mailin.unread_total_all().unwrap_or(0);
+            let mut folders = vec![Folder {
+                id: FolderId::UNIFIED_INBOX,
+                account_id: mailin_core::AccountId::default(),
+                name: "Unified Inbox".to_owned(),
+                delimiter: "/".to_owned(),
+                role: FolderRole::Other,
+                uid_validity: None,
+                uid_next: None,
+                highest_modseq: None,
+                last_synced_at: None,
+                subscribed: true,
+                message_count: 0,
+                unread_count: unread,
+            }];
+            self.folder_events.replace();
+            let _ = ui::clear(&self.widgets.folder_list);
+            if let Ok(row) = folder_row(&folders[0], self) {
+                let this = Rc::clone(self);
+                let folder = folders[0].clone();
+                if let Ok(revoker) = ui::on_click(&row, move || this.select_folder(folder.clone()))
+                {
+                    self.folder_events.keep(revoker);
+                    let _ = ui::append(&self.widgets.folder_list, &row);
+                }
+            }
+            self.hide_folder_status();
+            self.state().selection.folder = Some(FolderId::UNIFIED_INBOX);
+            self.state().folders = std::mem::take(&mut folders);
+            self.refresh_messages();
+            return;
+        }
         let Some(account_id) = self.state().selection.account else {
             self.clear_folders();
             return;
@@ -900,7 +1292,15 @@ impl MainWindow {
                 let _ = ui::append(&self.widgets.folder_list, &row);
             }
         }
-        let _ = ui::set_visible(&self.widgets.folder_empty, folders.is_empty());
+        if folders.is_empty() {
+            self.set_folder_status(
+                "Preparing folders…",
+                "Folders appear after the first synchronization.",
+                true,
+            );
+        } else {
+            self.hide_folder_status();
+        }
         self.state().folders = folders;
 
         match index {
@@ -920,11 +1320,11 @@ impl MainWindow {
                 // soon as it arrives.
                 let _ = self.widgets.list_title.SetText("Preparing your mailbox…");
                 self.clear_messages();
-                let _ = self
-                    .widgets
-                    .message_empty
-                    .SetText("Preparing your mailbox…");
-                let _ = ui::set_visible(&self.widgets.message_empty, true);
+                self.set_message_empty(
+                    "Preparing your mailbox…",
+                    "Folders appear after the first synchronization.",
+                    None,
+                );
             }
         }
     }
@@ -932,7 +1332,11 @@ impl MainWindow {
     fn clear_folders(self: &Rc<Self>) {
         self.folder_events.replace();
         let _ = ui::clear(&self.widgets.folder_list);
-        let _ = ui::set_visible(&self.widgets.folder_empty, true);
+        self.set_folder_status(
+            "Preparing folders…",
+            "Folders appear after the first synchronization.",
+            true,
+        );
         self.state().folders.clear();
         self.clear_messages();
     }
@@ -951,6 +1355,7 @@ impl MainWindow {
             state.selection.message = None;
             state.selection.search = false;
             state.selection.query.clear();
+            state.selection.search_all = false;
             state.show_outbox = is_outbox;
             state.selection.limit = self.page_size();
         }
@@ -966,7 +1371,7 @@ impl MainWindow {
         let _ = self.widgets.list_title.SetText(&folder_title(&folder));
         self.show_reader_empty();
         self.refresh_messages();
-        if !is_outbox {
+        if !is_outbox && !folder.id.is_virtual_ui() {
             let stale = folder
                 .last_synced_at
                 .is_none_or(|synced| format::now_unix().saturating_sub(synced) >= 60);
@@ -982,8 +1387,20 @@ impl MainWindow {
     /// from it: the reader (HTML preference) and the message list (density,
     /// page size).
     fn apply_config(self: &Rc<Self>) {
-        let html_enabled = self.app.config().ui.html_enabled;
-        self.html_mode.store(html_enabled, Ordering::Relaxed);
+        let config = self.app.config();
+        self.html_mode
+            .store(config.ui.html_enabled, Ordering::Relaxed);
+        // The palette is refreshed by the preferences dialog before this
+        // callback runs; switching the root's requested theme now recolors the
+        // system-themed controls immediately instead of waiting for a restart.
+        let theme = match config.ui.theme {
+            mailin_core::Theme::System => mailin_winui_sys::ElementTheme::Default,
+            mailin_core::Theme::Light => mailin_winui_sys::ElementTheme::Light,
+            mailin_core::Theme::Dark => mailin_winui_sys::ElementTheme::Dark,
+        };
+        if let Err(error) = ui::set_requested_theme(&self.widgets.theme_root, theme) {
+            tracing::warn!(%error, "could not apply the live theme");
+        }
         self.refresh_messages();
         let message_id = self.state().selection.message;
         if let Some(message_id) = message_id {
@@ -1016,7 +1433,7 @@ impl MainWindow {
     }
 
     fn refresh_messages(self: &Rc<Self>) {
-        let (search, query, folder_id, limit, show_outbox, account_id) = {
+        let (search, query, folder_id, limit, show_outbox, account_id, unified, search_all) = {
             let state = self.state();
             (
                 state.selection.search,
@@ -1025,16 +1442,86 @@ impl MainWindow {
                 state.selection.limit,
                 state.show_outbox,
                 state.selection.account,
+                state.selection.unified,
+                state.selection.search_all,
             )
         };
+        let _ = ui::set_visible(&self.widgets.search_scope, search);
+        let _ = ui::set_visible(&self.widgets.search_history, search);
 
         if search {
-            let Some(account_id) = account_id else {
-                return;
-            };
-            match self.app.mailin.search(&account_id, &query, SEARCH_LIMIT) {
-                Ok(results) => {
-                    self.show_messages(results, format!("Results for “{query}”"), false);
+            if unified {
+                // Unified search has no single folder scope: search every
+                // account and merge by date, as the GTK client does.
+                let mut results = Vec::new();
+                let mut failure = None;
+                let account_ids: Vec<mailin_core::AccountId> = self
+                    .state()
+                    .accounts
+                    .iter()
+                    .map(|account| account.id)
+                    .collect();
+                for account in account_ids {
+                    match self
+                        .app
+                        .mailin
+                        .search_messages(&account, None, &query, SEARCH_LIMIT)
+                    {
+                        Ok(mut found) => results.append(&mut found),
+                        Err(error) => failure = Some(error.to_string()),
+                    }
+                }
+                results.sort_by_key(|message| std::cmp::Reverse(message.received_at));
+                results.truncate(SEARCH_LIMIT as usize);
+                if let Some(error) = failure {
+                    self.show_error(&error);
+                }
+                let count = results.len();
+                self.show_messages(results, format!("Results for “{query}” ({count})"), false);
+            } else {
+                let Some(account_id) = account_id else {
+                    return;
+                };
+                let result = if search_all {
+                    self.app.mailin.search(&account_id, &query, SEARCH_LIMIT)
+                } else {
+                    self.app
+                        .mailin
+                        .search_messages(&account_id, folder_id, &query, SEARCH_LIMIT)
+                };
+                match result {
+                    Ok(results) => {
+                        let count = results.len();
+                        self.show_messages(
+                            results,
+                            format!("Results for “{query}” ({count})"),
+                            false,
+                        );
+                    }
+                    Err(error) => self.show_error(&error.to_string()),
+                }
+            }
+            return;
+        }
+
+        if unified {
+            let account_ids: Vec<mailin_core::AccountId> = self
+                .state()
+                .accounts
+                .iter()
+                .map(|account| account.id)
+                .collect();
+            let limit = limit.max(self.page_size()).min(MAX_PAGE);
+            match self.app.mailin.list_messages_virtual(
+                mailin_core::model::VirtualFolderKind::UnifiedInbox,
+                &account_ids,
+                limit,
+                0,
+            ) {
+                Ok(rows) => {
+                    let more = rows.len() as u32 >= limit && limit < MAX_PAGE;
+                    let messages = rows.into_iter().map(|(message, _, _)| message).collect();
+                    self.show_messages(messages, "Unified Inbox".to_owned(), more);
                 }
                 Err(error) => self.show_error(&error.to_string()),
             }
@@ -1122,8 +1609,11 @@ impl MainWindow {
         } else {
             "Select an entry to see actions"
         };
-        let _ = self.widgets.message_empty.SetText(empty_text);
-        let _ = ui::set_visible(&self.widgets.message_empty, empty);
+        if empty {
+            self.set_message_empty(empty_text, "", None);
+        } else {
+            self.hide_message_empty();
+        }
         let _ = ui::set_visible(&self.widgets.load_more, false);
         self.show_reader_empty();
         // Show outbox action buttons, hide regular message buttons
@@ -1308,15 +1798,7 @@ impl MainWindow {
         }
         self.state().messages = messages;
         let _ = self.widgets.list_title.SetText(&title);
-        let searching = self.state().selection.search;
-        let empty_text = if empty && searching {
-            "No results. Try a different search term."
-        } else {
-            "This folder is empty, or has not been synchronized yet."
-        };
-        let _ = self.widgets.message_empty.SetText(empty_text);
-        let _ = ui::set_visible(&self.widgets.message_empty, empty);
-        let _ = ui::set_visible(&self.widgets.message_scroll, !empty);
+        self.set_message_empty_for_list(empty);
         let _ = ui::set_visible(&self.widgets.load_more, more);
         // Show regular message buttons, hide outbox buttons
         let _ = ui::set_visible(&self.widgets.outbox_retry_button, false);
@@ -1551,15 +2033,7 @@ impl MainWindow {
         }
         self.state().messages = flat_messages;
         let _ = self.widgets.list_title.SetText(&title);
-        let searching = self.state().selection.search;
-        let empty_text = if empty && searching {
-            "No results. Try a different search term."
-        } else {
-            "This folder is empty, or has not been synchronized yet."
-        };
-        let _ = self.widgets.message_empty.SetText(empty_text);
-        let _ = ui::set_visible(&self.widgets.message_empty, empty);
-        let _ = ui::set_visible(&self.widgets.message_scroll, !empty);
+        self.set_message_empty_for_list(empty);
         let _ = ui::set_visible(&self.widgets.load_more, more);
         // Show regular message buttons, hide outbox buttons
         let _ = ui::set_visible(&self.widgets.outbox_retry_button, false);
@@ -1598,9 +2072,7 @@ impl MainWindow {
             state.messages.clear();
             state.selection.message = None;
         }
-        let _ = self.widgets.message_empty.SetText("No messages");
-        let _ = ui::set_visible(&self.widgets.message_empty, true);
-        let _ = ui::set_visible(&self.widgets.message_scroll, false);
+        self.set_message_empty("No messages", "", None);
         let _ = ui::set_visible(&self.widgets.load_more, false);
         self.show_reader_empty();
     }
@@ -1616,16 +2088,50 @@ impl MainWindow {
         self.refresh_messages();
     }
 
+    fn refresh_search_history(&self, account: mailin_core::AccountId) {
+        let queries = self
+            .app
+            .mailin
+            .search_history(&account)
+            .into_iter()
+            .map(|entry| entry.query)
+            .collect::<Vec<_>>();
+        self.programmatic.store(true, Ordering::Relaxed);
+        let _ = ui::clear_items(&self.widgets.search_history);
+        let _ = ui::add_combo_item(&self.widgets.search_history, "Recent searches");
+        for query in &queries {
+            let _ = ui::add_combo_item(&self.widgets.search_history, query);
+        }
+        ui::select_index(&self.widgets.search_history, 0);
+        self.programmatic.store(false, Ordering::Relaxed);
+        self.state().search_queries = queries;
+    }
+
     fn run_search(self: &Rc<Self>) {
         let query = ui::text_value(&self.widgets.search).trim().to_owned();
         if query.is_empty() {
             self.clear_search();
             return;
         }
+        let search_all = ui::selected_index(&self.widgets.search_scope) == 1;
+        if let Some(account) = self.state().selection.account {
+            let folder = (!search_all)
+                .then(|| self.state().selection.folder)
+                .flatten();
+            if let Err(error) = self
+                .app
+                .mailin
+                .add_search_history(&account, query.clone(), folder)
+            {
+                tracing::warn!(%error, "could not store the search history");
+            }
+            self.refresh_search_history(account);
+        }
         {
             let mut state = self.state();
             state.selection.search = true;
             state.selection.query = query;
+            state.selection.search_all = search_all;
         }
         self.refresh_messages();
     }
@@ -1636,9 +2142,14 @@ impl MainWindow {
             let was_searching = state.selection.search;
             state.selection.search = false;
             state.selection.query.clear();
+            state.selection.search_all = false;
             was_searching
         };
         if was_searching {
+            self.programmatic.store(true, Ordering::Relaxed);
+            ui::select_index(&self.widgets.search_scope, 0);
+            ui::select_index(&self.widgets.search_history, 0);
+            self.programmatic.store(false, Ordering::Relaxed);
             self.refresh_messages();
         }
     }
@@ -1932,33 +2443,35 @@ impl MainWindow {
         cached.or_else(|| self.app.mailin.message(message_id).ok().flatten())
     }
 
-    // Whether the account behind the current selection trusts `domain` for
-    // remote content. Reads from the store so changes via the account dialog
-    // or the banner's trust button are picked up immediately.
-    fn sender_domain_allowed(&self, domain: &str) -> bool {
-        // Copy the account id out of the state first: the store read must
-        // not run while the state is locked.
-        let account = self.state().selection.account;
-        match account {
-            Some(id) => self
-                .app
-                .mailin
-                .account(&id)
-                .ok()
-                .flatten()
-                .is_some_and(|account| account.remote_domain_allowed(domain)),
-            None => false,
-        }
+    /// Account that owns a message, derived from its folder rather than the
+    /// current selection. This matters in the unified inbox and in search
+    /// results, where the selected account may be none or a different one.
+    fn account_for_message(&self, message_id: MessageId) -> Option<mailin_core::AccountId> {
+        let folder_id = self.header_for(message_id)?.folder_id;
+        self.app
+            .mailin
+            .folder(folder_id)
+            .ok()
+            .flatten()
+            .map(|folder| folder.account_id)
+    }
+
+    // Whether the account behind the open message trusts `domain` for remote
+    // content. Reads from the store so changes via the account dialog or the
+    // banner's trust button are picked up immediately.
+    fn sender_domain_allowed(&self, message_id: MessageId, domain: &str) -> bool {
+        self.account_for_message(message_id)
+            .and_then(|id| self.app.mailin.account(&id).ok().flatten())
+            .is_some_and(|account| account.remote_domain_allowed(domain))
     }
 
     // Persist "always allow" for the sender's domain on the current account
     // and re-render the message with remote content enabled.
     fn trust_current_sender(self: &Rc<Self>) {
-        let (message_id, account_id) = {
-            let state = self.state();
-            (state.selection.message, state.selection.account)
+        let Some(message_id) = self.state().selection.message else {
+            return;
         };
-        let (Some(message_id), Some(account_id)) = (message_id, account_id) else {
+        let Some(account_id) = self.account_for_message(message_id) else {
             return;
         };
         let Some(domain) = self
@@ -2112,7 +2625,7 @@ impl MainWindow {
                         .and_then(|header| header.from_domain().map(str::to_owned));
                     let trusted = sender_domain
                         .as_deref()
-                        .is_some_and(|domain| self.sender_domain_allowed(domain));
+                        .is_some_and(|domain| self.sender_domain_allowed(message_id, domain));
                     let allow_remote = self.app.config().ui.remote_content_enabled
                         || self.state().remote_allowed == Some(message_id)
                         || trusted;
@@ -3729,10 +4242,7 @@ impl MainWindow {
     /// The account wizard's *Remove Account* button is today's removal path;
     /// this direct entry point is kept for parity with the GTK account menu.
     #[allow(dead_code)]
-    fn remove_account(self: &Rc<Self>) {
-        let Some(account_id) = self.state().selection.account else {
-            return;
-        };
+    fn remove_account_id(self: &Rc<Self>, account_id: mailin_core::AccountId) {
         let Some(account) = self
             .state()
             .accounts
@@ -3742,14 +4252,35 @@ impl MainWindow {
         else {
             return;
         };
-        // Deleting the account publishes `AccountsChanged`, which the event
-        // pump turns into a pane refresh on the UI thread.
-        let mailin = Arc::clone(&self.app.mailin);
-        std::thread::spawn(move || {
-            if let Err(error) = mailin.remove_account(&account.id) {
-                tracing::warn!(%error, "could not remove the account");
-            }
-        });
+        let this = Rc::clone(self);
+        self.confirm_destructive(
+            "Remove account?",
+            &format!(
+                "Remove “{}” ({})? This deletes all local data for this account and cannot be undone.",
+                account.display_name, account.email
+            ),
+            "Remove",
+            move || {
+                // Deleting the account publishes `AccountsChanged`, which the
+                // event pump turns into a pane refresh on the UI thread.
+                let mailin = Arc::clone(&this.app.mailin);
+                std::thread::spawn(move || {
+                    if let Err(error) = mailin.remove_account(&account.id) {
+                        tracing::warn!(%error, "could not remove the account");
+                    }
+                });
+            },
+        );
+    }
+
+    /// Kept for parity with the GTK account menu. Today the removal paths are
+    /// Preferences → Accounts and the account wizard.
+    #[allow(dead_code)]
+    fn remove_account(self: &Rc<Self>) {
+        let Some(account_id) = self.state().selection.account else {
+            return;
+        };
+        self.remove_account_id(account_id);
     }
 
     /// Show the keyboard shortcuts help dialog.
@@ -3805,11 +4336,14 @@ impl MainWindow {
             }
         };
         let this = Rc::clone(self);
-        if let Err(error) =
-            crate::preferences::show_preferences(&self.app, &xaml_root, &self.events, move || {
-                this.apply_config()
-            })
-        {
+        let this_remove = Rc::clone(self);
+        if let Err(error) = crate::preferences::show_preferences(
+            &self.app,
+            &xaml_root,
+            &self.events,
+            move || this.apply_config(),
+            move |id| this_remove.remove_account_id(id),
+        ) {
             tracing::error!(%error, "could not show the preferences dialog");
         }
     }
@@ -3825,7 +4359,6 @@ impl MainWindow {
         let mut action_failed = None;
         let mut new_messages = Vec::new();
         let mut outbox_changed = false;
-        let mut sync_status_update = None;
 
         {
             let mut events = events.lock().unwrap_or_else(|error| error.into_inner());
@@ -3848,11 +4381,16 @@ impl MainWindow {
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                     Ok(Event::OutboxChanged) => outbox_changed = true,
                     Ok(Event::AccountError {
+                        account_id,
                         message,
                         retryable,
                         details,
-                        ..
-                    }) => account_error = Some((message, details, retryable)),
+                    }) => {
+                        self.account_errors
+                            .borrow_mut()
+                            .insert(account_id, message.clone());
+                        account_error = Some((message, details, retryable));
+                    }
                     Ok(Event::ScheduledActionRan { .. }) => {
                         // A scheduled action moved messages around: refresh the
                         // folders and the message list.
@@ -3868,13 +4406,18 @@ impl MainWindow {
                     Ok(Event::SyncStatusChanged { account_id, status }) => {
                         // The button follows every account's sync state, so a
                         // sync of a background account also disables it.
-                        self.update_syncing_accounts(
-                            account_id,
-                            status == mailin_core::model::SyncStatus::Syncing,
-                        );
-                        let state = self.state();
-                        if state.selection.account == Some(account_id) {
-                            sync_status_update = Some(status);
+                        let syncing = status == mailin_core::model::SyncStatus::Syncing;
+                        self.update_syncing_accounts(account_id, syncing);
+                        {
+                            let mut started = self.sync_started.borrow_mut();
+                            if syncing {
+                                started.entry(account_id).or_insert_with(format::now_unix);
+                            } else {
+                                started.remove(&account_id);
+                            }
+                        }
+                        if status != mailin_core::model::SyncStatus::Error {
+                            self.account_errors.borrow_mut().remove(&account_id);
                         }
                     }
                     Err(TryRecvError::Empty) => break,
@@ -3939,42 +4482,28 @@ impl MainWindow {
         } else if let Some((message, details, retryable)) = action_failed {
             self.show_error_with_details(&message, &details, retryable);
         }
-        if let Some(status) = sync_status_update {
-            let (text, brush) = match status {
-                mailin_core::model::SyncStatus::Idle => {
-                    ("Idle", design_tokens::tokens().text_muted_brush().ok())
-                }
-                mailin_core::model::SyncStatus::Syncing => {
-                    ("Syncing…", design_tokens::tokens().accent_brush().ok())
-                }
-                mailin_core::model::SyncStatus::Connected => {
-                    ("Connected", design_tokens::tokens().success_brush().ok())
-                }
-                mailin_core::model::SyncStatus::Offline => {
-                    ("Offline", design_tokens::tokens().warning_brush().ok())
-                }
-                mailin_core::model::SyncStatus::Error => {
-                    ("Error", design_tokens::tokens().error_brush().ok())
-                }
-            };
-            let _ = self.widgets.sync_status.SetText(text);
-            if let Some(brush) = brush {
-                let _ = self.widgets.sync_status.SetForeground(&brush);
-            }
-        }
+        self.update_sync_status_chip();
     }
 
     // -------------------------------------------------------------- actions
 
     fn sync_now(&self) {
-        let Some(account) = self.state().selection.account else {
-            return;
+        let state = self.state();
+        let account_ids: Vec<mailin_core::AccountId> = if state.selection.unified {
+            state.accounts.iter().map(|account| account.id).collect()
+        } else {
+            state.selection.account.into_iter().collect()
         };
-        // The sync button stays disabled until the engine reports the
-        // account as idle again, so a second click cannot queue the same
-        // sync twice.
+        drop(state);
+        if account_ids.is_empty() {
+            return;
+        }
+        // The sync button stays disabled until every queued account is idle
+        // again, so a second click cannot queue duplicate syncs.
         self.set_syncing(true);
-        self.app.engine.sync_account(account);
+        for account in account_ids {
+            self.app.engine.sync_account(account);
+        }
     }
 
     /// Enable or disable the Sync button and show the progress in the
@@ -4148,27 +4677,38 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let account_combo = ui::combo(&[], 0, Some("Switch account"))?;
     ui::min_width(&account_combo, 220.0)?;
 
-    // Hamburger menu button (visible on mobile/tablet)
-    let hamburger = ui::button("☰", Some("Menu"), Some("Open main menu"))?;
+    // Hamburger menu button (visible on mobile/tablet). Segoe Fluent glyph,
+    // never a text character that could render as emoji.
+    let hamburger = ui::icon_only_button(design_tokens::glyph::MENU, "Menu")?;
     ui::min_width(&hamburger, 40.0)?;
     ui::set_visible(&hamburger, false)?; // Hidden by default (desktop)
 
-    let add_account = ui::button(
+    let add_account = ui::icon_button(
+        design_tokens::glyph::ADD,
         "Add account",
-        Some("Add account"),
+        "Add account",
         Some("Add a new mail account (Ctrl+Shift+A)"),
     )?;
-    let edit_account = ui::button(
+    let edit_account = ui::icon_button(
+        design_tokens::glyph::SETTINGS,
         "Edit account",
-        Some("Edit account"),
+        "Edit account",
         Some("Edit the selected account"),
     )?;
-    let compose = ui::button(
+    let compose = ui::icon_button(
+        design_tokens::glyph::COMPOSE,
         "Compose",
-        Some("Compose"),
+        "Compose",
         Some("Create a new message (Ctrl+N)"),
     )?;
-    let sync = ui::button("Sync", Some("Sync"), Some("Synchronize mail (F5)"))?;
+    // The only primary action in the toolbar: one accent, one obvious start.
+    ui::accent_button(&compose)?;
+    let sync = ui::icon_button(
+        design_tokens::glyph::SYNC,
+        "Sync",
+        "Sync",
+        Some("Synchronize mail (F5)"),
+    )?;
     let sync_status = ui::text("Idle")?;
     ui::margin_left(&sync_status, 8.0)?;
     ui::vertical_alignment_center(&sync_status)?;
@@ -4181,7 +4721,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::stretch_horizontal(&spacer)?;
     let search = ui::text_box("Search mail", Some("Search mail"))?;
     ui::min_width(&search, 220.0)?;
-    let search_button = ui::button("Search", Some("Search"), Some("Search messages (Ctrl+F)"))?;
+    let search_button = ui::icon_only_button(design_tokens::glyph::SEARCH, "Search")?;
 
     ui::append(&toolbar, &hamburger)?;
     ui::append(&toolbar, &title)?;
@@ -4271,9 +4811,18 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::margin(&sidebar, 10.0, 8.0, 6.0, 8.0)?;
     let folder_heading = ui::subheading("Folders")?;
     ui::append(&sidebar, &folder_heading)?;
-    let folder_empty = ui::text("Folders appear after the first synchronization.")?;
-    ui::set_visible(&folder_empty, true)?;
-    ui::append(&sidebar, &folder_empty)?;
+    let folder_status_panel = ui::stack(Orientation::Vertical, 8.0)?;
+    let folder_empty = ui::text("Preparing folders…")?;
+    ui::set_live_region(&folder_empty)?;
+    ui::append(&folder_status_panel, &folder_empty)?;
+    let folder_status_detail = ui::text("Folders appear after the first synchronization.")?;
+    ui::append(&folder_status_panel, &folder_status_detail)?;
+    let folder_status_action =
+        ui::button("Sync now", Some("Sync now"), Some("Synchronize folders"))?;
+    ui::horizontal_alignment_center(&folder_status_action)?;
+    ui::set_visible(&folder_status_action, false)?;
+    ui::append(&folder_status_panel, &folder_status_action)?;
+    ui::append(&sidebar, &folder_status_panel)?;
     let folder_list = ui::stack_xs(Orientation::Vertical)?;
     let folder_scroller = ui::scroll(&folder_list)?;
     ui::append(&sidebar, &folder_scroller)?;
@@ -4288,10 +4837,29 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::star_row(&list_pane)?;
     ui::auto_row(&list_pane)?;
     ui::margin_md(&list_pane)?;
+    let list_header = ui::stack_sm(Orientation::Horizontal)?;
+    ui::margin(&list_header, 6.0, 0.0, 6.0, 4.0)?;
     let list_title = ui::subheading("Messages")?;
-    ui::margin(&list_title, 6.0, 0.0, 6.0, 4.0)?;
-    ui::set_row(&list_title, 0)?;
-    ui::append(&list_pane, &list_title)?;
+    ui::stretch_horizontal(&list_title)?;
+    ui::append(&list_header, &list_title)?;
+    let list_updating = ui::text("Updating…")?;
+    ui::set_live_region(&list_updating)?;
+    ui::set_visible(&list_updating, false)?;
+    ui::append(&list_header, &list_updating)?;
+    let search_scope = ui::combo(
+        &["This folder", "All mail"],
+        0,
+        Some("Search scope: this folder or all mail"),
+    )?;
+    ui::min_width(&search_scope, 110.0)?;
+    ui::set_visible(&search_scope, false)?;
+    ui::append(&list_header, &search_scope)?;
+    let search_history = ui::combo(&["Recent searches"], 0, Some("Recent searches"))?;
+    ui::min_width(&search_history, 120.0)?;
+    ui::set_visible(&search_history, false)?;
+    ui::append(&list_header, &search_history)?;
+    ui::set_row(&list_header, 0)?;
+    ui::append(&list_pane, &list_header)?;
     // The bulk bar sits above the list and stays hidden until a row is
     // ticked. One dropdown keeps it a single row tall even in a narrow pane.
     let bulk_bar = ui::stack_sm(Orientation::Horizontal)?;
@@ -4324,10 +4892,21 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let message_scroll = ui::scroll(&message_list)?;
     ui::set_row(&message_scroll, 2)?;
     ui::append(&list_pane, &message_scroll)?;
+    let message_empty_panel = ui::stack(Orientation::Vertical, 12.0)?;
+    ui::margin(&message_empty_panel, 12.0, 24.0, 12.0, 12.0)?;
     let message_empty = ui::text("This folder is empty, or has not been synchronized yet.")?;
-    ui::margin(&message_empty, 6.0, 12.0, 6.0, 6.0)?;
-    ui::set_row(&message_empty, 2)?;
-    ui::append(&list_pane, &message_empty)?;
+    ui::set_live_region(&message_empty)?;
+    ui::append(&message_empty_panel, &message_empty)?;
+    let message_empty_action = ui::button(
+        "Sync now",
+        Some("Sync now"),
+        Some("Synchronize mail for this account"),
+    )?;
+    ui::horizontal_alignment_center(&message_empty_action)?;
+    ui::set_visible(&message_empty_action, false)?;
+    ui::append(&message_empty_panel, &message_empty_action)?;
+    ui::set_row(&message_empty_panel, 2)?;
+    ui::append(&list_pane, &message_empty_panel)?;
     let load_more = ui::button("Load more", Some("Load more"), Some("Load more messages"))?;
     ui::set_visible(&load_more, false)?;
     ui::set_row(&load_more, 3)?;
@@ -4368,24 +4947,35 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         Some("Show HTML"),
         Some("Show the original HTML body"),
     )?;
-    let reply_button = ui::button("Reply", Some("Reply"), Some("Reply to sender (Ctrl+R)"))?;
-    let reply_all_button = ui::button(
-        "Reply all",
-        Some("Reply all"),
-        Some("Reply to all recipients (Ctrl+Shift+R)"),
+    // Icon-only reader actions: tooltips carry the shortcut, accessible names
+    // carry the meaning. Text labels made this bar overflow narrow panes.
+    let reply_button = ui::icon_only_button(design_tokens::glyph::SENT, "Reply")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(&reply_button, "Reply to sender (Ctrl+R)")?;
+    let reply_all_button = ui::icon_only_button(design_tokens::glyph::SENT, "Reply all")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(
+        &reply_all_button,
+        "Reply to all recipients (Ctrl+Shift+R)",
     )?;
-    let forward_button = ui::button("Forward", Some("Forward"), Some("Forward message"))?;
+    let forward_button = ui::icon_only_button(design_tokens::glyph::FORWARD, "Forward")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(&forward_button, "Forward message")?;
     let actions_spacer = ui::text("")?;
     ui::stretch_horizontal(&actions_spacer)?;
-    let flag_button = ui::button("Star", Some("Star"), Some("Toggle star/flag"))?;
-    let read_button = ui::button("Mark read", Some("Mark read"), Some("Toggle read status"))?;
-    let archive_button = ui::button(
-        "Archive",
-        Some("Archive"),
-        Some("Archive message (Ctrl+Shift+E)"),
+    let flag_button = ui::icon_only_button(design_tokens::glyph::STAR, "Star")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(&flag_button, "Toggle star/flag")?;
+    let read_button = ui::icon_only_button(design_tokens::glyph::INBOX, "Mark read")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(&read_button, "Toggle read status")?;
+    let archive_button = ui::icon_only_button(design_tokens::glyph::ARCHIVE, "Archive")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(
+        &archive_button,
+        "Archive message (Ctrl+Shift+E)",
     )?;
-    let trash_button = ui::button("Trash", Some("Trash"), Some("Move to trash (Delete)"))?;
-    let junk_button = ui::button("Junk", Some("Junk"), Some("Mark as junk (Ctrl+Shift+J)"))?;
+    let trash_button = ui::icon_only_button(design_tokens::glyph::TRASH, "Trash")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(&trash_button, "Move to trash (Delete)")?;
+    let junk_button = ui::icon_only_button(design_tokens::glyph::JUNK, "Junk")?;
+    mailin_winui_sys::AutomationProperties::SetHelpText(
+        &junk_button,
+        "Mark as junk (Ctrl+Shift+J)",
+    )?;
     let outbox_retry_button = ui::button("Retry", Some("Retry"), Some("Retry sending"))?;
     let outbox_discard_button = ui::button("Discard", Some("Discard"), Some("Discard message"))?;
     let outbox_edit_button = ui::button("Edit", Some("Edit"), Some("Edit message"))?;
@@ -4647,6 +5237,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         dialogs: std::cell::RefCell::new(Vec::new()),
         dialog_events: ui::Revokers::default(),
         error_details: std::cell::RefCell::new(String::new()),
+        account_errors: std::cell::RefCell::new(std::collections::HashMap::new()),
+        sync_started: std::cell::RefCell::new(std::collections::HashMap::new()),
+        sync_clock_timer: std::cell::RefCell::new(None),
+        empty_action: std::cell::Cell::new(EmptyAction::None),
         checkboxes: std::cell::RefCell::new(Vec::new()),
         checkboxes_by_id: std::cell::RefCell::new(HashMap::new()),
         rows_by_id: std::cell::RefCell::new(HashMap::new()),
@@ -4655,6 +5249,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         syncing_accounts: std::cell::RefCell::new(std::collections::HashSet::new()),
         widgets: Widgets {
             window: window.clone(),
+            theme_root: root.clone().cast()?,
             title,
             banner_row,
             banner,
@@ -4667,18 +5262,26 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             sync,
             search,
             search_button,
+            search_scope,
+            search_history,
             welcome,
             welcome_add,
             mail,
             folder_list,
+            folder_status_panel,
             folder_empty,
+            folder_status_detail,
+            folder_status_action,
             list_title,
+            list_updating,
             bulk_bar,
             bulk_count,
             bulk_actions,
             message_scroll,
             message_list,
+            message_empty_panel,
             message_empty,
+            message_empty_action,
             load_more,
             reader_empty,
             reader_content,
@@ -4738,6 +5341,30 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             }
         }
     })?);
+
+    // Refresh the sync chip on a slow cadence while a sync is in flight, so
+    // elapsed time and the "taking longer than usual" hint actually appear
+    // even when the engine emits no further events.
+    if let Ok(queue) = DispatcherQueue::GetForCurrentThread()
+        && let Ok(timer) = queue.CreateTimer()
+    {
+        let interval = windows_time::TimeSpan {
+            duration: 10 * 10_000_000,
+        };
+        if timer.SetInterval(interval).is_ok() {
+            let _ = timer.SetIsRepeating(true);
+            let weak = Rc::downgrade(&this);
+            if let Ok(revoker) = timer.Tick(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    this.update_sync_status_chip();
+                }
+            }) {
+                this.events.keep(revoker);
+            }
+            let _ = timer.Start();
+            *this.sync_clock_timer.borrow_mut() = Some(timer);
+        }
+    }
 
     // Keyboard accelerators, attached to the content root so they fire
     // wherever the focus is inside the window.
@@ -5178,13 +5805,37 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
                     return;
                 }
                 let index = ui::selected_index(&this.widgets.account_combo);
-                let account = this.state().accounts.get(index).map(|account| account.id);
-                if let Some(account) = account {
-                    this.select_account(account);
+                if index == 0 && this.unified_inbox_visible() {
+                    this.enter_unified_inbox();
+                    return;
+                }
+                let account_index = index - usize::from(this.unified_inbox_visible());
+                if let Some(account) = this.state().accounts.get(account_index) {
+                    this.select_account(account.id);
                 }
             }
         })?);
 
+    this.events
+        .keep(ui::on_click(&this.widgets.message_empty_action, {
+            let this = Rc::clone(this);
+            move || match this.empty_action.get() {
+                EmptyAction::ClearSearch => this.clear_search(),
+                EmptyAction::Retry => {
+                    this.show_banner("Retrying…");
+                    this.sync_now();
+                }
+                EmptyAction::None => {}
+            }
+        })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.folder_status_action, {
+            let this = Rc::clone(this);
+            move || {
+                this.show_banner("Retrying…");
+                this.sync_now();
+            }
+        })?);
     this.events.keep(ui::on_click(&this.widgets.add_account, {
         let this = Rc::clone(this);
         move || this.add_account()
@@ -5221,6 +5872,34 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
         let this = Rc::clone(this);
         move || this.run_search()
     })?);
+    this.events
+        .keep(ui::on_selection_changed(&this.widgets.search_scope, {
+            let this = Rc::clone(this);
+            move || {
+                if this.programmatic.load(Ordering::Relaxed) || !this.state().selection.search {
+                    return;
+                }
+                this.run_search();
+            }
+        })?);
+    this.events
+        .keep(ui::on_selection_changed(&this.widgets.search_history, {
+            let this = Rc::clone(this);
+            move || {
+                if this.programmatic.load(Ordering::Relaxed) || !this.state().selection.search {
+                    return;
+                }
+                let index = ui::selected_index(&this.widgets.search_history);
+                let Some(query) = index
+                    .checked_sub(1)
+                    .and_then(|index| this.state().search_queries.get(index).cloned())
+                else {
+                    return;
+                };
+                let _ = ui::set_text_value(&this.widgets.search, &query);
+                this.run_search();
+            }
+        })?);
     this.events
         .keep(ui::on_selection_changed(&this.widgets.bulk_actions, {
             let this = Rc::clone(this);
@@ -5452,15 +6131,16 @@ fn signature_label(status: mailin_core::SignatureStatus) -> &'static str {
 }
 
 fn role_marker(role: FolderRole) -> &'static str {
+    use design_tokens::glyph;
     match role {
-        FolderRole::Inbox => "●",
-        FolderRole::Sent => "→",
-        FolderRole::Drafts => "✎",
-        FolderRole::Trash => "🗑",
-        FolderRole::Junk => "!",
-        FolderRole::Archive => "▣",
-        FolderRole::Snoozed => "⏰",
-        FolderRole::Other => "•",
+        FolderRole::Inbox => glyph::INBOX,
+        FolderRole::Sent => glyph::SENT,
+        FolderRole::Drafts => glyph::DRAFTS,
+        FolderRole::Trash => glyph::TRASH,
+        FolderRole::Junk => glyph::JUNK,
+        FolderRole::Archive => glyph::ARCHIVE,
+        FolderRole::Snoozed => glyph::SENT,
+        FolderRole::Other => glyph::FOLDER,
     }
 }
 
@@ -5500,9 +6180,9 @@ fn folder_row(folder: &Folder, this: &Rc<MainWindow>) -> Result<Button> {
     let row = ui::stack(Orientation::Horizontal, 8.0)?;
     ui::padding(&row, 6.0, 6.0, 6.0, 6.0)?;
     let marker = role_marker(folder.role);
-    let marker_block = ui::text(marker)?;
+    let marker_block = ui::icon(marker)?;
     // The role glyph is decoration; name it so it is announced as the
-    // folder kind instead of "black circle".
+    // folder kind instead of a meaningless icon name.
     AutomationProperties::SetName(&marker_block, role_name(folder.role))?;
     ui::append(&row, &marker_block)?;
     let name = ui::text(&folder_title(folder))?;
@@ -5663,10 +6343,46 @@ fn message_row(
     };
 
     let column = ui::stack(Orientation::Vertical, spacing)?;
+
+    // Leading column: an unread dot and initials avatar, matching the GTK
+    // row anatomy so both clients read the same way at a glance.
+    let content = ui::stack_sm(Orientation::Horizontal)?;
+    let leading = ui::stack_xs(Orientation::Horizontal)?;
+    ui::vertical_alignment_center(&leading)?;
+    let dot = ui::text("●")?;
+    ui::set_visible(&dot, !seen)?;
+    if let Ok(brush) = design_tokens::tokens().accent_brush() {
+        let _ = ui::set_foreground(&dot, &brush);
+    }
+    ui::append(&leading, &dot)?;
+    if density != MessageListDensity::Compact {
+        let raw = message
+            .from_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .or(message.from_addr.as_deref())
+            .unwrap_or("?");
+        let initials: String = raw
+            .split_whitespace()
+            .take(2)
+            .filter_map(|part| part.chars().next())
+            .collect();
+        let avatar = ui::text(if initials.is_empty() { "?" } else { &initials })?;
+        avatar.SetFontWeight(design_tokens::tokens().semibold_weight())?;
+        ui::horizontal_alignment_center(&avatar)?;
+        let avatar_element: mailin_winui_sys::FrameworkElement = avatar.cast()?;
+        avatar_element.SetWidth(28.0)?;
+        if let Ok(brush) = design_tokens::tokens().accent_brush() {
+            let _ = ui::set_foreground(&avatar, &brush);
+        }
+        ui::append(&leading, &avatar)?;
+    }
+    ui::append(&content, &leading)?;
+
     // Indent by depth for threaded view
     let indent = (depth as f64) * 20.0;
     ui::padding(
-        &column,
+        &content,
         vertical_padding,
         horizontal_padding + indent,
         vertical_padding,
@@ -5680,7 +6396,8 @@ fn message_row(
     let mut chevron_toggle: Option<ToggleButton> = None;
     if is_thread_root {
         let chevron = ToggleButton::new().context("could not create the thread toggle")?;
-        let content: windows_core::IInspectable = ui::text("▼")?.cast()?;
+        let content: windows_core::IInspectable =
+            ui::icon(design_tokens::glyph::CHEVRON_DOWN)?.cast()?;
         chevron
             .cast::<mailin_winui_sys::IContentControl>()
             .context("could not cast the thread toggle")?
@@ -5724,12 +6441,12 @@ fn message_row(
 
     if message.is_flagged() {
         // A star glyph is read aloud as "black star"; name it instead.
-        let star = ui::text("★")?;
+        let star = ui::icon(design_tokens::glyph::STAR)?;
         AutomationProperties::SetName(&star, "Starred")?;
         ui::append(&line, &star)?;
     }
     if message.has_attachments {
-        let clip = ui::text("📎")?;
+        let clip = ui::icon(design_tokens::glyph::ATTACH)?;
         AutomationProperties::SetName(&clip, "Has attachments")?;
         ui::append(&line, &clip)?;
     }
@@ -5750,8 +6467,9 @@ fn message_row(
         }
     }
 
+    ui::append(&content, &column)?;
     let button = ui::content_button(
-        &column,
+        &content,
         Some(&format!(
             "{}{}{}{} — {}",
             if seen { "" } else { "Unread. " },

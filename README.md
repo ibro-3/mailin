@@ -22,16 +22,16 @@ never stores passwords outside the OS keyring.
   attachments, compose/reply/forward, templates, contact autocomplete, PGP,
   unified inbox for multiple accounts, desktop notifications, Flatpak package.
 - **Windows**: WinUI 3 window, account wizard, WebView2 reader, attachments,
-  compose, search, toast notifications and three installable artifact types
-  (zip, unsigned MSIX, Inno Setup installer).
+  compose, search, unified inbox, toast notifications and three installable
+  artifact types (zip, unsigned MSIX, Inno Setup installer).
 - **Both**: OS keyring credentials, offline SQLite cache, accessibility labels
   and keyboard shortcuts, rolling logs and a recovery path for unopenable
   local data.
 
 ## Known limitations
 
-- Windows has no Unified Inbox in this release, and bulk selection uses
-  checkboxes instead of GTK's multi-select list.
+- On Windows, bulk selection uses checkboxes instead of GTK's multi-select
+  list, and the message list is not incrementally virtualized yet.
 - The Windows MSIX and installer are unsigned: SmartScreen warns on first run.
   Verify the published `SHA256SUMS` and build attestations.
 - Rules, CalDAV/calendar, snooze, virtual folders, a plugin marketplace,

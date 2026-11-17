@@ -14,6 +14,129 @@ use mailin_core::{Config, MessageListDensity, Paths, QuickAction, Theme, ThreadM
 
 use crate::app::{AppState, apply_theme};
 
+/// Fill the Accounts page with actionable account rows. Listing accounts
+/// touches the keyring, so it runs on a worker; the sync status is a cheap
+/// in-memory read from the engine on the UI thread.
+fn populate_accounts_group(group: adw::PreferencesGroup, app: Rc<AppState>, window: gtk::Window) {
+    let mailin = std::sync::Arc::clone(&app.mailin);
+    crate::background::spawn_result(
+        move || mailin.list_accounts().map_err(|error| error.to_string()),
+        move |result| {
+            // Keep a handle to the page: the dialog may have closed while the
+            // worker was running, in which case there is nothing to update.
+            let accounts = match result {
+                Ok(Ok(accounts)) => accounts,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "could not list accounts in Preferences");
+                    return;
+                }
+                Err(failed) => {
+                    tracing::warn!(message = %failed.message, "account list worker failed");
+                    return;
+                }
+            };
+            while let Some(row) = group.first_child() {
+                if let Some(row) = row.downcast_ref::<adw::ActionRow>() {
+                    group.remove(row);
+                } else {
+                    break;
+                }
+            }
+            if accounts.is_empty() {
+                group.add(
+                    &adw::ActionRow::builder()
+                        .title("No accounts yet")
+                        .subtitle("Add an account to read and send mail.")
+                        .build(),
+                );
+                return;
+            }
+            for account in accounts {
+                let status = app.engine.sync_status(&account.id);
+                let status_text = match status {
+                    mailin_core::model::SyncStatus::Idle => "Idle",
+                    mailin_core::model::SyncStatus::Syncing => "Syncing…",
+                    mailin_core::model::SyncStatus::Connected => "Connected",
+                    mailin_core::model::SyncStatus::Offline => "Offline",
+                    mailin_core::model::SyncStatus::Error => "Error",
+                };
+                let row = adw::ActionRow::builder()
+                    .title(account.email.clone())
+                    .subtitle(format!("{} · {}", account.display_name, status_text))
+                    .build();
+                let edit = gtk::Button::with_label("Edit");
+                edit.add_css_class("flat");
+                edit.set_valign(gtk::Align::Center);
+                {
+                    use gtk::accessible::Property;
+                    edit.update_property(&[Property::Label(&format!(
+                        "Edit account {}",
+                        account.email
+                    ))]);
+                }
+                let remove = gtk::Button::with_label("Remove");
+                remove.add_css_class("flat");
+                remove.add_css_class("destructive-action");
+                remove.set_valign(gtk::Align::Center);
+                {
+                    use gtk::accessible::Property;
+                    remove.update_property(&[Property::Label(&format!(
+                        "Remove account {}",
+                        account.email
+                    ))]);
+                }
+                row.add_suffix(&edit);
+                row.add_suffix(&remove);
+
+                let edit_app = Rc::clone(&app);
+                let edit_account = account.clone();
+                let edit_window = window.clone();
+                let edit_group = group.clone();
+                edit.connect_clicked(move |_| {
+                    crate::account_dialog::present(
+                        &edit_window,
+                        Rc::clone(&edit_app),
+                        crate::account_dialog::AccountDialogMode::Edit,
+                        Some(edit_account.clone()),
+                        {
+                            let group = edit_group.clone();
+                            let app = Rc::clone(&edit_app);
+                            let window = edit_window.clone();
+                            move |_| {
+                                populate_accounts_group(
+                                    group.clone(),
+                                    Rc::clone(&app),
+                                    window.clone(),
+                                );
+                            }
+                        },
+                    );
+                });
+
+                let remove_app = Rc::clone(&app);
+                let remove_account = account.clone();
+                let remove_window = window.clone();
+                let remove_group = group.clone();
+                remove.connect_clicked(move |_| {
+                    crate::dialogs::confirm_remove_account(
+                        Some(&remove_window),
+                        std::sync::Arc::clone(&remove_app.mailin),
+                        &remove_account,
+                        {
+                            let group = remove_group.clone();
+                            let app = Rc::clone(&remove_app);
+                            let window = remove_window.clone();
+                            move || populate_accounts_group(group, app, window)
+                        },
+                        |error| tracing::warn!(%error, "could not remove account from Preferences"),
+                    );
+                });
+                group.add(&row);
+            }
+        },
+    );
+}
+
 /// Show the preferences dialog.
 ///
 /// `on_saved` runs after a valid configuration has been persisted and
@@ -377,9 +500,54 @@ pub fn show_preferences(
     accounts_page.set_icon_name(Some("mail-account-symbolic"));
 
     let account_group = adw::PreferencesGroup::builder()
-        .title("Per-Account Settings")
-        .description("Account-specific settings (signatures, trusted senders, templates, contacts) are managed in the main window’s account menu. OpenPGP keys are managed on the Encryption page.")
+        .title("Your accounts")
+        .description("Add, edit or remove accounts. Signatures, trusted senders, templates and contacts are edited in the account dialog; OpenPGP keys are managed on the Encryption page.")
         .build();
+    let accounts_window = parent_window.clone().or_else(|| {
+        parent
+            .as_ref()
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok())
+    });
+    if let Some(window) = accounts_window {
+        populate_accounts_group(account_group.clone(), Rc::clone(app), window.clone());
+        let add_group = adw::PreferencesGroup::new();
+        let add = gtk::Button::with_label("Add Account…");
+        add.add_css_class("suggested-action");
+        add.add_css_class("pill");
+        add.set_halign(gtk::Align::Center);
+        let add_app = Rc::clone(app);
+        let add_window = window.clone();
+        let add_group_for_callback = account_group.clone();
+        add.connect_clicked(move |_| {
+            crate::account_dialog::present(
+                &add_window,
+                Rc::clone(&add_app),
+                crate::account_dialog::AccountDialogMode::Add,
+                None,
+                {
+                    let group = add_group_for_callback.clone();
+                    let app = Rc::clone(&add_app);
+                    let window = add_window.clone();
+                    move |_| populate_accounts_group(group.clone(), Rc::clone(&app), window.clone())
+                },
+            );
+        });
+        add_group.add(
+            &adw::ActionRow::builder()
+                .title("Need another mailbox?")
+                .subtitle("Add an IMAP account with password or OAuth2 sign-in.")
+                .build(),
+        );
+        // Place the button on the row itself using a custom suffix widget.
+        if let Some(row) = add_group
+            .first_child()
+            .and_then(|w| w.downcast::<adw::ActionRow>().ok())
+        {
+            row.add_suffix(&add);
+        }
+        accounts_page.add(&add_group);
+    }
     accounts_page.add(&account_group);
     dialog.add(&accounts_page);
 

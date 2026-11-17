@@ -129,6 +129,36 @@ impl Spacing {
     }
 }
 
+/// Glyphs from the Segoe Fluent Icons font, which ships with Windows 11 and
+/// WinUI. Stable private-use code points keep icon-only buttons crisp at any
+/// DPI and avoid the emoji rendering that made the first shell look ad hoc.
+/// Every glyph has an accessible name supplied by its caller.
+pub mod glyph {
+    pub const MENU: &str = "\u{E700}"; // List
+    pub const COMPOSE: &str = "\u{E70F}"; // Edit
+    pub const SYNC: &str = "\u{E72C}"; // Refresh
+    pub const SEARCH: &str = "\u{E721}"; // ZoomIn / search
+    pub const MORE: &str = "\u{E712}"; // More
+    pub const SETTINGS: &str = "\u{E713}"; // Settings
+    pub const ADD: &str = "\u{E710}"; // Add
+    pub const CHEVRON_DOWN: &str = "\u{E70D}";
+    pub const CHEVRON_RIGHT: &str = "\u{E76C}";
+    pub const STAR: &str = "\u{E734}";
+    pub const ATTACH: &str = "\u{E723}";
+    pub const INBOX: &str = "\u{E8BD}";
+    pub const SENT: &str = "\u{E724}";
+    pub const FORWARD: &str = "\u{E72A}";
+    pub const DRAFTS: &str = "\u{E8A5}"; // Document
+    pub const TRASH: &str = "\u{E74D}";
+    pub const JUNK: &str = "\u{E733}"; // Blocked
+    pub const ARCHIVE: &str = "\u{E7B8}";
+    pub const FOLDER: &str = "\u{E8B7}";
+}
+
+/// Icon font stack. Segoe Fluent Icons ships with Windows 11; the MDL2 font
+/// covers the same E7xx code points on Windows 10, so the glyphs still render.
+pub const ICON_FONT: &str = "Segoe Fluent Icons, Segoe MDL2 Assets";
+
 #[derive(Debug, Clone, Copy)]
 pub struct Typography {
     pub caption_size: f64,
@@ -137,6 +167,7 @@ pub struct Typography {
     pub h3_size: f64,
     pub h2_size: f64,
     pub h1_size: f64,
+    pub icon_size: f64,
     pub weight_semibold: u16,
     pub weight_bold: u16,
 }
@@ -150,6 +181,7 @@ impl Typography {
             h3_size: 18.0,
             h2_size: 20.0,
             h1_size: 24.0,
+            icon_size: 16.0,
             weight_semibold: 600,
             weight_bold: 700,
         }
@@ -249,6 +281,10 @@ impl DesignTokens {
         self.solid_brush(self.colors.accent)
     }
     #[cfg(windows)]
+    pub fn on_accent_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
+        self.solid_brush(self.colors.on_accent)
+    }
+    #[cfg(windows)]
     pub fn success_brush(&self) -> anyhow::Result<mailin_winui_sys::SolidColorBrush> {
         self.solid_brush(self.colors.success)
     }
@@ -326,9 +362,9 @@ pub fn apply_theme(mode: ThemeMode) {
 /// Apply the theme stored in the configuration.
 ///
 /// This has to run before the widgets are built: a control captures its
-/// brushes when it is created, so a theme that changes later only reaches
-/// the controls created afterwards. The preferences therefore say that a
-/// theme change takes effect after a restart.
+/// brushes when it is created. The main window also switches its root
+/// `RequestedTheme` live, so system-styled controls recolor immediately;
+/// only controls with custom brushes keep their palette until rebuilt.
 #[cfg(windows)]
 pub fn apply_config_theme(theme: mailin_core::Theme) {
     let mode = match theme {

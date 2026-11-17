@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mailin_core::{Config, MessageListDensity, Paths, QuickAction, Theme};
+use mailin_core::{AccountId, Config, MessageListDensity, Paths, QuickAction, Theme};
 use mailin_winui_sys::{
     Button, ComboBox, ContentDialog, ContentDialogButton, StackPanel, ToggleSwitch,
 };
@@ -57,7 +57,10 @@ pub fn show_preferences(
     xaml_root: &mailin_winui_sys::XamlRoot,
     events: &ui::Revokers,
     on_saved: impl Fn() + 'static,
+    on_remove_account: impl Fn(AccountId) + 'static,
 ) -> Result<()> {
+    let on_saved: Arc<dyn Fn()> = Arc::new(on_saved);
+    let on_remove_account: std::rc::Rc<dyn Fn(AccountId)> = std::rc::Rc::new(on_remove_account);
     let config = Arc::clone(&state.config);
     let paths = Paths::discover().context("could not locate the configuration directory")?;
 
@@ -126,7 +129,13 @@ pub fn show_preferences(
     let (sync_panel, sync) =
         create_sync_section(&config.read().unwrap_or_else(|err| err.into_inner()))?;
     ui::append(&main_panel, &sync_panel)?;
-    let accounts_panel = create_accounts_section()?;
+    let accounts_panel = create_accounts_section(
+        state,
+        xaml_root,
+        events,
+        Arc::clone(&on_saved),
+        std::rc::Rc::clone(&on_remove_account),
+    )?;
     ui::append(&main_panel, &accounts_panel)?;
     let encryption_panel = create_encryption_section(state, events)?;
     ui::append(&main_panel, &encryption_panel)?;
@@ -182,7 +191,6 @@ pub fn show_preferences(
 
     // Wire the reset-all-preferences button. Confirmation first; on success
     // every preference is replaced by the defaults, installed and saved.
-    let on_saved = Arc::new(on_saved);
     events.keep(ui::on_click(&reset_all, {
         let dialog = dialog.clone();
         let state = Arc::clone(state);
@@ -379,8 +387,9 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
     ui::append(
         &panel,
         &ui::body_text(
-            "Theme changes apply to new controls immediately; restart Mailin to \
-             theme the whole window. Windows high contrast always overrides the theme.",
+            "Theme changes apply to the window immediately. Controls with a custom \
+             color may keep their old palette until reopened; Windows high contrast \
+             always overrides the theme.",
         )?,
     )?;
 
@@ -633,13 +642,128 @@ fn create_sync_section(config: &Config) -> Result<(StackPanel, SyncRows)> {
     ))
 }
 
-fn create_accounts_section() -> Result<StackPanel> {
+fn fill_account_rows(
+    container: &StackPanel,
+    state: &Arc<AppState>,
+    xaml_root: &mailin_winui_sys::XamlRoot,
+    events: ui::Revokers,
+    on_remove: &std::rc::Rc<dyn Fn(AccountId)>,
+) -> Result<()> {
+    ui::clear(container)?;
+    let accounts = state.mailin.list_accounts().unwrap_or_default();
+    if accounts.is_empty() {
+        ui::append(container, &ui::body_text("No accounts yet.")?)?;
+    }
+    for account in accounts {
+        let row = ui::stack_sm(mailin_winui_sys::Orientation::Horizontal)?;
+        let label = ui::text(&format!(
+            "{} · {}",
+            account.email,
+            match state.engine.sync_status(&account.id) {
+                mailin_core::model::SyncStatus::Idle => "Idle",
+                mailin_core::model::SyncStatus::Syncing => "Syncing…",
+                mailin_core::model::SyncStatus::Connected => "Connected",
+                mailin_core::model::SyncStatus::Offline => "Offline",
+                mailin_core::model::SyncStatus::Error => "Error",
+            }
+        ))?;
+        ui::stretch_horizontal(&label)?;
+        ui::append(&row, &label)?;
+        let edit = ui::button("Edit", Some("Edit account"), None)?;
+        let remove = ui::button("Remove", Some("Remove account"), None)?;
+        ui::append(&row, &edit)?;
+        ui::append(&row, &remove)?;
+
+        let edit_container = container.clone();
+        let edit_state = Arc::clone(state);
+        let edit_root = xaml_root.clone();
+        let edit_remove = std::rc::Rc::clone(on_remove);
+        let edit_account = account.clone();
+        let edit_events = events.clone();
+        if let Ok(revoker) = ui::on_click(&edit, move || {
+            let _ = crate::account_dialog::present(
+                Arc::clone(&edit_state),
+                crate::account_dialog::AccountDialogMode::Edit,
+                Some(edit_account.clone()),
+                {
+                    let container = edit_container.clone();
+                    let state = Arc::clone(&edit_state);
+                    let root = edit_root.clone();
+                    let on_remove = std::rc::Rc::clone(&edit_remove);
+                    let inner_events = edit_events.clone();
+                    move |_| {
+                        let _ = fill_account_rows(
+                            &container,
+                            &state,
+                            &root,
+                            inner_events.clone(),
+                            &on_remove,
+                        );
+                    }
+                },
+            );
+        }) {
+            events.keep(revoker);
+        }
+
+        let remove_id = account.id;
+        let on_remove = std::rc::Rc::clone(on_remove);
+        if let Ok(revoker) = ui::on_click(&remove, move || on_remove(remove_id)) {
+            events.keep(revoker);
+        }
+        ui::append(container, &row)?;
+    }
+    Ok(())
+}
+
+fn create_accounts_section(
+    state: &Arc<AppState>,
+    xaml_root: &mailin_winui_sys::XamlRoot,
+    events: &ui::Revokers,
+    on_saved: Arc<dyn Fn()>,
+    on_remove: std::rc::Rc<dyn Fn(AccountId)>,
+) -> Result<StackPanel> {
     let panel = ui::stack_md(mailin_winui_sys::Orientation::Vertical)?;
     ui::append(&panel, &ui::heading3("Accounts")?)?;
-    let desc = ui::body_text(
-        "Account-specific settings like signatures and remote content trust are managed in the account settings dialog.",
+    ui::append(
+        &panel,
+        &ui::body_text(
+            "Add, edit or remove accounts. Signatures, trusted senders and keys are managed in the account dialog.",
+        )?,
     )?;
-    ui::append(&panel, &desc)?;
+    let rows = ui::stack_sm(mailin_winui_sys::Orientation::Vertical)?;
+    fill_account_rows(&rows, state, xaml_root, events.clone(), &on_remove)?;
+
+    let add = ui::button("Add Account…", Some("Add account"), None)?;
+    ui::append(&panel, &add)?;
+    let add_rows = rows.clone();
+    let add_state = Arc::clone(state);
+    let add_root = xaml_root.clone();
+    let add_remove = std::rc::Rc::clone(&on_remove);
+    let add_saved = Arc::clone(&on_saved);
+    let add_events = events.clone();
+    events.keep(ui::on_click(&add, move || {
+        let _ = crate::account_dialog::present(
+            Arc::clone(&add_state),
+            crate::account_dialog::AccountDialogMode::Add,
+            None,
+            {
+                let rows = add_rows.clone();
+                let state = Arc::clone(&add_state);
+                let root = add_root.clone();
+                let on_remove = std::rc::Rc::clone(&add_remove);
+                let inner_events = add_events.clone();
+                let inner_saved = Arc::clone(&add_saved);
+                move |_| {
+                    let _ =
+                        fill_account_rows(&rows, &state, &root, inner_events.clone(), &on_remove);
+                    inner_saved();
+                }
+            },
+        );
+    })?);
+
+    ui::append(&panel, &rows)?;
     Ok(panel)
 }
 

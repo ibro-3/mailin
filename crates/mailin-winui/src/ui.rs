@@ -228,6 +228,76 @@ pub fn button(
     Ok(button)
 }
 
+/// A Segoe Fluent Icons glyph. Icon-only controls must still pass an
+/// `accessible_name`; the glyph itself is never used as the spoken label.
+pub fn icon(glyph: &str) -> Result<TextBlock> {
+    let block: TextBlock = load(&format!(
+        "<TextBlock xmlns=\"{XMLNS}\" Text=\"\" FontFamily=\"{family}\" \
+         FontSize=\"{size}\" TextAlignment=\"Center\" />",
+        family = design_tokens::ICON_FONT,
+        size = design_tokens::tokens().typography.icon_size,
+    ))?;
+    block.SetText(glyph)?;
+    Ok(block)
+}
+
+/// An icon button with a label beside it. Used for the toolbar, where text
+/// keeps the action discoverable while the glyph speeds up recognition.
+pub fn icon_button(
+    glyph: &str,
+    label: &str,
+    accessible_name: &str,
+    accessible_description: Option<&str>,
+) -> Result<Button> {
+    let row = stack_sm(Orientation::Horizontal)?;
+    vertical_alignment_center(&row)?;
+    append(&row, &icon(glyph)?)?;
+    let text = text(label)?;
+    text.SetTextWrapping(TextWrapping::NoWrap)?;
+    margin_left(&text, design_tokens::tokens().spacing.xs)?;
+    append(&row, &text)?;
+    let button = content_button(&row, Some(accessible_name), accessible_description)?;
+    horizontal_alignment_center(&button)?;
+    Ok(button)
+}
+
+/// Tint a button with the semantic accent color. Used for the single primary
+/// action in a toolbar so the eye has one obvious starting point.
+pub fn accent_button(button: &Button) -> Result<()> {
+    let control: IControl = button.cast()?;
+    let background = design_tokens::tokens().accent_brush()?;
+    control.SetBackground(&background)?;
+    let on_accent = design_tokens::tokens().on_accent_brush()?;
+    let content: IContentControl = button.cast()?;
+    if let Ok(content) = content.Content() {
+        tint_text(&content.cast()?, &on_accent);
+    }
+    Ok(())
+}
+
+fn tint_text(element: &windows_core::IInspectable, brush: &SolidColorBrush) {
+    if let Ok(text) = element.cast::<TextBlock>() {
+        let _ = set_foreground(&text, brush);
+        return;
+    }
+    if let Ok(panel) = element.cast::<IPanel>()
+        && let Ok(children) = panel.Children()
+    {
+        for index in 0..children.Size().unwrap_or(0) {
+            if let Ok(child) = children.GetAt(index) {
+                tint_text(&child.cast().unwrap_or(element.clone()), brush);
+            }
+        }
+    }
+}
+
+/// An icon-only button for compact chrome. `accessible_name` is required.
+pub fn icon_only_button(glyph: &str, accessible_name: &str) -> Result<Button> {
+    let button = content_button(&icon(glyph)?, Some(accessible_name), None)?;
+    horizontal_alignment_center(&button)?;
+    Ok(button)
+}
+
 /// A button whose content is an arbitrary element, used for rich list rows.
 /// `accessible_name` sets the AutomationProperties.Name (required for icon-only buttons).
 /// `accessible_description` sets the AutomationProperties.HelpText.
@@ -543,6 +613,27 @@ pub fn set_enabled(control: &impl Interface, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Mark a text element as a polite live region so assistive technology
+/// announces state changes (empty/error/sync) without interrupting the user.
+pub fn set_live_region(element: &impl Interface) -> Result<()> {
+    let element: mailin_winui_sys::DependencyObject = element.cast()?;
+    Ok(AutomationProperties::SetLiveSetting(
+        &element,
+        mailin_winui_sys::AutomationLiveSetting::Polite,
+    )?)
+}
+
+/// Apply a light/dark/system theme to a live element tree. Controls created
+/// from system theme resources follow immediately; controls with an explicit
+/// brush still need the token palette installed before creation.
+pub fn set_requested_theme(
+    element: &impl Interface,
+    theme: mailin_winui_sys::ElementTheme,
+) -> Result<()> {
+    let element: FrameworkElement = element.cast()?;
+    Ok(element.SetRequestedTheme(theme)?)
+}
+
 /// Set a uniform margin around a framework element.
 pub fn margin(
     element: &impl Interface,
@@ -571,6 +662,12 @@ pub fn margin_left(element: &impl Interface, left: f64) -> Result<()> {
 }
 
 /// Center an element vertically within its parent cell.
+pub fn horizontal_alignment_center(element: &impl Interface) -> Result<()> {
+    let element: FrameworkElement = element.cast()?;
+    element.SetHorizontalAlignment(HorizontalAlignment::Center)?;
+    Ok(())
+}
+
 pub fn vertical_alignment_center(element: &impl Interface) -> Result<()> {
     let element: FrameworkElement = element.cast()?;
     element.SetVerticalAlignment(VerticalAlignment::Center)?;
@@ -753,6 +850,11 @@ pub fn field(label: &str, control: &impl Interface) -> Result<StackPanel> {
 }
 
 /// Read the current text of a text box.
+/// Replace the contents of a text box.
+pub fn set_text_value(textbox: &TextBox, value: &str) -> Result<()> {
+    Ok(textbox.SetText(value)?)
+}
+
 pub fn text_value(textbox: &impl Interface) -> String {
     textbox
         .cast::<ITextBox>()

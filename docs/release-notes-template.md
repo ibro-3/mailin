@@ -37,7 +37,7 @@ One-paragraph summary of the release and who should upgrade.
 
 ## Known limitations
 
-- <for example: WinUI has no Unified Inbox in this release>
+- <for example: WinUI bulk selection uses checkboxes rather than a multi-select list>
 - <for example: rules and CalDAV are not available in the UI yet>
 - <for example: STARTTLS is not covered by the automated GreenMail suite>
 
