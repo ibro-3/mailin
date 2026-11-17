@@ -7,8 +7,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use mailin_core::{Config, MessageListDensity, Paths, Theme};
-use mailin_winui_sys::{ComboBox, ContentDialog, ContentDialogButton, StackPanel, ToggleSwitch};
+use mailin_core::{Config, MessageListDensity, Paths, QuickAction, Theme};
+use mailin_winui_sys::{
+    Button, ComboBox, ContentDialog, ContentDialogButton, StackPanel, ToggleSwitch,
+};
 use windows_core::Interface;
 
 use crate::app::AppState;
@@ -25,6 +27,14 @@ struct GeneralRows {
     page_size: ComboBox,
     mark_read: ToggleSwitch,
     notifications: ToggleSwitch,
+    quick_actions: ToggleSwitch,
+    quick_action_archive: ToggleSwitch,
+    quick_action_delete: ToggleSwitch,
+    quick_action_flag: ToggleSwitch,
+    quick_action_read: ToggleSwitch,
+    quick_action_unread: ToggleSwitch,
+    quick_action_junk: ToggleSwitch,
+    restore_messages: Button,
 }
 
 #[derive(Clone)]
@@ -64,6 +74,55 @@ pub fn show_preferences(
     let (general_panel, general) =
         create_general_section(&config.read().unwrap_or_else(|err| err.into_inner()))?;
     ui::append(&main_panel, &general_panel)?;
+
+    // "Restore message defaults" only resets the controls; the dialog stays
+    // transactional, so the live config is left untouched until "Save".
+    events.keep(ui::on_click(&general.restore_messages, {
+        let defaults = Config::default();
+        let general = general.clone();
+        move || {
+            let _ = general.quick_actions.SetIsOn(defaults.ui.quick_actions);
+            let actions = [
+                QuickAction::Archive,
+                QuickAction::Delete,
+                QuickAction::Flag,
+                QuickAction::MarkRead,
+                QuickAction::MarkUnread,
+                QuickAction::Junk,
+            ];
+            let switches = [
+                &general.quick_action_archive,
+                &general.quick_action_delete,
+                &general.quick_action_flag,
+                &general.quick_action_read,
+                &general.quick_action_unread,
+                &general.quick_action_junk,
+            ];
+            for (switch, state) in switches
+                .iter()
+                .zip(mailin_core::quick_action_restore_states(&actions))
+            {
+                let _ = switch.SetIsOn(state);
+            }
+            let _ = general.html.SetIsOn(defaults.ui.html_enabled);
+            let _ = general
+                .remote_content
+                .SetIsOn(defaults.ui.remote_content_enabled);
+            let _ = general.mark_read.SetIsOn(defaults.ui.mark_read_on_open);
+            ui::select_index(
+                &general.page_size,
+                match defaults.ui.page_size {
+                    50 => 0,
+                    100 => 1,
+                    200 => 2,
+                    500 => 3,
+                    1000 => 4,
+                    _ => 1,
+                },
+            );
+        }
+    })?);
+
     let (sync_panel, sync) =
         create_sync_section(&config.read().unwrap_or_else(|err| err.into_inner()))?;
     ui::append(&main_panel, &sync_panel)?;
@@ -226,6 +285,17 @@ pub fn show_preferences(
                 };
                 guard.ui.mark_read_on_open = is_on(&general.mark_read);
                 guard.ui.notifications = is_on(&general.notifications);
+                guard.ui.quick_actions = is_on(&general.quick_actions);
+                let toggles = [
+                    (QuickAction::Archive, is_on(&general.quick_action_archive)),
+                    (QuickAction::Delete, is_on(&general.quick_action_delete)),
+                    (QuickAction::Flag, is_on(&general.quick_action_flag)),
+                    (QuickAction::MarkRead, is_on(&general.quick_action_read)),
+                    (QuickAction::MarkUnread, is_on(&general.quick_action_unread)),
+                    (QuickAction::Junk, is_on(&general.quick_action_junk)),
+                ];
+                guard.ui.quick_action_items =
+                    mailin_core::reconcile_quick_action_items(&guard.ui.quick_action_items, &toggles);
                 guard.sync.poll_interval_secs = match ui::selected_index(&sync.poll_interval) {
                     0 => 15,
                     1 => 30,
@@ -393,6 +463,72 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
     )?;
     ui::append(&panel, &notifications_row)?;
 
+    // Quick actions: a master toggle plus one row per action, matching the
+    // GTK messages group's labels and order.
+    let (quick_actions_row, quick_actions) = ui::switch_row(
+        "Quick actions",
+        "Show row actions for archive, delete, flag, and read state",
+        config.ui.quick_actions,
+        Some("Quick actions"),
+        Some("On"),
+        Some("Off"),
+    )?;
+    ui::append(&panel, &quick_actions_row)?;
+
+    let quick_row = |title: &str, subtitle: &str, action: QuickAction| {
+        ui::switch_row(
+            title,
+            subtitle,
+            config.ui.quick_action_items.contains(&action),
+            Some(title),
+            Some("On"),
+            Some("Off"),
+        )
+    };
+    let (row, quick_action_archive) = quick_row(
+        "Archive",
+        "Show the archive action on message rows",
+        QuickAction::Archive,
+    )?;
+    ui::append(&panel, &row)?;
+    let (row, quick_action_delete) = quick_row(
+        "Delete",
+        "Show the delete action on message rows",
+        QuickAction::Delete,
+    )?;
+    ui::append(&panel, &row)?;
+    let (row, quick_action_flag) = quick_row(
+        "Flag",
+        "Show the flag action on message rows",
+        QuickAction::Flag,
+    )?;
+    ui::append(&panel, &row)?;
+    let (row, quick_action_read) = quick_row(
+        "Mark read",
+        "Show the mark-read action on message rows",
+        QuickAction::MarkRead,
+    )?;
+    ui::append(&panel, &row)?;
+    let (row, quick_action_unread) = quick_row(
+        "Mark unread",
+        "Show the mark-unread action on message rows",
+        QuickAction::MarkUnread,
+    )?;
+    ui::append(&panel, &row)?;
+    let (row, quick_action_junk) = quick_row(
+        "Mark as junk",
+        "Show the mark-as-junk action on message rows",
+        QuickAction::Junk,
+    )?;
+    ui::append(&panel, &row)?;
+
+    let restore_messages = ui::button(
+        "Restore message defaults",
+        Some("Restore message defaults"),
+        Some("Reset message display and quick-action settings"),
+    )?;
+    ui::append(&panel, &restore_messages)?;
+
     Ok((
         panel,
         GeneralRows {
@@ -404,6 +540,14 @@ fn create_general_section(config: &Config) -> Result<(StackPanel, GeneralRows)> 
             page_size,
             mark_read,
             notifications,
+            quick_actions,
+            quick_action_archive,
+            quick_action_delete,
+            quick_action_flag,
+            quick_action_read,
+            quick_action_unread,
+            quick_action_junk,
+            restore_messages,
         },
     ))
 }
