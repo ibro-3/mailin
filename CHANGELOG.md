@@ -4,9 +4,7 @@ All notable changes to Mailin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-12-18
-
-<!-- Update the date above to the actual tag date before publishing. -->
+## [0.1.0] - 2026-11-17
 
 The first public release: a native IMAP/SMTP desktop client for Linux (GTK 4 +
 libadwaita) and Windows (WinUI 3), sharing one Rust core.
@@ -51,6 +49,7 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
 - Preferences apply their changes on save instead of immediately on selection.
 - The default message page size is 50 (range 25–500).
 - Theme changes apply without restarting the Linux client.
+- Raised the workspace MSRV to 1.95; the child crates now inherit it.
 
 ### Fixed
 
@@ -63,6 +62,19 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
 - Actions that need a selected message or account now give feedback instead of
   doing nothing.
 - Repository and documentation URLs point at the real project location.
+- Permanent deletion now asks for confirmation on every Windows path, including
+  Delete in Trash, Ctrl+Delete, the reader and bulk actions, quick actions and
+  Empty Trash. Cancelling leaves the messages untouched.
+- Recipient autocomplete now works for the 2nd and later recipients on both
+  front-ends, including semicolon-separated lists and quoted display names that
+  contain commas.
+- WinUI preferences now expose quick-action toggles and message defaults, with
+  a "Restore message defaults" button; selections persist across restarts.
+
+### Security
+
+- Upgraded bundled SQLite (`libsqlite3-sys`) to 0.39.1 for `RUSTSEC-2026-0459`;
+  no advisory ignore was added.
 
 ### Known limitations
 
@@ -71,9 +83,11 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
   multi-select list. Unified Inbox may arrive in a later release.
 - **Windows signing**: the MSIX and installer are unsigned, so SmartScreen
   warns on first run.
-- **Narrow windows**: the WinUI main window has no enforced minimum size; the
-  640×480 / 200% zoom and screen-reader passes are manual before RC1. The Windows App SDK 1.8 runtime is required; the zip and
-  installer include or fetch it.
+- **Narrow windows and accessibility**: the WinUI main window has no enforced
+  minimum size; the 640×480 / 200% zoom, keyboard and screen-reader passes are
+  manual before RC1.
+- **Windows App SDK**: the 1.8 runtime is required; the zip and installer
+  include or fetch it.
 - **STARTTLS**: the GreenMail integration server used in CI does not support
   STARTTLS, so that path is covered by unit tests and manual testing rather
   than the automated integration suite.

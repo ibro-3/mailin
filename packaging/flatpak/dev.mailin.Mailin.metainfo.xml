@@ -48,7 +48,7 @@
   <content_rating type="oars-1.1" />
 
   <releases>
-    <release version="0.1.0" date="2026-12-18">
+    <release version="0.1.0" date="2026-11-17">
       <description>
         <p>First public release of Mailin, a native IMAP/SMTP desktop client for Linux and Windows.</p>
         <ul>
@@ -57,6 +57,8 @@
           <li>WinUI 3 client with reader, attachments, compose, search and toast notifications.</li>
           <li>PGP encryption and signing, an outbox with retry, draft auto-save and full-text search.</li>
           <li>Flatpak packaging for Linux; zip, MSIX and Inno Setup installer for Windows, with checksums and build attestations.</li>
+          <li>Quick-action toggles and message defaults in WinUI preferences, with a restore-defaults button.</li>
+          <li>Recipient autocomplete for multi-recipient fields, and confirmation before every permanent deletion on Windows.</li>
         </ul>
         <p>Known limitation: the WinUI client has no Unified Inbox in this release, and Windows artifacts are unsigned.</p>
       </description>

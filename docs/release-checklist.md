@@ -2,11 +2,11 @@
 
 This checklist must be completed and signed off for each release candidate before tagging.
 
-## Release: vX.Y.Z
+## Release: v0.1.0
 
-**Date:** ___________  
-**Release Manager:** ___________  
-**Git Commit:** ___________
+**Date:** 2026-11-17  
+**Release Manager:** ___________ (assign before tagging)  
+**Git Commit:** ebcf664 (must be the tagged commit; update if the tree changes)
 
 ---
 
@@ -183,6 +183,13 @@ renamed files — never silently deleted.
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` passes
 - [ ] `cargo test --workspace --all-targets` passes
 - [ ] `cargo run -p xtask -- check-versions` passes (version agreement)
+- [ ] `cargo deny check` passes with no new `deny.toml` ignore entries
+- [ ] `cargo tree -i libsqlite3-sys` shows 0.39.1 or newer (no RUSTSEC-2026-0459)
+- [ ] `packaging/flatpak/cargo-sources.json` matches `Cargo.lock`
+- [ ] WinUI permanent-delete confirmation prompts on every path (Delete in Trash, Ctrl+Delete,
+      reader Trash, bulk bar, quick action, Empty Trash); Cancel/Esc performs no deletion
+- [ ] WinUI quick-action and message-default settings persist across restart
+- [ ] Multi-recipient autocomplete works on GTK and WinUI (commas, semicolons, quoted names)
 - [ ] `flatpak-builder-lint manifest packaging/flatpak/dev.mailin.Mailin.json` passes
 - [ ] `cargo test -p mailin-core --test imap_it -- --ignored` passes (plaintext)
 - [ ] `cargo test -p mailin-core --test imap_it_tls -- --ignored` passes (IMAPS 993 / SMTPS 465)
@@ -280,5 +287,13 @@ tag being signed off.
 
 Record any known issues, workarounds, or follow-up items here:
 
-```
-```
+- **D1 — RUSTSEC-2026-0459:** fixed by upgrading, not by ignoring. Workspace MSRV
+  raised to 1.95 and `libsqlite3-sys` resolved to 0.39.1. The two unrelated
+  RustCrypto ignores remain; no new ignore was added.
+- **D2 — Windows signing:** shipping unsigned for v0.1.0. MSIX and installer are
+  unsigned, `SHA256SUMS` is published, and the SmartScreen warning is documented
+  in the changelog and release notes. Revisit when an EV certificate is available.
+- **D3 — Flathub:** publish the GitHub release and verify artifacts first;
+  submit to Flathub only after that verification passes.
+- **D4 — Live OAuth:** not tested against live providers (no registered client
+  IDs); recorded as a known limitation rather than a passed checklist item.
