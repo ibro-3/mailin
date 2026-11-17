@@ -5,7 +5,7 @@ version.workspace = true
 default-run = "xtask"
 edition.workspace = true
 # windows-bindgen 0.100, used by `winui-bindgen`, requires Rust 1.95.
-rust-version = "1.95"
+rust-version.workspace = true
 license.workspace = true
 publish = false
 
