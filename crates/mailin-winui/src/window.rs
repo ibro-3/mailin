@@ -1658,6 +1658,56 @@ impl MainWindow {
         self.show_banner("Retrying…");
     }
 
+    /// Detail text shared by every permanent-delete confirmation.
+    const PERMANENT_DELETE_DETAIL: &'static str = "The selected messages will be deleted from the server and from local storage. This cannot be undone.";
+
+    /// Show a modal confirmation before an irreversible deletion. Dismissing
+    /// the dialog with Cancel/Esc/close never calls `on_confirm`; confirming
+    /// calls it exactly once. Modelled on `outbox_discard_selected` so all
+    /// delete paths share one lifetime pattern.
+    fn confirm_destructive(
+        self: &Rc<Self>,
+        title: &str,
+        detail: &str,
+        ok_label: &str,
+        on_confirm: impl FnOnce() + 'static,
+    ) {
+        let Ok(xaml_root) = ui::window_xaml_root(&self.widgets.window) else {
+            self.show_error("The window is not ready yet");
+            return;
+        };
+        let Some(dialog) = self.require(ContentDialog::new(), "create the confirmation") else {
+            return;
+        };
+        let Some(title_text) = self.require(ui::text(title), "write the confirmation title") else {
+            return;
+        };
+        let _ = dialog.SetTitle(&title_text);
+        let Some(body) = self.require(ui::text(detail), "write the confirmation text") else {
+            return;
+        };
+        let _ = ui::set_content(&dialog, &body);
+        let _ = dialog.SetPrimaryButtonText(ok_label);
+        let _ = dialog.SetCloseButtonText("Cancel");
+        let _ = dialog.SetDefaultButton(ContentDialogButton::Close);
+
+        // Only one modal is open at a time; retire the previous subscriptions
+        // before subscribing to this one.
+        self.dialog_events.replace();
+        let callback = std::cell::RefCell::new(Some(on_confirm));
+        if let Ok(revoker) = dialog.PrimaryButtonClick(move |_, _| {
+            if let Some(callback) = callback.borrow_mut().take() {
+                callback();
+            }
+        }) {
+            self.dialog_events.keep(revoker);
+        }
+        let _ = ui::set_xaml_root(&dialog, &xaml_root);
+        // Keep the dialog alive for as long as it is shown.
+        self.keep_dialog(dialog.clone());
+        let _ = dialog.ShowAsync();
+    }
+
     /// Discarding a queued message cannot be undone, so the user has to
     /// confirm it — and the confirmation names the entry that is about to go.
     fn outbox_discard_selected(self: &Rc<Self>) {
@@ -2554,7 +2604,7 @@ impl MainWindow {
         self.show_undo_banner("Archived 1 message", pairs);
     }
 
-    fn delete_selected(&self) {
+    fn delete_selected(self: &Rc<Self>) {
         let Some(message) = self.selected_message() else {
             // A7: tell the user why nothing happened instead of a silent no-op.
             self.show_banner("Select a message first.");
@@ -2562,8 +2612,16 @@ impl MainWindow {
         };
         let ids = vec![message.id];
         if self.current_folder_is_trash() {
-            self.app.engine.permanently_delete_messages(&ids);
-            self.show_banner("Deleting permanently…");
+            let this = Rc::clone(self);
+            self.confirm_destructive(
+                "Delete this message permanently?",
+                Self::PERMANENT_DELETE_DETAIL,
+                "Delete",
+                move || {
+                    this.app.engine.permanently_delete_messages(&ids);
+                    this.show_banner("Deleting permanently…");
+                },
+            );
             return;
         }
         let pairs = self.undo_pairs(&ids);
@@ -2636,18 +2694,27 @@ impl MainWindow {
         self.clear_tick();
     }
 
-    fn delete_ids(&self, ids: &[MessageId]) {
+    fn delete_ids(self: &Rc<Self>, ids: &[MessageId]) {
         if ids.is_empty() {
             return;
         }
         let count = ids.len();
         if self.current_folder_is_trash() {
-            self.app.engine.permanently_delete_messages(ids);
-            self.show_banner(&format!(
-                "Deleted {} permanently",
-                Self::plural_messages(count)
-            ));
-            self.clear_tick();
+            let ids = ids.to_vec();
+            let this = Rc::clone(self);
+            self.confirm_destructive(
+                &format!("Delete {} permanently?", Self::plural_messages(count)),
+                Self::PERMANENT_DELETE_DETAIL,
+                "Delete",
+                move || {
+                    this.app.engine.permanently_delete_messages(&ids);
+                    this.show_banner(&format!(
+                        "Deleted {} permanently",
+                        MainWindow::plural_messages(count)
+                    ));
+                    this.clear_tick();
+                },
+            );
             return;
         }
         let pairs = self.undo_pairs(ids);
@@ -2661,17 +2728,26 @@ impl MainWindow {
         self.clear_tick();
     }
 
-    fn permanently_delete_ids(&self, ids: &[MessageId]) {
+    fn permanently_delete_ids(self: &Rc<Self>, ids: &[MessageId]) {
         if ids.is_empty() {
             return;
         }
+        let ids = ids.to_vec();
         let count = ids.len();
-        self.app.engine.permanently_delete_messages(ids);
-        self.show_banner(&format!(
-            "Deleted {} permanently",
-            Self::plural_messages(count)
-        ));
-        self.clear_tick();
+        let this = Rc::clone(self);
+        self.confirm_destructive(
+            &format!("Delete {} permanently?", Self::plural_messages(count)),
+            Self::PERMANENT_DELETE_DETAIL,
+            "Delete",
+            move || {
+                this.app.engine.permanently_delete_messages(&ids);
+                this.show_banner(&format!(
+                    "Deleted {} permanently",
+                    MainWindow::plural_messages(count)
+                ));
+                this.clear_tick();
+            },
+        );
     }
 
     fn junk_ids(&self, ids: &[MessageId], junk: bool) {
@@ -2697,7 +2773,11 @@ impl MainWindow {
     }
 
     /// Run a quick action on a specific message (from hover/swipe).
-    fn run_quick_action(&self, action: mailin_core::config::QuickAction, message_id: MessageId) {
+    fn run_quick_action(
+        self: &Rc<Self>,
+        action: mailin_core::config::QuickAction,
+        message_id: MessageId,
+    ) {
         use mailin_core::config::QuickAction;
         let ids = vec![message_id];
         match action {
@@ -2708,8 +2788,16 @@ impl MainWindow {
             }
             QuickAction::Delete => {
                 if self.current_folder_is_trash() {
-                    self.app.engine.permanently_delete_messages(&ids);
-                    self.show_banner("Deleting permanently…");
+                    let this = Rc::clone(self);
+                    self.confirm_destructive(
+                        "Delete this message permanently?",
+                        Self::PERMANENT_DELETE_DETAIL,
+                        "Delete",
+                        move || {
+                            this.app.engine.permanently_delete_messages(&ids);
+                            this.show_banner("Deleting permanently…");
+                        },
+                    );
                     return;
                 }
                 let pairs = self.undo_pairs(&ids);
@@ -2888,19 +2976,27 @@ impl MainWindow {
         self.clear_bulk_selection();
     }
 
-    fn bulk_delete(&self) {
+    fn bulk_delete(self: &Rc<Self>) {
         let ids = self.selected_ids();
         if ids.is_empty() {
             return;
         }
         let count = ids.len();
         if self.current_folder_is_trash() {
-            self.app.engine.permanently_delete_messages(&ids);
-            self.show_banner(&format!(
-                "Deleted {} permanently",
-                mailin_core::plural(count, "message", "messages")
-            ));
-            self.clear_bulk_selection();
+            let this = Rc::clone(self);
+            self.confirm_destructive(
+                &format!("Delete {} permanently?", Self::plural_messages(count)),
+                Self::PERMANENT_DELETE_DETAIL,
+                "Delete",
+                move || {
+                    this.app.engine.permanently_delete_messages(&ids);
+                    this.show_banner(&format!(
+                        "Deleted {} permanently",
+                        MainWindow::plural_messages(count)
+                    ));
+                    this.clear_bulk_selection();
+                },
+            );
             return;
         }
         let pairs = self.undo_pairs(&ids);
@@ -3440,54 +3536,17 @@ impl MainWindow {
             return;
         };
         let this = Rc::clone(self);
-        let xaml_root = match ui::window_xaml_root(&self.widgets.window) {
-            Ok(root) => root,
-            Err(error) => {
-                self.show_error(&format!("Could not get window root: {error:#}"));
-                return;
-            }
-        };
-        let Some(dialog) = self.require(mailin_winui_sys::ContentDialog::new(), "create dialog")
-        else {
-            return;
-        };
-        let Some(title) = self.require(ui::text("Empty Trash"), "build dialog text") else {
-            return;
-        };
-        let _ = dialog.SetTitle(&title);
-        let Some(panel) = self.require(
-            ui::stack_sm(mailin_winui_sys::Orientation::Vertical),
-            "lay out dialog",
-        ) else {
-            return;
-        };
-        ui::margin_lg(&panel).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not lay out dialog: {error}"));
-        });
-        let Some(msg) = self.require(
-            ui::text(
-                "Every message in Trash will be permanently deleted. This action cannot be undone.",
-            ),
-            "build dialog text",
-        ) else {
-            return;
-        };
-        ui::append(&panel, &msg).unwrap_or_else(|error| {
-            self.show_error(&format!("Could not lay out dialog: {error}"));
-        });
-        let _ = ui::set_content(&dialog, &panel);
-        let _ = dialog.SetPrimaryButtonText("Empty Trash");
-        let _ = dialog.SetCloseButtonText("Cancel");
-        let _ = dialog.SetDefaultButton(mailin_winui_sys::ContentDialogButton::Close);
-        let this_clone = this.clone();
-        let _ = dialog.PrimaryButtonClick(move |_, _| {
-            this_clone.app.engine.empty_trash(account_id);
-            this_clone.refresh_folders();
-            this_clone.refresh_messages();
-            this_clone.show_banner("Trash emptied");
-        });
-        let _ = ui::set_xaml_root(&dialog, &xaml_root);
-        let _ = dialog.ShowAsync();
+        self.confirm_destructive(
+            "Empty Trash?",
+            "Every message in Trash will be permanently deleted. This action cannot be undone.",
+            "Empty Trash",
+            move || {
+                this.app.engine.empty_trash(account_id);
+                this.refresh_folders();
+                this.refresh_messages();
+                this.show_banner("Trash emptied");
+            },
+        );
     }
 
     fn subscribe_folder_action(self: &Rc<Self>, folder_id_str: &str, subscribe: bool) {
