@@ -199,14 +199,17 @@ fn show_startup_recovery(
     let window = adw::ApplicationWindow::builder()
         .application(application)
         .title("Mailin")
-        .default_width(520)
-        .default_height(420)
+        .default_width(620)
+        .default_height(460)
         .resizable(false)
         .build();
     let page = adw::StatusPage::builder()
         .icon_name("dialog-error-symbolic")
         .title("Mailin could not open its local data")
-        .description(error)
+        .description(format!(
+            "{error}\n\nYour mail on the server is not affected. If you share a \
+             problem report, include the redacted diagnostics below."
+        ))
         .build();
 
     let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -216,8 +219,9 @@ fn show_startup_recovery(
     let folder = gtk::Button::with_label("Open data folder");
     let reset = gtk::Button::with_label("Reset local cache…");
     reset.add_css_class("destructive-action");
+    let copy_diagnostics = gtk::Button::with_label("Copy diagnostics");
     let quit = gtk::Button::with_label("Quit");
-    for button in [&retry, &folder, &reset, &quit] {
+    for button in [&retry, &folder, &reset, &copy_diagnostics, &quit] {
         buttons.append(button);
     }
     page.set_child(Some(&buttons));
@@ -227,9 +231,24 @@ fn show_startup_recovery(
     // After a failed retry, say so on the page instead of stacking dialogs.
     fn note_failure(page: &adw::StatusPage, error: &str) {
         page.set_description(Some(&format!(
-            "Still could not open the local data:\n\n{error}"
+            "Still could not open the local data:\n\n{error}\n\nYour mail on the server is not affected."
         )));
     }
+
+    copy_diagnostics.connect_clicked({
+        let button = copy_diagnostics.clone();
+        let error = error.clone();
+        move |_| {
+            let report = match mailin_core::Paths::discover() {
+                Ok(paths) => mailin_core::support::build_startup_diagnostics(&paths, Some(&error)),
+                Err(path_error) => format!("Could not discover data paths: {path_error}\n"),
+            };
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&report);
+                button.set_label("Copied to clipboard");
+            }
+        }
+    });
 
     retry.connect_clicked({
         let app = application.clone();

@@ -95,6 +95,17 @@ This checklist must be completed and signed off for each release candidate befor
 - [ ] No plaintext secrets in logs
 - [ ] TLS verification enabled by default
 
+### First-release UX acceptance (WS1)
+
+- [ ] **OAuth2 is honest in both account wizards**: the wizard states that Mailin ships no shared client ID, names the provider registration path / `MAILIN_*_CLIENT_ID`, and keeps browser sign-in disabled until a client ID is present. Verify on GTK and WinUI.
+- [ ] **OAuth2 live sign-in verified with at least one provider** using a registered client ID and both loopback redirect URIs (`127.0.0.1` and `localhost`), or OAuth2 is explicitly documented as advanced/BYO in release notes.
+- [ ] **Windows minimum window size**: the main window cannot be resized below a usable size; the toolbar and reader are not clipped at 640×480 and 200% text scaling.
+- [ ] **Windows error surface**: the banner shows short copy plus **Details** (untruncated error text) and **Retry** only when the core marks the error retryable; Details/Cancel never performs the failed action twice.
+- [ ] **Windows theme**: System/Light/Dark applies to the whole window without restart, and Windows high contrast uses system colors. The old "restart required" copy is gone.
+- [ ] **Recovery windows (both platforms)** state that server mail is unaffected and offer **Copy diagnostics**; the report contains no passwords, message bodies or addresses.
+- [ ] **Documentation matches the build**: default page size 100 (range 1–1000), unified-inbox availability, Windows signing status, OAuth2 client-ID requirement.
+- [ ] **Flatpak listing assets**: 3–5 screenshots with captions, branding colors and the release entry present; `appstreamcli validate --no-net` passes. Screenshots must be captured on a real desktop session.
+
 ---
 
 ## Platform-Specific Verification
@@ -220,8 +231,8 @@ renamed files — never silently deleted.
 - [ ] Certificate verification
 - [ ] Sync → Send → Fetch body round-trip
 
-### OAuth2 (Live Providers - Manual)
-- [ ] Google (requires registered client ID)
+### OAuth2 (Live Providers - Manual, BYO client ID)
+- [ ] Google (requires a client ID from a registered application)
 - [ ] Microsoft 365/Outlook (requires registered client ID)
 - [ ] Yahoo (requires registered client ID)
 - [ ] Fastmail (requires registered client ID)

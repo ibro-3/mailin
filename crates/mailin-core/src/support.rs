@@ -17,6 +17,35 @@ use crate::error::{Error, Result};
 /// Maximum number of log lines included in a diagnostics report.
 const LOG_LINES: usize = 100;
 
+/// Build a short report for a startup failure, when the store could not be
+/// opened and [`build_diagnostics`] is therefore unavailable. Contains only
+/// versions, paths, the startup error and the tail of the log — never secrets.
+pub fn build_startup_diagnostics(paths: &Paths, error: Option<&str>) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Mailin {}\n", env!("CARGO_PKG_VERSION")));
+    out.push_str(&format!("OS: {}\n", std::env::consts::OS));
+    out.push_str(&format!("Arch: {}\n", std::env::consts::ARCH));
+    out.push_str(&format!("Data dir: {}\n", paths.data_dir.display()));
+    if let Some(error) = error {
+        out.push_str("\n--- Startup error ---\n");
+        out.push_str(error);
+        out.push('\n');
+    }
+    out.push_str("\n--- Last log lines ---\n");
+    let mut lines = Vec::new();
+    for file in [paths.log_file(), paths.log_file().with_extension("log.1")] {
+        if let Ok(text) = std::fs::read_to_string(file) {
+            lines.extend(text.lines().map(str::to_owned));
+        }
+    }
+    let start = lines.len().saturating_sub(LOG_LINES);
+    for line in &lines[start..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Build a redacted diagnostics report suitable for pasting into an issue.
 ///
 /// No message bodies, addresses, passwords or search queries are included.

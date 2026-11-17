@@ -47,7 +47,7 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
 ### Changed
 
 - Preferences apply their changes on save instead of immediately on selection.
-- The default message page size is 50 (range 25–500).
+- The default message page size is 100 (range 1–1000).
 - Theme changes apply without restarting the Linux client.
 - Raised the workspace MSRV to 1.95; the child crates now inherit it.
 
@@ -91,6 +91,10 @@ libadwaita) and Windows (WinUI 3), sharing one Rust core.
 - **STARTTLS**: the GreenMail integration server used in CI does not support
   STARTTLS, so that path is covered by unit tests and manual testing rather
   than the automated integration suite.
+- **OAuth2**: Mailin does not ship a shared client ID. To sign in with a
+  provider you need a client ID from a registered application (or an
+  administrator-supplied `MAILIN_*_CLIENT_ID`); the account wizard says so and
+  keeps browser sign-in disabled until one is entered.
 - **Not yet available in the UI**: rules, CalDAV/calendar, snooze, virtual
   folders, a plugin marketplace, tray/background-on-close, and macOS.
 - **Local search scaling**: list virtualization is not incremental; very large

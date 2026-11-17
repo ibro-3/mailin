@@ -180,11 +180,22 @@ pub fn present(
         .title("Provider")
         .model(&gtk::StringList::new(&provider_labels()))
         .build();
-    let oauth_client_id_row = adw::EntryRow::builder().title("OAuth2 client ID").build();
+    let oauth_client_id_row = adw::EntryRow::builder()
+        .title("Client ID (from your provider)")
+        .build();
     oauth_client_id_row.set_tooltip_text(Some(
-        "Public client identifier registered by your mail provider. \
-         Deployment builds can also set MAILIN_*_CLIENT_ID.",
+        "Mailin has no shared client ID. Paste the public identifier of an OAuth2 \
+         application you registered with this provider, or ask your administrator.",
     ));
+    // OAuth2 is useful but cannot work out of the box: Mailin ships no shared
+    // client ID. Say so before the user clicks Sign in and hits a dead end.
+    let oauth_client_hint = adw::ActionRow::builder()
+        .title("A client ID is required")
+        .subtitle(provider_at(0).client_id_hint())
+        .build();
+    oauth_client_hint.add_css_class("dim-label");
+    // The hint is two sentences; let it wrap instead of ellipsizing it.
+    oauth_client_hint.set_subtitle_lines(4);
     let oauth_sign_in = gtk::Button::with_label("Sign in with browser…");
     oauth_sign_in.add_css_class("suggested-action");
     let oauth_status = gtk::Label::builder()
@@ -223,6 +234,7 @@ pub fn present(
         .build();
     oauth_group.add(&oauth_provider_row);
     oauth_group.add(&oauth_client_id_row);
+    oauth_group.add(&oauth_client_hint);
     oauth_group.add(&oauth_sign_in);
     oauth_group.add(&oauth_status);
     // Password is the default auth method; OAuth2 stays hidden until chosen.
@@ -686,6 +698,7 @@ pub fn present(
 
     oauth_provider_row.connect_selected_notify({
         let oauth_client_id_row = oauth_client_id_row.clone();
+        let oauth_client_hint = oauth_client_hint.clone();
         let oauth_tokens = Rc::clone(&oauth_tokens);
         let previous_provider = Rc::clone(&previous_provider);
         move |row| {
@@ -705,8 +718,20 @@ pub fn present(
             if current.trim().is_empty() || current == previous_default {
                 oauth_client_id_row.set_text(&provider.default_client_id());
             }
+            oauth_client_hint.set_subtitle(&provider.client_id_hint());
         }
     });
+
+    // Sign-in stays disabled until a client ID is available, so the wizard
+    // never sends the user to a browser for an authentication that cannot
+    // complete. The hint above explains where to get one.
+    oauth_client_id_row.connect_changed({
+        let oauth_sign_in = oauth_sign_in.clone();
+        move |row| {
+            oauth_sign_in.set_sensitive(!row.text().trim().is_empty());
+        }
+    });
+    oauth_sign_in.set_sensitive(false);
 
     // Pre-fill form if editing
     if let Some(account) = existing_account.clone() {

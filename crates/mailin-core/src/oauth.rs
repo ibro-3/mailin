@@ -103,6 +103,35 @@ impl OAuthProvider {
         }
     }
 
+    /// Where a user can register a public client ID for this provider.
+    /// Empty for custom providers, whose endpoints come from the environment.
+    pub const fn client_id_registration_url(self) -> &'static str {
+        match self {
+            Self::Google => "https://console.cloud.google.com/apis/credentials",
+            Self::Microsoft => {
+                "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"
+            }
+            Self::Yahoo => "https://developer.yahoo.com/apps/",
+            Self::Fastmail => "https://www.fastmail.com/dev/",
+            Self::Custom => "",
+        }
+    }
+
+    /// One-line guidance for the account wizard when no client ID is configured.
+    /// Mailin deliberately ships no shared client ID: each deployment registers
+    /// its own OAuth2 application, or the user pastes a public client ID.
+    pub fn client_id_hint(self) -> String {
+        let env = self.client_id_env();
+        let registration = match self.client_id_registration_url() {
+            "" => String::new(),
+            url => format!(" Register your own application at {url}."),
+        };
+        format!(
+            "Mailin ships no shared OAuth2 client ID.{registration} Ask your mail \
+             administrator for one, or set {env} to pre-fill this field."
+        )
+    }
+
     /// Client ID from the environment, or an empty string when it is not set.
     ///
     /// OAuth2 client IDs are public identifiers but each application registers
@@ -574,6 +603,16 @@ fn parse_query(query: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_id_hints_name_the_provider_setup_path() {
+        let google = OAuthProvider::Google.client_id_hint();
+        assert!(google.contains("console.cloud.google.com"));
+        assert!(google.contains("MAILIN_GOOGLE_CLIENT_ID"));
+        let custom = OAuthProvider::Custom.client_id_hint();
+        assert!(custom.contains("MAILIN_OAUTH_CLIENT_ID"));
+        assert!(!custom.contains("https://"));
+    }
 
     #[test]
     fn percent_encoding_round_trips() {

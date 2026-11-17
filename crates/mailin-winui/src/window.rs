@@ -43,6 +43,11 @@ const MAX_PAGE: u32 = 1_000;
 const EVENT_POLL_MILLIS: i64 = 200;
 
 /// Responsive breakpoints (in effective pixels).
+/// Minimum usable window size. Below this the toolbar and reader clip, even
+/// before DPI scaling; the size handler clamps the window back to these values.
+const MIN_WINDOW_WIDTH: f32 = 640.0;
+const MIN_WINDOW_HEIGHT: f32 = 480.0;
+
 const BREAKPOINT_MOBILE: f64 = 720.0;
 const BREAKPOINT_TABLET: f64 = 1024.0;
 const MIN_SIDEBAR_WIDTH: f64 = 200.0;
@@ -97,7 +102,10 @@ struct State {
 struct Widgets {
     window: Window,
     title: TextBlock,
+    banner_row: StackPanel,
     banner: TextBlock,
+    banner_details: Button,
+    banner_retry: Button,
     account_combo: ComboBox,
     add_account: Button,
     edit_account: Button,
@@ -199,6 +207,8 @@ pub struct MainWindow {
     /// The event subscriptions of the open dialogs. They are revoked when
     /// the dialog closes.
     dialog_events: ui::Revokers,
+    /// Untruncated text of the last error, opened by the banner's Details button.
+    error_details: std::cell::RefCell<String>,
     /// The row checkboxes, parallel to `State::messages`, used to tick or
     /// untick the whole list at once (Ctrl+A, Escape, bulk actions).
     checkboxes: std::cell::RefCell<Vec<CheckBox>>,
@@ -227,7 +237,70 @@ impl MainWindow {
 
     fn show_banner(&self, text: &str) {
         let _ = self.widgets.banner.SetText(text);
-        let _ = ui::set_visible(&self.widgets.banner, !text.is_empty());
+        let _ = ui::set_visible(&self.widgets.banner_row, !text.is_empty());
+        // A status/information banner has no error actions.
+        let _ = ui::set_visible(&self.widgets.banner_details, false);
+        let _ = ui::set_visible(&self.widgets.banner_retry, false);
+    }
+
+    /// Open the untruncated error text in a modal dialog. Kept as plain text
+    /// rather than a raw technical dump in the banner: short copy on screen,
+    /// full context available on demand for support.
+    fn show_error_details(&self) {
+        let text = self.error_details.borrow().clone();
+        if text.is_empty() {
+            return;
+        }
+        let Some(dialog) = self.require(
+            ContentDialog::new().context("could not create the error details dialog"),
+            "open error details",
+        ) else {
+            return;
+        };
+        let title: windows_core::IInspectable = match ui::text("Technical details")
+            .and_then(|block| block.cast().context("could not cast the dialog title"))
+        {
+            Ok(title) => title,
+            Err(error) => {
+                self.show_error(&format!("Could not build the details dialog: {error}"));
+                return;
+            }
+        };
+        let _ = dialog.SetTitle(&title);
+        let body = ui::text(&text);
+        let body = match body {
+            Ok(body) => body,
+            Err(error) => {
+                self.show_error(&format!("Could not build the details dialog: {error}"));
+                return;
+            }
+        };
+        let scroll = ui::scroll(&body);
+        match scroll.and_then(|viewer| ui::set_content(&dialog, &viewer)) {
+            Ok(()) => {}
+            Err(error) => {
+                self.show_error(&format!("Could not build the details dialog: {error}"));
+                return;
+            }
+        }
+        let _ = dialog.SetCloseButtonText("Close");
+        let _ = dialog.SetDefaultButton(ContentDialogButton::Close);
+        if let Ok(root) = ui::window_xaml_root(&self.widgets.window) {
+            let _ = ui::set_xaml_root(&dialog, &root);
+        }
+        self.keep_dialog(dialog.clone());
+        let _ = dialog.ShowAsync();
+    }
+
+    /// Show a user-facing error. `retryable` comes from the core event and
+    /// decides whether a Sync action belongs in the banner: auth and
+    /// configuration failures cannot be fixed by retrying.
+    fn show_error_with_details(&self, friendly: &str, details: &str, retryable: bool) {
+        *self.error_details.borrow_mut() = details.to_owned();
+        self.show_banner(&format!("Problem: {friendly}"));
+        let _ = ui::set_visible(&self.widgets.banner_details, true);
+        let _ = ui::set_visible(&self.widgets.banner_retry, retryable);
+        tracing::warn!(%details, "an error surfaced in the UI");
     }
 
     /// Move the keyboard focus cursor to `focus` (or clear it). Repaints
@@ -413,11 +486,10 @@ impl MainWindow {
     }
 
     fn show_error(&self, message: &str) {
-        // Collapse the whitespace, but keep the whole message: truncating
-        // it hides the interesting part of a chain of errors.
-        let text = message.split_whitespace().collect::<Vec<_>>().join(" ");
-        self.show_banner(&format!("Problem: {text}"));
-        tracing::warn!(%message, "an error surfaced in the UI");
+        // Collapse whitespace for the banner; the exact text stays available
+        // behind Details so a chain of errors is never truncated away.
+        let friendly = message.split_whitespace().collect::<Vec<_>>().join(" ");
+        self.show_error_with_details(&friendly, message, false);
     }
 
     /// Unwrap a UI-building result, surfacing the failure through
@@ -3750,6 +3822,7 @@ impl MainWindow {
         let mut messages_changed = false;
         let mut body_ready = None;
         let mut account_error = None;
+        let mut action_failed = None;
         let mut new_messages = Vec::new();
         let mut outbox_changed = false;
         let mut sync_status_update = None;
@@ -3774,16 +3847,24 @@ impl MainWindow {
                     }) => new_messages.push((account_id, count, message_ids)),
                     Ok(Event::BodyReady { message_id }) => body_ready = Some(message_id),
                     Ok(Event::OutboxChanged) => outbox_changed = true,
-                    Ok(Event::AccountError { message, .. }) => account_error = Some(message),
+                    Ok(Event::AccountError {
+                        message,
+                        retryable,
+                        details,
+                        ..
+                    }) => account_error = Some((message, details, retryable)),
                     Ok(Event::ScheduledActionRan { .. }) => {
                         // A scheduled action moved messages around: refresh the
                         // folders and the message list.
                         folders_changed = true;
                         messages_changed = true;
                     }
-                    Ok(Event::ActionFailed { message, .. }) => {
-                        self.show_error(&message);
-                    }
+                    Ok(Event::ActionFailed {
+                        message,
+                        retryable,
+                        details,
+                        ..
+                    }) => action_failed = Some((message, details, retryable)),
                     Ok(Event::SyncStatusChanged { account_id, status }) => {
                         // The button follows every account's sync state, so a
                         // sync of a background account also disables it.
@@ -3853,8 +3934,10 @@ impl MainWindow {
                 self.refresh_folders();
             }
         }
-        if let Some(message) = account_error {
-            self.show_error(&message);
+        if let Some((message, details, retryable)) = account_error {
+            self.show_error_with_details(&message, &details, retryable);
+        } else if let Some((message, details, retryable)) = action_failed {
+            self.show_error_with_details(&message, &details, retryable);
         }
         if let Some(status) = sync_status_update {
             let (text, brush) = match status {
@@ -4114,14 +4197,27 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     ui::set_row(&toolbar, 0)?;
     ui::append(&root, &toolbar)?;
 
+    let banner_row = ui::stack_sm(Orientation::Horizontal)?;
+    ui::margin_horizontal(&banner_row, 12.0)?;
+    ui::margin_vertical(&banner_row, 2.0)?;
     let banner = ui::text("")?;
-    ui::margin_horizontal(&banner, 12.0)?;
-    ui::margin_vertical(&banner, 2.0)?;
+    ui::stretch_horizontal(&banner)?;
     // Live region so screen readers announce status changes (Archiving…, errors, etc.)
     AutomationProperties::SetLiveSetting(&banner, mailin_winui_sys::AutomationLiveSetting::Polite)?;
-    ui::set_visible(&banner, false)?;
-    ui::set_row(&banner, 1)?;
-    ui::append(&root, &banner)?;
+    ui::append(&banner_row, &banner)?;
+    let banner_details = ui::button(
+        "Details",
+        Some("Error details"),
+        Some("Show the full error text"),
+    )?;
+    ui::set_visible(&banner_details, false)?;
+    ui::append(&banner_row, &banner_details)?;
+    let banner_retry = ui::button("Retry", Some("Retry sync"), Some("Try synchronizing again"))?;
+    ui::set_visible(&banner_retry, false)?;
+    ui::append(&banner_row, &banner_retry)?;
+    ui::set_visible(&banner_row, false)?;
+    ui::set_row(&banner_row, 1)?;
+    ui::append(&root, &banner_row)?;
 
     // Undo banner for move operations (initially hidden)
     let undo_banner = ui::stack_sm(Orientation::Horizontal)?;
@@ -4442,18 +4538,35 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     let sidebar_open_for_size = sidebar_open.clone();
     let was_mobile_for_size = was_mobile.clone();
 
+    let window_for_size = window.clone();
     let size_changed_token = window.SizeChanged(move |_sender, args| {
         // `NewSize` lives on `ISizeChangedEventArgs`; the window's own event
         // args type only carries the (empty) window-specific interface.
-        let width = args
+        let size = args
             .as_ref()
             .and_then(|args| {
                 args.cast::<mailin_winui_sys::ISizeChangedEventArgs>()
                     .ok()
                     .and_then(|args| args.NewSize().ok())
             })
-            .unwrap_or_default()
-            .width as f64;
+            .unwrap_or_default();
+        let width = size.width as f64;
+
+        // Enforce the minimum *content* size. The projection does not expose
+        // OverlappedPresenter's preferred minimum, so clamp on resize. The
+        // guard prevents a feedback loop when Resize raises SizeChanged again.
+        let too_small = size.width < MIN_WINDOW_WIDTH || size.height < MIN_WINDOW_HEIGHT;
+        if too_small
+            && let Ok(app_window) = window_for_size
+                .cast::<mailin_winui_sys::IWindow2>()
+                .and_then(|window| window.AppWindow())
+        {
+            let _ = app_window.Resize(mailin_winui_sys::SizeInt32 {
+                width: size.width.max(MIN_WINDOW_WIDTH) as i32,
+                height: size.height.max(MIN_WINDOW_HEIGHT) as i32,
+            });
+        }
+
         let is_mobile = width < BREAKPOINT_MOBILE;
         let is_tablet = (BREAKPOINT_MOBILE..BREAKPOINT_TABLET).contains(&width);
 
@@ -4474,10 +4587,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
             sidebar_open_for_size.set(true);
             let _ = ui::set_visible(&sidebar_for_layout, true);
         }
-    });
-
-    // Store the token to keep the handler alive
-    let _ = size_changed_token;
+    })?;
 
     // Hamburger click handler for mobile sidebar toggle
     let hamburger_btn_click = hamburger.clone();
@@ -4536,6 +4646,7 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         attachment_events: ui::Revokers::default(),
         dialogs: std::cell::RefCell::new(Vec::new()),
         dialog_events: ui::Revokers::default(),
+        error_details: std::cell::RefCell::new(String::new()),
         checkboxes: std::cell::RefCell::new(Vec::new()),
         checkboxes_by_id: std::cell::RefCell::new(HashMap::new()),
         rows_by_id: std::cell::RefCell::new(HashMap::new()),
@@ -4545,7 +4656,10 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
         widgets: Widgets {
             window: window.clone(),
             title,
+            banner_row,
             banner,
+            banner_details,
+            banner_retry,
             account_combo,
             add_account,
             edit_account,
@@ -4611,6 +4725,9 @@ pub fn create(state: &Arc<AppState>) -> Result<Window> {
     });
 
     this.events.keep(link_token);
+    // Keep the SizeChanged subscription alive: dropping the revoker unhooks
+    // the responsive/minimum-size handler immediately.
+    this.events.keep(size_changed_token);
 
     // Undo banner button: restore whatever the last undoable action moved.
     this.events.keep(ui::on_click(&this.widgets.undo_button, {
@@ -5087,6 +5204,18 @@ fn connect(this: &Rc<MainWindow>) -> Result<()> {
     this.events.keep(ui::on_click(&this.widgets.sync, {
         let this = Rc::clone(this);
         move || this.sync_now()
+    })?);
+    this.events
+        .keep(ui::on_click(&this.widgets.banner_details, {
+            let this = Rc::clone(this);
+            move || this.show_error_details()
+        })?);
+    this.events.keep(ui::on_click(&this.widgets.banner_retry, {
+        let this = Rc::clone(this);
+        move || {
+            this.show_banner("Retrying…");
+            this.sync_now();
+        }
     })?);
     this.events.keep(ui::on_click(&this.widgets.search_button, {
         let this = Rc::clone(this);

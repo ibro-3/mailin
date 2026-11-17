@@ -252,7 +252,10 @@ pub fn present(
     // OAuth2 sign-in section, hidden while password authentication is active.
     let oauth_panel = ui::stack_sm(mailin_winui_sys::Orientation::Vertical)?;
     let oauth_provider = ui::combo(&provider_labels(), 0, Some("OAuth2 provider"))?;
-    let oauth_client_id = ui::text_box("OAuth2 client ID", Some("OAuth2 client ID"))?;
+    let oauth_client_id = ui::text_box("Client ID (from your provider)", Some("OAuth2 client ID"))?;
+    // Mailin has no shared OAuth client ID; explain this before Sign in is
+    // pressed rather than failing in the browser flow later.
+    let oauth_client_hint = ui::text(&provider_at(0).client_id_hint())?;
     let oauth_sign_in = ui::button(
         "Sign in with browser…",
         Some("Sign in with browser"),
@@ -268,8 +271,10 @@ pub fn present(
     ui::append(&oauth_panel, &ui::field("Provider", &oauth_provider)?)?;
     ui::append(
         &oauth_panel,
-        &ui::field("OAuth2 client ID", &oauth_client_id)?,
+        &ui::field("Client ID (from your provider)", &oauth_client_id)?,
     )?;
+    ui::append(&oauth_panel, &oauth_client_hint)?;
+    AutomationProperties::SetName(&oauth_client_hint, "OAuth2 client ID guidance")?;
     ui::append(&oauth_panel, &oauth_sign_in)?;
     ui::append(&oauth_panel, &oauth_status)?;
     ui::set_visible(&oauth_panel, false)?;
@@ -661,6 +666,7 @@ pub fn present(
     revokers.keep(ui::on_selection_changed(&oauth_provider, {
         let oauth_provider = oauth_provider.clone();
         let oauth_client_id = oauth_client_id.clone();
+        let oauth_client_hint = oauth_client_hint.clone();
         let oauth_tokens = Arc::clone(&oauth_tokens);
         let previous_provider = Arc::clone(&previous_provider);
         move || {
@@ -681,8 +687,19 @@ pub fn present(
             if current.trim().is_empty() || current == previous.default_client_id() {
                 let _ = oauth_client_id.SetText(&provider.default_client_id());
             }
+            let _ = oauth_client_hint.SetText(&provider.client_id_hint());
         }
     })?);
+
+    let client_id_for_signin = oauth_client_id.clone();
+    revokers.keep(ui::on_text_changed(&oauth_client_id, {
+        let oauth_sign_in = oauth_sign_in.clone();
+        move || {
+            let enabled = !ui::text_value(&client_id_for_signin).trim().is_empty();
+            let _ = ui::set_enabled(&oauth_sign_in, enabled);
+        }
+    })?);
+    let _ = ui::set_enabled(&oauth_sign_in, false);
 
     // M4-F: warn when encryption is disabled.
     revokers.keep(ui::on_selection_changed(&imap_security, {

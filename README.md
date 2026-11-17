@@ -39,6 +39,10 @@ never stores passwords outside the OS keyring.
 - STARTTLS is covered by unit tests and manual testing, not the GreenMail
   integration suite. Very large folders (well beyond 5k messages) may feel
   slow because the list is not incrementally virtualized.
+- OAuth2 sign-in needs a client ID from an application you registered with the
+  provider (or an administrator-supplied `MAILIN_*_CLIENT_ID` environment
+  variable). Mailin does not ship a shared one; the wizard explains this and
+  disables browser sign-in until a client ID is present.
 
 ## Install
 

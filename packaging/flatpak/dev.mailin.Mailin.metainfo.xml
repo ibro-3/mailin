@@ -28,6 +28,12 @@
 
   <url type="homepage">https://github.com/ibro-3/mailin</url>
   <url type="bugtracker">https://github.com/ibro-3/mailin/issues</url>
+  <url type="help">https://github.com/ibro-3/mailin#readme</url>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#1c71d8</color>
+    <color type="primary" scheme_preference="dark">#78aeed</color>
+  </branding>
 
   <provides>
     <binary>mailin</binary>
@@ -60,7 +66,7 @@
           <li>Quick-action toggles and message defaults in WinUI preferences, with a restore-defaults button.</li>
           <li>Recipient autocomplete for multi-recipient fields, and confirmation before every permanent deletion on Windows.</li>
         </ul>
-        <p>Known limitation: the WinUI client has no Unified Inbox in this release, and Windows artifacts are unsigned.</p>
+        <p>Known limitations: the WinUI client has no Unified Inbox in this release, Windows artifacts are unsigned, and OAuth2 requires a client ID from an application you registered yourself.</p>
       </description>
     </release>
   </releases>

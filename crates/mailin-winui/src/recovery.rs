@@ -57,11 +57,33 @@ pub fn present(
     }
     ui::append(&root, &buttons)?;
 
+    let revokers = ui::Revokers::default();
+
+    // A startup failure has no open store, so diagnostics are built from the
+    // error and the log tail rather than from a Mailin instance.
+    let diagnostics = ui::button(
+        "Copy diagnostics",
+        Some("Copy diagnostics"),
+        Some("Copy a redacted report for a bug report"),
+    )?;
+    ui::append(&root, &diagnostics)?;
+    let diagnostics_for_click = diagnostics.clone();
+    revokers.keep(ui::on_click(&diagnostics, {
+        let error = error.to_owned();
+        move || {
+            let report = match mailin_core::Paths::discover() {
+                Ok(paths) => mailin_core::support::build_startup_diagnostics(&paths, Some(&error)),
+                Err(path_error) => format!("Could not discover data paths: {path_error}\n"),
+            };
+            if platform::copy_to_clipboard(&report) {
+                let _ = ui::set_button_label(&diagnostics_for_click, "Copied to clipboard");
+            }
+        }
+    })?);
+
     let window = Window::new().context("could not create the recovery window")?;
     window.SetTitle("Mailin — Recovery")?;
     window.SetContent(&root)?;
-
-    let revokers = ui::Revokers::default();
 
     {
         let state = Arc::clone(&state);
