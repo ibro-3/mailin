@@ -1501,11 +1501,12 @@ pub fn present(
                         // A suggestion was picked: do not re-trigger the search.
                         return;
                     }
-                    let query = entry.text().to_string();
+                    let full_text = entry.text();
+                    let query = mailin_core::compose::active_recipient_token(&full_text);
                     if let Some(source) = debounce_source.borrow_mut().take() {
                         source.remove();
                     }
-                    if query.trim().is_empty() {
+                    if query.is_empty() {
                         if let Some(p) = popover_ref.borrow().as_ref() {
                             p.popdown();
                         }
@@ -1523,14 +1524,15 @@ pub fn present(
                         std::time::Duration::from_millis(150),
                         move || {
                             // Read the text at fire time, not at keystroke time.
-                            let query = entry.text().to_string();
-                            if query.trim().is_empty() {
+                            let full_text = entry.text();
+                            let query = mailin_core::compose::active_recipient_token(&full_text);
+                            if query.is_empty() {
                                 return;
                             }
                             let generation = search_generation.get().wrapping_add(1);
                             search_generation.set(generation);
                             let mailin = std::sync::Arc::clone(&app.mailin);
-                            let query = query.clone();
+                            let query = query.to_owned();
                             let entry = entry.clone();
                             let popover_ref = Rc::clone(&popover_ref);
                             let list_box_ref = Rc::clone(&list_box_ref);
@@ -1598,24 +1600,14 @@ pub fn present(
                                                         // programmatic: it must not
                                                         // re-run the search popover.
                                                         suppress_search.set(true);
-                                                        // Append or replace email in the entry
-                                                        let current = entry.text().to_string();
-                                                        let new_text = if current.trim().is_empty()
-                                                        {
-                                                            email.clone()
-                                                        } else {
-                                                            // Check if we're completing a partial email
-                                                            let parts: Vec<&str> =
-                                                                current.split(',').collect();
-                                                            let mut new_parts = parts.clone();
-                                                            if let Some(last) = new_parts.last_mut()
-                                                            {
-                                                                *last = email.as_str();
-                                                            } else {
-                                                                new_parts.push(&email);
-                                                            }
-                                                            new_parts.join(", ")
-                                                        };
+                                                        // Replace only the active token,
+                                                        // preserving earlier recipients and
+                                                        // the separator style.
+                                                        let current = entry.text();
+                                                        let new_text =
+                                                            mailin_core::compose::complete_active_recipient(
+                                                                &current, &email,
+                                                            );
                                                         entry.set_text(&new_text);
                                                         if let Some(p) =
                                                             popover_ref.borrow().as_ref()

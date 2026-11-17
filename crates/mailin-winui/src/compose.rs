@@ -1432,8 +1432,12 @@ fn setup_contact_autocomplete(
         // The rebuild returns `Result` for the many UI builders it calls; a
         // failure just means no suggestions are shown for this keystroke.
         let rebuild = || -> Result<()> {
-            let query = ui::text_value(&text_box);
-            let query = query.trim();
+            let full_text = ui::text_value(&text_box);
+            let query = mailin_core::compose::active_recipient_token(&full_text);
+            if query.is_empty() {
+                let _ = ui::set_visible(&suggestions_panel, false);
+                return Ok(());
+            }
 
             // Clear existing suggestions. `Children` lives on `IPanel`, one
             // interface up from the panel's primary interface.
@@ -1448,11 +1452,6 @@ fn setup_contact_autocomplete(
                 }
             };
             let _ = children.Clear();
-
-            if query.is_empty() {
-                let _ = ui::set_visible(&suggestions_panel, false);
-                return Ok(());
-            }
 
             // Search contacts
             if let Ok(contacts) = app.mailin.store().search_contacts(&account_id, query, 10) {
@@ -1501,19 +1500,8 @@ fn setup_contact_autocomplete(
                     )?;
                     revokers_for_handler.keep(ui::on_click(&button, move || {
                         let current = ui::text_value(&text_box);
-                        let new_text = if current.trim().is_empty() {
-                            email.clone()
-                        } else {
-                            // Append or replace last email in comma-separated list
-                            let parts: Vec<&str> = current.split(',').collect();
-                            let mut new_parts = parts.clone();
-                            if let Some(last) = new_parts.last_mut() {
-                                *last = email.as_str();
-                            } else {
-                                new_parts.push(&email);
-                            }
-                            new_parts.join(", ")
-                        };
+                        let new_text =
+                            mailin_core::compose::complete_active_recipient(&current, &email);
                         let _ = text_box.SetText(&new_text);
                         let _ = ui::set_visible(&suggestions_panel, false);
                     })?);
