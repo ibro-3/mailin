@@ -452,6 +452,38 @@ pub fn quick_action_restore_states(actions: &[QuickAction]) -> Vec<bool> {
         .collect()
 }
 
+/// Apply toggle states to the current quick-action list. Preserves the
+/// existing order, removes disabled actions, and appends newly enabled actions
+/// in the order they appear in `toggles`. Actions not mentioned in `toggles`
+/// keep their current state. Pure helper so both front-ends can share the
+/// toggle semantics.
+pub fn reconcile_quick_action_items(
+    current: &[QuickAction],
+    toggles: &[(QuickAction, bool)],
+) -> Vec<QuickAction> {
+    let mut result: Vec<QuickAction> = Vec::new();
+
+    // Keep existing actions in their current order, unless explicitly disabled.
+    for &action in current {
+        let enabled = toggles
+            .iter()
+            .find(|(candidate, _)| *candidate == action)
+            .is_none_or(|(_, enabled)| *enabled);
+        if enabled && !result.contains(&action) {
+            result.push(action);
+        }
+    }
+
+    // Append newly enabled actions in the order the toggles are presented.
+    for &(action, enabled) in toggles {
+        if enabled && !result.contains(&action) {
+            result.push(action);
+        }
+    }
+
+    result
+}
+
 #[cfg(unix)]
 fn restrict_to_owner(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -492,6 +524,71 @@ mod tests {
     #[test]
     fn quick_action_restore_states_is_empty_for_no_rows() {
         assert!(quick_action_restore_states(&[]).is_empty());
+    }
+
+    #[test]
+    fn reconcile_preserves_order_when_nothing_changes() {
+        let current = [QuickAction::Archive, QuickAction::Delete, QuickAction::Flag];
+        assert_eq!(reconcile_quick_action_items(&current, &[]), current);
+    }
+
+    #[test]
+    fn reconcile_removes_disabled_action() {
+        let current = [QuickAction::Archive, QuickAction::Delete, QuickAction::Flag];
+        let toggles = [(QuickAction::Delete, false)];
+        assert_eq!(
+            reconcile_quick_action_items(&current, &toggles),
+            [QuickAction::Archive, QuickAction::Flag]
+        );
+    }
+
+    #[test]
+    fn reconcile_appends_newly_enabled_action_at_end() {
+        let current = [QuickAction::Archive, QuickAction::Delete];
+        let toggles = [(QuickAction::Junk, true), (QuickAction::MarkUnread, true)];
+        assert_eq!(
+            reconcile_quick_action_items(&current, &toggles),
+            [
+                QuickAction::Archive,
+                QuickAction::Delete,
+                QuickAction::Junk,
+                QuickAction::MarkUnread,
+            ]
+        );
+    }
+
+    #[test]
+    fn reconcile_deduplicates_existing_actions() {
+        let current = [
+            QuickAction::Archive,
+            QuickAction::Archive,
+            QuickAction::Delete,
+        ];
+        let toggles = [(QuickAction::Archive, true)];
+        assert_eq!(
+            reconcile_quick_action_items(&current, &toggles),
+            [QuickAction::Archive, QuickAction::Delete]
+        );
+    }
+
+    #[test]
+    fn reconcile_returns_empty_when_everything_disabled() {
+        let current = [QuickAction::Archive, QuickAction::Delete];
+        let toggles = [(QuickAction::Archive, false), (QuickAction::Delete, false)];
+        assert!(reconcile_quick_action_items(&current, &toggles).is_empty());
+    }
+
+    #[test]
+    fn reconcile_is_idempotent() {
+        let current = [QuickAction::Archive, QuickAction::Delete];
+        let toggles = [
+            (QuickAction::Archive, true),
+            (QuickAction::Delete, false),
+            (QuickAction::MarkUnread, true),
+        ];
+        let once = reconcile_quick_action_items(&current, &toggles);
+        let twice = reconcile_quick_action_items(&once, &toggles);
+        assert_eq!(once, twice);
     }
 
     #[test]

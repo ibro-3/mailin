@@ -398,9 +398,11 @@ fn parse_single(name: &str, address: &str) -> Result<Mailbox> {
     })
 }
 
-/// Split on commas or semicolons that are not inside quotes or angle brackets.
-fn split_list(input: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
+/// Byte ranges of the comma/semicolon-separated tokens in `input`, ignoring
+/// separators that are inside quotes or angle brackets. Always yields at least
+/// one (possibly empty) range.
+fn split_list_ranges(input: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
     let mut start = 0;
     let mut in_quotes = false;
     let mut in_angle = false;
@@ -416,14 +418,52 @@ fn split_list(input: &str) -> Vec<&str> {
             '<' if !in_quotes => in_angle = true,
             '>' if !in_quotes => in_angle = false,
             ',' | ';' if !in_quotes && !in_angle => {
-                parts.push(&input[start..index]);
+                ranges.push(start..index);
                 start = index + character.len_utf8();
             }
             _ => {}
         }
     }
-    parts.push(&input[start..]);
-    parts
+    ranges.push(start..input.len());
+    ranges
+}
+
+/// Split on commas or semicolons that are not inside quotes or angle brackets.
+fn split_list(input: &str) -> Vec<&str> {
+    split_list_ranges(input)
+        .into_iter()
+        .map(|range| &input[range])
+        .collect()
+}
+
+/// The recipient token currently being edited: the text after the last comma
+/// or semicolon that is outside quotes and angle brackets. Returns a trimmed
+/// slice; an empty slice when the input ends in a separator.
+pub fn active_recipient_token(input: &str) -> &str {
+    let ranges = split_list_ranges(input);
+    let range = ranges
+        .last()
+        .expect("split_list_ranges yields at least one range");
+    input[range.clone()].trim()
+}
+
+/// Replace the active token (and anything after it) with `email`, preserving
+/// every preceding recipient and the separator style.
+pub fn complete_active_recipient(input: &str, email: &str) -> String {
+    let ranges = split_list_ranges(input);
+    let range = ranges
+        .last()
+        .expect("split_list_ranges yields at least one range")
+        .clone();
+    // Keep the separator and the whitespace after it so the input's style
+    // (e.g. ", " vs ",") is preserved.
+    let token = &input[range.clone()];
+    let leading_ws = token.len() - token.trim_start().len();
+    let start = range.start + leading_ws;
+    let mut result = String::with_capacity(start + email.len());
+    result.push_str(&input[..start]);
+    result.push_str(email);
+    result
 }
 
 fn parse_mailboxes(input: &str) -> Result<Vec<Mailbox>> {
@@ -1361,5 +1401,52 @@ mod tests {
         assert!(text.contains("Content-Type: application/pgp-signature"));
         assert!(text.contains("-----BEGIN PGP SIGNATURE-----"));
         assert!(text.contains("Subject: "));
+    }
+
+    #[test]
+    fn active_recipient_token_covers_separators_quotes_and_unicode() {
+        let cases = [
+            ("", ""),
+            ("a@x, b", "b"),
+            ("a@x; b", "b"),
+            ("\"Doe, Jane\" <jane@x>, bo", "bo"),
+            ("Jane <jane@x>, bo", "bo"),
+            ("a@x, ", ""),
+            ("á@example.com, b", "b"),
+            ("\"Doe, Jáně\" <jane@x>; b", "b"),
+            ("\"Doe, J\\\"ane\" <jane@x>, bo", "bo"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(active_recipient_token(input), expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn complete_active_recipient_replaces_only_the_active_token() {
+        let cases = [
+            ("", "b@y", "b@y"),
+            ("a@x, ", "b@y", "a@x, b@y"),
+            ("a@x, bo", "b@y", "a@x, b@y"),
+            ("a@x; bo", "b@y", "a@x; b@y"),
+            (
+                "\"Doe, Jane\" <jane@x>, bo",
+                "b@y",
+                "\"Doe, Jane\" <jane@x>, b@y",
+            ),
+            ("Jane <jane@x>; bo", "b@y", "Jane <jane@x>; b@y"),
+            (
+                "\"Doe, J\\\"ane\" <jane@x>, bo",
+                "b@y",
+                "\"Doe, J\\\"ane\" <jane@x>, b@y",
+            ),
+            ("bo", "b@y", "b@y"),
+        ];
+        for (input, email, expected) in cases {
+            assert_eq!(
+                complete_active_recipient(input, email),
+                expected,
+                "input {input:?}"
+            );
+        }
     }
 }

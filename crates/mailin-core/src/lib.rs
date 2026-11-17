@@ -53,7 +53,7 @@ pub use client::{
 pub use compose::{ComposeAttachment, OutgoingMessage};
 pub use config::{
     Config, MessageListDensity, Paths, QuickAction, SyncPreferences, Theme, ThreadMode,
-    UiPreferences, quick_action_restore_states,
+    UiPreferences, quick_action_restore_states, reconcile_quick_action_items,
 };
 pub use credentials::{CredentialsStore, MemoryCredentials};
 pub use engine::Engine;
